@@ -74,12 +74,53 @@ def _getenv_bool(name: str, default: bool) -> bool:
 def _require(name: str) -> str:
     value = os.environ.get(name)
     if not value:
+        # Deliberately names only the variable, never a value — this is
+        # the only piece of information ConfigurationError ever carries,
+        # so it can never leak a partially-set secret in exception text.
         raise ConfigurationError(f"Missing required environment variable: {name}")
     return value
 
 
+def _require_secret(name: str) -> "Secret":
+    return Secret(_require(name))
+
+
 class ConfigurationError(RuntimeError):
     """Raised when required configuration is missing or invalid."""
+
+
+class Secret:
+    """Wraps a credential so it can't be accidentally logged or leaked.
+
+    ``repr()``/``str()`` (and therefore f-strings, ``logging`` calls, and a
+    dataclass's default ``__repr__``) never expose the wrapped value — only
+    :meth:`get_secret_value` does, and callers should reach for it only at
+    the point the raw credential is actually needed (e.g. building an
+    ``Authorization`` header), never store or pass around the unwrapped
+    string beyond that.
+    """
+
+    __slots__ = ("_value",)
+
+    def __init__(self, value: str) -> None:
+        self._value = value
+
+    def get_secret_value(self) -> str:
+        return self._value
+
+    def __repr__(self) -> str:
+        return "Secret('***')"
+
+    def __str__(self) -> str:
+        return "***"
+
+    def __eq__(self, other: object) -> bool:
+        if isinstance(other, Secret):
+            return self._value == other._value
+        return NotImplemented
+
+    def __hash__(self) -> int:
+        return hash(self._value)
 
 
 @dataclass(frozen=True)
@@ -87,14 +128,14 @@ class LiteLLMConfig:
     """Connection settings for the LiteLLM (OpenAI-compatible) gateway."""
 
     url: str
-    api_key: str
+    api_key: Secret
     model: str
 
     @classmethod
     def from_env(cls) -> "LiteLLMConfig":
         return cls(
             url=_require("LITELLM_URL"),
-            api_key=_require("LITELLM_API_KEY"),
+            api_key=_require_secret("LITELLM_API_KEY"),
             model=os.environ.get("LITELLM_MODEL") or DEFAULT_LITELLM_MODEL,
         )
 
@@ -104,13 +145,13 @@ class AWXConfig:
     """Connection settings for AWX."""
 
     url: str
-    token: str
+    token: Secret
     verify_ssl: bool = True
 
     @classmethod
     def from_env(cls) -> "AWXConfig":
         return cls(
             url=_require("AWX_URL").rstrip("/"),
-            token=_require("AWX_TOKEN"),
+            token=_require_secret("AWX_TOKEN"),
             verify_ssl=_getenv_bool("AWX_VERIFY_SSL", True),
         )

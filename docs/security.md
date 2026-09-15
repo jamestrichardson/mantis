@@ -54,7 +54,20 @@ Mantis needs should be exposed as its own narrow, reviewable tool instead.
   ever needs to live in a file that could be committed.
 - `mantis.config` raises `ConfigurationError` immediately if a required
   credential is missing, rather than letting integration code fail later
-  with a less obvious error.
+  with a less obvious error. The error names only the missing *variable*
+  (e.g. `"Missing required environment variable: AWX_TOKEN"`), never a
+  value — including a value belonging to some other, already-set
+  variable.
+- Every credential field (`LiteLLMConfig.api_key`, `AWXConfig.token`) is
+  typed as `mantis.config.Secret`, not a plain `str`. `Secret` redacts
+  itself on `repr()`/`str()` — including through a dataclass's default
+  `__repr__`, an f-string, or a `logging` call — so accidentally logging
+  or printing a config object (e.g. `logger.debug(config)`, an unguarded
+  `print`) cannot leak the raw value. The real value is reachable only
+  via `.get_secret_value()`, called at exactly the two points that
+  legitimately need it (building the AWX `Authorization` header and
+  constructing the LiteLLM client) — grep for `get_secret_value` before
+  adding a new credential field to make sure a new one stays this narrow.
 
 ### LiteLLM virtual keys
 

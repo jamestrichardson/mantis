@@ -70,7 +70,12 @@ Put raw API client code in `mantis/integrations/<system>.py`. It should:
 
 - Accept a config object (add one to `mantis/config.py` if needed,
   following the `AWXConfig`/`LiteLLMConfig` pattern — `from_env()`
-  classmethod, `ConfigurationError` on missing required vars).
+  classmethod, `ConfigurationError` on missing required vars). Type any
+  credential field as `mantis.config.Secret` (via the `_require_secret()`
+  helper), not a plain `str` — see [docs/security.md](security.md) for
+  why. Only unwrap it with `.get_secret_value()` at the exact point the
+  raw value is needed (building a header, constructing a client), never
+  earlier.
 - Know how to authenticate and make requests, and raise a
   system-specific exception (e.g. `AWXError`) on failure.
 - Have zero knowledge of agents, prompts, or LLM schemas.

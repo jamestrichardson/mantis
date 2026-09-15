@@ -127,7 +127,9 @@ class AgentRuntime:
         if not base_url.endswith("/v1"):
             base_url = f"{base_url}/v1"
 
-        self._client = OpenAI(base_url=base_url, api_key=self.model_config.api_key)
+        self._client = OpenAI(
+            base_url=base_url, api_key=self.model_config.api_key.get_secret_value()
+        )
         self._resolved_tools: dict[str, Tool] = {
             tool.name: tool for tool in self.registry.subset(self.tools)
         }

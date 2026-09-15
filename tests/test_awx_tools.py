@@ -9,7 +9,7 @@ import httpx
 import pytest
 import respx
 
-from mantis.config import AWXConfig
+from mantis.config import AWXConfig, Secret
 from mantis.integrations.awx import AWXClient, AWXError, AWXStdoutError
 from mantis.tools._text import extract_excerpt, tail
 from mantis.tools.awx import FAILURE_MARKERS, awx_recent_failed_jobs
@@ -18,7 +18,9 @@ from mantis.tools.awx import FAILURE_MARKERS, awx_recent_failed_jobs
 @pytest.fixture
 def awx_client() -> AWXClient:
     return AWXClient(
-        config=AWXConfig(url="https://awx.example.test", token="tok", verify_ssl=True)
+        config=AWXConfig(
+            url="https://awx.example.test", token=Secret("tok"), verify_ssl=True
+        )
     )
 
 

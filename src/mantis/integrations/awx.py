@@ -54,7 +54,7 @@ class AWXClient:
         return httpx.Client(
             base_url=self.config.url,
             headers={
-                "Authorization": f"Bearer {self.config.token}",
+                "Authorization": f"Bearer {self.config.token.get_secret_value()}",
                 "Accept": accept,
             },
             verify=self.config.verify_ssl,
