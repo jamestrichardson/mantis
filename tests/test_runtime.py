@@ -12,7 +12,7 @@ from typing import Any
 
 import pytest
 
-from mantis.config import LiteLLMConfig
+from mantis.config import LiteLLMConfig, Secret
 from mantis.registry import Tool, ToolRegistry
 from mantis.runtime import AgentRuntime, MaxIterationsExceededError
 
@@ -92,7 +92,7 @@ def _build_runtime(
         name="test-agent",
         system_prompt="You are a test agent.",
         tools=tools or [],
-        model_config=LiteLLMConfig(url="http://localhost:4000", api_key="k", model="m"),
+        model_config=LiteLLMConfig(url="http://localhost:4000", api_key=Secret("k"), model="m"),
         registry=registry or ToolRegistry(),
         max_iterations=max_iterations,
         tool_call_budget=tool_call_budget,
