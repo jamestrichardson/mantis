@@ -10,13 +10,24 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, NamedTuple
 
 import httpx
 
 from mantis.config import AWXConfig
 
 logger = logging.getLogger(__name__)
+
+
+class JobListPage(NamedTuple):
+    """One page of AWX job-list results, plus the total match count.
+
+    ``total_count`` lets a caller detect truncation (more matching jobs
+    exist in AWX than were returned in ``jobs``) without a second request.
+    """
+
+    jobs: list[dict[str, Any]]
+    total_count: int
 
 # AWX returns a short informational payload instead of full stdout when the
 # output is too large to display inline, and expects callers to re-request
@@ -67,13 +78,19 @@ class AWXClient:
         status: str | None = None,
         order_by: str | None = None,
         page_size: int = 10,
-    ) -> list[dict[str, Any]]:
-        """Return job records from ``/api/v2/jobs/``.
+    ) -> JobListPage:
+        """Return one page of job records from ``/api/v2/jobs/``.
 
         Args:
             status: Filter by AWX job status (e.g. "failed").
             order_by: AWX ``order_by`` value (e.g. "-finished").
             page_size: Maximum number of jobs to request from AWX.
+
+        Returns:
+            A :class:`JobListPage` with the returned jobs and AWX's
+            reported total match count (``count`` in the API response),
+            so a caller can tell whether more matching jobs exist than
+            were returned without a second request.
         """
         params: dict[str, Any] = {"page_size": page_size}
         if status is not None:
@@ -93,7 +110,8 @@ class AWXClient:
         except ValueError as exc:
             raise AWXError(f"AWX returned non-JSON response listing jobs: {exc}") from exc
 
-        return payload.get("results", [])
+        jobs = payload.get("results", [])
+        return JobListPage(jobs=jobs, total_count=payload.get("count", len(jobs)))
 
     def get_job(self, job_id: int) -> dict[str, Any]:
         """Return the full job detail record for ``job_id``."""

@@ -52,16 +52,17 @@ convention).
 ```
 src/mantis/
 ├── config.py              # env-var configuration (LiteLLMConfig, AWXConfig)
-├── registry.py             # ToolRegistry, Tool, default_registry
-├── runtime.py               # AgentRuntime: shared model/tool loop
-├── cli.py                    # `mantis <agent-name> [prompt]` dispatcher
+├── contracts.py            # shared tool-result contract (QueryMeta, ToolError)
+├── registry.py               # ToolRegistry, Tool, default_registry
+├── runtime.py                  # AgentRuntime: shared model/tool loop
+├── cli.py                        # `mantis <agent-name> [prompt]` dispatcher
 ├── integrations/
-│   └── awx.py                  # AWXClient: raw AWX API access
+│   └── awx.py                        # AWXClient: raw AWX API access
 ├── tools/
-│   ├── _text.py                 # excerpt/tail preprocessing helpers
-│   └── awx.py                    # awx_recent_failed_jobs (semantic tool)
+│   ├── _text.py                        # excerpt/tail preprocessing helpers
+│   └── awx.py                            # awx_recent_failed_jobs (semantic tool)
 └── agents/
-    └── awx_troubleshooter.py       # AWX Troubleshooting Agent
+    └── awx_troubleshooter.py               # AWX Troubleshooting Agent
 ```
 
 ## Adding an integration

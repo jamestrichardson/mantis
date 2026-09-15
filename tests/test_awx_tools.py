@@ -47,6 +47,20 @@ def test_list_jobs_sends_expected_query_params(awx_client: AWXClient):
 
 
 @respx.mock
+def test_list_jobs_returns_total_count_for_truncation_detection(awx_client: AWXClient):
+    respx.get("https://awx.example.test/api/v2/jobs/").mock(
+        return_value=httpx.Response(
+            200, json={"count": 17, "results": [{"id": 1}, {"id": 2}]}
+        )
+    )
+
+    page = awx_client.list_jobs(status="failed", order_by="-finished", page_size=2)
+
+    assert page.total_count == 17
+    assert len(page.jobs) == 2
+
+
+@respx.mock
 def test_list_jobs_raises_awx_error_on_http_failure(awx_client: AWXClient):
     respx.get("https://awx.example.test/api/v2/jobs/").mock(
         return_value=httpx.Response(500, text="boom")
@@ -220,6 +234,47 @@ def test_awx_recent_failed_jobs_returns_job_summaries(monkeypatch):
     assert "No route to host" in job["failure_excerpt"]
     assert job["stdout_retrieval_error"] is None
 
+    # Result contract (mantis.contracts.QueryMeta) adoption: every result
+    # carries provenance, and with only 1 job in AWX matching (no "count"
+    # in the mocked payload defaults to len(results)), nothing was
+    # truncated.
+    assert result["meta"]["source_system"] == "awx"
+    assert result["meta"]["truncated"] is False
+    assert "query_time" in result["meta"]
+
+
+@respx.mock
+def test_awx_recent_failed_jobs_reports_truncation_when_more_jobs_exist():
+    jobs_payload = {
+        "count": 17,
+        "results": [
+            {
+                "id": 101,
+                "name": "deploy-webservers",
+                "status": "failed",
+                "started": "2026-09-14T10:00:00Z",
+                "finished": "2026-09-14T10:05:00Z",
+                "elapsed": 300.0,
+                "failed": True,
+                "job_explanation": "",
+            }
+        ],
+    }
+    respx.get("https://awx.example.test/api/v2/jobs/").mock(
+        return_value=httpx.Response(200, json=jobs_payload)
+    )
+    respx.get(
+        "https://awx.example.test/api/v2/jobs/101/stdout/",
+        params={"format": "txt"},
+    ).mock(return_value=httpx.Response(200, text="ok"))
+
+    result = awx_recent_failed_jobs(limit=1)
+
+    # AWX reports 17 total matching failed jobs but only 1 was returned
+    # (limit=1) — that's truncation, distinct from "fewer jobs exist than
+    # requested."
+    assert result["meta"]["truncated"] is True
+
 
 @respx.mock
 def test_awx_recent_failed_jobs_clamps_limit_above_max():
@@ -263,3 +318,66 @@ def test_awx_recent_failed_jobs_separates_stdout_error_from_job_failure():
     assert job["failure_excerpt"] == ""
     # The AWX-reported failure fields must remain untouched by the stdout error.
     assert job["failed"] is True
+
+    # stdout_retrieval_error is a typed ToolError (mantis.contracts), not a
+    # bare string — its "kind" must never be confused with the job's own
+    # failure reason above.
+    assert job["stdout_retrieval_error"]["kind"] == "retrieval_error"
+    assert "message" in job["stdout_retrieval_error"]
+
+
+@respx.mock
+def test_awx_recent_failed_jobs_contract_adoption_keeps_every_prior_field():
+    # Regression test for issue #23's acceptance criterion: adopting the
+    # shared result contract must not drop any AWX-specific field that
+    # existed before the contract was introduced.
+    jobs_payload = {
+        "results": [
+            {
+                "id": 303,
+                "name": "job-with-everything",
+                "status": "failed",
+                "started": "2026-09-14T10:00:00Z",
+                "finished": "2026-09-14T10:05:00Z",
+                "elapsed": 300.0,
+                "failed": True,
+                "job_explanation": "some explanation",
+                "inventory": 5,
+                "project": 3,
+                "job_template": 7,
+                "summary_fields": {
+                    "inventory": {"name": "production"},
+                    "project": {"name": "site-ops"},
+                    "job_template": {"name": "deploy-webservers"},
+                },
+            }
+        ]
+    }
+    respx.get("https://awx.example.test/api/v2/jobs/").mock(
+        return_value=httpx.Response(200, json=jobs_payload)
+    )
+    respx.get(
+        "https://awx.example.test/api/v2/jobs/303/stdout/",
+        params={"format": "txt"},
+    ).mock(return_value=httpx.Response(200, text="ok"))
+
+    result = awx_recent_failed_jobs(limit=1)
+
+    assert set(result.keys()) >= {"meta", "requested_limit", "returned_count", "jobs"}
+    job = result["jobs"][0]
+    assert set(job.keys()) >= {
+        "id",
+        "name",
+        "status",
+        "started",
+        "finished",
+        "elapsed",
+        "failed",
+        "job_explanation",
+        "inventory",
+        "project",
+        "job_template",
+        "stdout_retrieval_error",
+        "failure_excerpt",
+        "stdout_tail",
+    }

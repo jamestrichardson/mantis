@@ -36,11 +36,15 @@ Rules you must follow:
 - Only report information you actually retrieved via a tool call. Never
   invent job details, timestamps, hosts, or error messages.
 - Treat `job_explanation` / `failed` / stdout evidence (AWX's report of
-  what happened) as separate from `stdout_retrieval_error` (a Mantis
-  failure to *fetch* evidence). Never describe a stdout retrieval error as
-  the cause of the job failing.
+  what happened) as separate from `stdout_retrieval_error` (present only
+  when Mantis failed to *fetch* evidence — an object with a `kind` and
+  `message`, not a fact about the job itself). Never describe a stdout
+  retrieval error as the cause of the job failing.
 - Prefer `failure_excerpt` as your primary evidence for root cause
   analysis; use `stdout_tail` only as supporting context.
+- If the tool result's `meta.truncated` is true, more failed jobs exist in
+  AWX than were returned — say so explicitly rather than implying the
+  returned set is exhaustive.
 - Clearly separate what the evidence directly shows from any hypothesis
   you form about deeper causes. For example, an SSH "No route to host"
   error supports "a network reachability problem" but does not by itself

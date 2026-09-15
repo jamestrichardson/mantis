@@ -4,6 +4,13 @@ Currently provides ``awx_recent_failed_jobs``, which fetches the most
 recently finished failed jobs, retrieves their stdout, and preprocesses
 that stdout into a small, high-signal excerpt plus a bounded tail —
 instead of handing multi-megabyte Ansible output to the model.
+
+Adopts the shared result contract from ``mantis.contracts`` (see that
+module for the design rationale): a ``meta`` key carries provenance
+(source system, query time, truncation), and any tool-level retrieval
+failure is a typed :class:`~mantis.contracts.ToolError` instead of a bare
+string. This is additive — every previously existing field stays exactly
+where it was.
 """
 
 from __future__ import annotations
@@ -12,6 +19,7 @@ import logging
 from typing import Any
 
 from mantis.config import AWXConfig
+from mantis.contracts import QueryMeta, ToolError, ToolErrorKind
 from mantis.integrations.awx import AWXClient, AWXError, AWXStdoutError
 from mantis.registry import Tool, default_registry
 from mantis.tools._text import extract_excerpt, tail
@@ -75,8 +83,12 @@ def _summarize_job(client: AWXClient, job: dict[str, Any]) -> dict[str, Any]:
         # Deliberately separate from the AWX job's own failure reason
         # (job_explanation / failed above): this represents our failure to
         # *retrieve* evidence, not evidence of an infrastructure failure.
+        # Tagged with the shared ToolErrorKind vocabulary (mantis.contracts)
+        # rather than left as a bare string.
         logger.warning("Could not retrieve stdout for AWX job %s: %s", job_id, exc)
-        result["stdout_retrieval_error"] = str(exc)
+        result["stdout_retrieval_error"] = ToolError(
+            kind=ToolErrorKind.RETRIEVAL_ERROR, message=str(exc)
+        ).to_dict()
         result["failure_excerpt"] = ""
         result["stdout_tail"] = ""
         return result
@@ -96,17 +108,22 @@ def awx_recent_failed_jobs(limit: int = 5) -> dict[str, Any]:
             ``[1, MAX_FAILED_JOBS_LIMIT]``.
 
     Returns:
-        A dict with ``requested_limit``, ``returned_count``, and ``jobs``
-        (a list of job summaries, most recently finished first). Each job
-        summary separates AWX-reported failure information from any error
-        Mantis encountered while retrieving stdout evidence
-        (``stdout_retrieval_error``).
+        A dict with ``meta`` (provenance — see ``mantis.contracts.QueryMeta``),
+        ``requested_limit``, ``returned_count``, and ``jobs`` (a list of
+        job summaries, most recently finished first). Each job summary
+        separates AWX-reported failure information from any error Mantis
+        encountered while retrieving stdout evidence
+        (``stdout_retrieval_error``, a typed
+        ``mantis.contracts.ToolError`` when present). ``meta.truncated``
+        is true when AWX has more matching failed jobs than were
+        returned — distinct from simply fewer jobs existing than
+        ``limit`` requested.
     """
     clamped_limit = max(1, min(limit, MAX_FAILED_JOBS_LIMIT))
 
     client = _get_client()
     try:
-        jobs = client.list_jobs(
+        page = client.list_jobs(
             status="failed",
             order_by="-finished",
             page_size=clamped_limit,
@@ -114,9 +131,14 @@ def awx_recent_failed_jobs(limit: int = 5) -> dict[str, Any]:
     except AWXError as exc:
         raise AWXError(f"Could not list recent failed AWX jobs: {exc}") from exc
 
-    summarized = [_summarize_job(client, job) for job in jobs]
+    summarized = [_summarize_job(client, job) for job in page.jobs]
+    meta = QueryMeta(
+        source_system="awx",
+        truncated=page.total_count > len(summarized),
+    )
 
     return {
+        "meta": meta.to_dict(),
         "requested_limit": limit,
         "returned_count": len(summarized),
         "jobs": summarized,
@@ -133,8 +155,11 @@ AWX_RECENT_FAILED_JOBS_SCHEMA = {
             "template, project, inventory, timing) plus preprocessed "
             "stdout evidence: a failure_excerpt of high-value lines and a "
             "bounded stdout_tail. Any error retrieving a job's stdout is "
-            "reported separately as stdout_retrieval_error and must not "
-            "be treated as the job's own failure reason. Read-only."
+            "reported separately as stdout_retrieval_error (an object with "
+            "kind/message) and must not be treated as the job's own "
+            "failure reason. A top-level meta field reports when this was "
+            "queried and whether more matching failed jobs exist than were "
+            "returned (meta.truncated). Read-only."
         ),
         "parameters": {
             "type": "object",
