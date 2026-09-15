@@ -152,6 +152,30 @@ can never be confused with the AWX job's own reported failure reason —
 this distinction is enforced in the tool layer and again in the AWX
 Troubleshooter's system prompt.
 
+## Withholding tools once an agent has what it needs
+
+`AgentRuntime` accepts a `tool_call_budget`: once that many tool calls
+have succeeded in a run, tool schemas stop being offered on later
+iterations, forcing a plain-text final answer. The AWX Troubleshooter sets
+`tool_call_budget=1` — it only ever needs one successful
+`awx_recent_failed_jobs` call.
+
+This isn't just a correctness nicety (though it is one — the model
+literally cannot loop on repeat calls once no tools are on offer). For
+local models served through Ollama/llama.cpp behind LiteLLM, sending
+`tools` in a request activates grammar-constrained decoding for the
+*entire* response, not only the decision of whether to call a function.
+That constraint is checked per token, and it applies even when the model
+ends up writing a long, plain-text summary — which is precisely the kind
+of thing that turns a few seconds of generation into several minutes.
+Withholding `tools` once nothing further needs to be looked up lets that
+final answer generate at normal (ungrammared) speed.
+
+`tool_call_budget` defaults to `None` (unlimited) so a future multi-tool
+agent that genuinely needs several different tools in sequence isn't
+artificially cut off after its first call — this is a per-agent choice,
+not a runtime-wide one.
+
 ## Future direction (architecture already supports)
 
 - **Incident Triage Agent**: AWX + Prometheus + Loki + Kubernetes +

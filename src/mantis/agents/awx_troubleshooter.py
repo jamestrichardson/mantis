@@ -14,7 +14,8 @@ import sys
 # Importing mantis.tools registers all built-in tools (including AWX) into
 # the shared default_registry as a side effect.
 import mantis.tools  # noqa: F401
-from mantis.runtime import AgentRuntime
+from mantis.config import ConfigurationError
+from mantis.runtime import AgentRuntime, MaxIterationsExceededError
 
 AGENT_NAME = "awx-troubleshooter"
 
@@ -62,11 +63,28 @@ summary organized and skimmable for an on-call operator.
 
 
 def build_runtime() -> AgentRuntime:
-    """Construct the AWX Troubleshooter's :class:`AgentRuntime`."""
+    """Construct the AWX Troubleshooter's :class:`AgentRuntime`.
+
+    ``tool_call_budget=1``: this agent only ever needs one successful
+    ``awx_recent_failed_jobs`` call. Once it has one, tool schemas are
+    withheld on later iterations so the model writes its final summary
+    without tool-call grammar constraints in effect — this is both a
+    correctness measure (the model literally cannot loop on repeat calls)
+    and, for local models served through Ollama/llama.cpp behind LiteLLM,
+    a significant speed one (grammar-constrained decoding applies to the
+    whole response whenever ``tools`` is present, not just the decision of
+    whether to call one).
+
+    ``temperature=0.1``: keeps a smaller local model's output focused and
+    consistently formatted rather than prone to rambling or malformed tool
+    calls.
+    """
     return AgentRuntime(
         name=AGENT_NAME,
         system_prompt=SYSTEM_PROMPT,
         tools=ALLOWED_TOOLS,
+        tool_call_budget=1,
+        temperature=0.1,
     )
 
 
@@ -75,8 +93,23 @@ def main(argv: list[str] | None = None) -> int:
     argv = sys.argv[1:] if argv is None else argv
     prompt = " ".join(argv).strip() or DEFAULT_PROMPT
 
-    runtime = build_runtime()
-    answer = runtime.run(prompt)
+    try:
+        runtime = build_runtime()
+        answer = runtime.run(prompt)
+    except ConfigurationError as exc:
+        print(f"Configuration error: {exc}", file=sys.stderr)
+        return 1
+    except MaxIterationsExceededError:
+        print(
+            "The model could not produce a final answer within the "
+            "iteration limit (see the log output above for what it tried). "
+            "This can happen with smaller/local models that struggle to "
+            "stop calling tools even once they have the data — try a "
+            "narrower prompt, or a smaller `limit`.",
+            file=sys.stderr,
+        )
+        return 1
+
     print(answer)
     return 0
 
