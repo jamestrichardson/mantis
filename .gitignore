@@ -148,7 +148,13 @@ activemq-data/
 *.sage.py
 
 # Environments
+# Mantis's local-dev env-file convention (see docs/configuration.md):
+# .env, .env.<name>, and .env.<name>.local hold real values and must never
+# be committed. Only *.example templates are tracked.
 .env
+.env.*
+!.env.example
+!.env.*.example
 .envrc
 .venv
 env/

@@ -1,0 +1,240 @@
+"""Tests for mantis.runtime.AgentRuntime.
+
+The OpenAI client is stubbed out entirely (no network calls) so these
+tests exercise only the runtime's dispatch/loop logic.
+"""
+
+from __future__ import annotations
+
+import json
+from dataclasses import dataclass
+from typing import Any
+
+import pytest
+
+from mantis.config import LiteLLMConfig
+from mantis.registry import Tool, ToolRegistry
+from mantis.runtime import AgentRuntime, MaxIterationsExceededError
+
+
+@dataclass
+class FakeFunctionCall:
+    name: str
+    arguments: str
+
+
+@dataclass
+class FakeToolCall:
+    id: str
+    function: FakeFunctionCall
+
+
+@dataclass
+class FakeMessage:
+    content: str | None = None
+    tool_calls: list[FakeToolCall] | None = None
+
+
+@dataclass
+class FakeChoice:
+    message: FakeMessage
+
+
+@dataclass
+class FakeResponse:
+    choices: list[FakeChoice]
+
+
+class FakeCompletions:
+    def __init__(self, responses: list[FakeResponse]):
+        self._responses = list(responses)
+        self.calls: list[dict[str, Any]] = []
+
+    def create(self, **kwargs):
+        self.calls.append(kwargs)
+        if not self._responses:
+            raise AssertionError("FakeCompletions ran out of scripted responses")
+        return self._responses.pop(0)
+
+
+class FakeChat:
+    def __init__(self, responses: list[FakeResponse]):
+        self.completions = FakeCompletions(responses)
+
+
+class FakeOpenAIClient:
+    def __init__(self, responses: list[FakeResponse]):
+        self.chat = FakeChat(responses)
+
+
+def _tool_call(call_id: str, name: str, arguments: dict[str, Any]) -> FakeToolCall:
+    return FakeToolCall(id=call_id, function=FakeFunctionCall(name=name, arguments=json.dumps(arguments)))
+
+
+def _final_message_response(text: str) -> FakeResponse:
+    return FakeResponse(choices=[FakeChoice(message=FakeMessage(content=text, tool_calls=None))])
+
+
+def _tool_call_response(*calls: FakeToolCall) -> FakeResponse:
+    return FakeResponse(choices=[FakeChoice(message=FakeMessage(content=None, tool_calls=list(calls)))])
+
+
+def _build_runtime(
+    responses: list[FakeResponse],
+    *,
+    tools: list[str] | None = None,
+    registry: ToolRegistry | None = None,
+    max_iterations: int = 8,
+) -> AgentRuntime:
+    runtime = AgentRuntime(
+        name="test-agent",
+        system_prompt="You are a test agent.",
+        tools=tools or [],
+        model_config=LiteLLMConfig(url="http://localhost:4000", api_key="k", model="m"),
+        registry=registry or ToolRegistry(),
+        max_iterations=max_iterations,
+    )
+    runtime._client = FakeOpenAIClient(responses)
+    return runtime
+
+
+def _echo_tool(name: str = "echo", handler=None) -> Tool:
+    schema = {
+        "type": "function",
+        "function": {"name": name, "description": "echoes input", "parameters": {}},
+    }
+    return Tool(name=name, schema=schema, handler=handler or (lambda **kw: {"echo": kw}))
+
+
+def test_run_returns_final_answer_with_no_tool_calls():
+    runtime = _build_runtime([_final_message_response("hello there")])
+
+    result = runtime.run("hi")
+
+    assert result == "hello there"
+
+
+def test_run_dispatches_tool_call_and_returns_final_answer():
+    registry = ToolRegistry()
+    registry.register(_echo_tool(handler=lambda x: {"got": x}))
+
+    responses = [
+        _tool_call_response(_tool_call("call_1", "echo", {"x": 1})),
+        _final_message_response("done"),
+    ]
+    runtime = _build_runtime(responses, tools=["echo"], registry=registry)
+
+    result = runtime.run("do the thing")
+
+    assert result == "done"
+    assert runtime.call_log[-1].outcome == "ok"
+    # The tool result must be fed back to the model as a tool message.
+    second_call_messages = runtime._client.chat.completions.calls[1]["messages"]
+    tool_messages = [m for m in second_call_messages if m["role"] == "tool"]
+    assert json.loads(tool_messages[0]["content"]) == {"got": 1}
+
+
+def test_run_handles_unknown_tool_cleanly():
+    responses = [
+        _tool_call_response(_tool_call("call_1", "not_registered", {})),
+        _final_message_response("recovered"),
+    ]
+    runtime = _build_runtime(responses, tools=[])
+
+    result = runtime.run("do the thing")
+
+    assert result == "recovered"
+    assert runtime.call_log[-1].outcome == "unknown_tool"
+
+
+def test_run_handles_malformed_arguments_cleanly():
+    registry = ToolRegistry()
+    registry.register(_echo_tool())
+
+    bad_call = FakeToolCall(id="call_1", function=FakeFunctionCall(name="echo", arguments="{not json"))
+    responses = [
+        _tool_call_response(bad_call),
+        _final_message_response("recovered"),
+    ]
+    runtime = _build_runtime(responses, tools=["echo"], registry=registry)
+
+    result = runtime.run("do the thing")
+
+    assert result == "recovered"
+    assert runtime.call_log[-1].outcome == "bad_arguments"
+
+
+def test_run_handles_integration_exception_cleanly():
+    def boom(**kwargs):
+        raise RuntimeError("integration exploded")
+
+    registry = ToolRegistry()
+    registry.register(_echo_tool(handler=boom))
+
+    responses = [
+        _tool_call_response(_tool_call("call_1", "echo", {})),
+        _final_message_response("recovered"),
+    ]
+    runtime = _build_runtime(responses, tools=["echo"], registry=registry)
+
+    result = runtime.run("do the thing")
+
+    assert result == "recovered"
+    assert runtime.call_log[-1].outcome == "error"
+    assert "integration exploded" in runtime.call_log[-1].detail
+
+
+def test_run_detects_exact_duplicate_tool_calls():
+    registry = ToolRegistry()
+    call_count = {"n": 0}
+
+    def counting_handler(**kwargs):
+        call_count["n"] += 1
+        return {"n": call_count["n"]}
+
+    registry.register(_echo_tool(handler=counting_handler))
+
+    responses = [
+        _tool_call_response(_tool_call("call_1", "echo", {"x": 1})),
+        _tool_call_response(_tool_call("call_2", "echo", {"x": 1})),
+        _final_message_response("done"),
+    ]
+    runtime = _build_runtime(responses, tools=["echo"], registry=registry)
+
+    result = runtime.run("do the thing")
+
+    assert result == "done"
+    assert call_count["n"] == 1  # handler only actually executed once
+    assert runtime.call_log[-1].outcome == "duplicate"
+
+
+def test_run_raises_when_max_iterations_exceeded():
+    registry = ToolRegistry()
+    registry.register(_echo_tool())
+
+    # Always returns a tool call, never a final answer.
+    responses = [
+        _tool_call_response(_tool_call(f"call_{i}", "echo", {"x": i})) for i in range(3)
+    ]
+    runtime = _build_runtime(responses, tools=["echo"], registry=registry, max_iterations=3)
+
+    with pytest.raises(MaxIterationsExceededError):
+        runtime.run("do the thing")
+
+
+def test_tool_choice_is_never_sent():
+    runtime = _build_runtime([_final_message_response("hi")])
+
+    runtime.run("hello")
+
+    call_kwargs = runtime._client.chat.completions.calls[0]
+    assert "tool_choice" not in call_kwargs
+
+
+def test_no_tools_key_sent_when_agent_has_no_tools():
+    runtime = _build_runtime([_final_message_response("hi")], tools=[])
+
+    runtime.run("hello")
+
+    call_kwargs = runtime._client.chat.completions.calls[0]
+    assert "tools" not in call_kwargs
