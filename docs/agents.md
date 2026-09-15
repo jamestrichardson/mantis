@@ -34,11 +34,22 @@ Every agent runs through `mantis.runtime.AgentRuntime`, which:
   messages.
 - Loops until the model produces a plain-text answer (no further tool
   calls), or `max_iterations` is reached (`MaxIterationsExceededError`).
-- Detects and short-circuits exact duplicate tool calls (same name, same
-  arguments, already executed) to protect against smaller local models
-  getting stuck repeating a call.
+- Detects exact duplicate tool calls (same name, same arguments, already
+  executed) and replays the *cached prior result* instead of
+  re-executing — a smaller local model that re-asks for the same data
+  still gets real evidence, never an error that would starve it and
+  risk it echoing that error back as a "final answer."
+- Can be given a `tool_call_budget`: once that many tool calls have
+  succeeded, tool schemas are withheld on later iterations so the model
+  is forced to answer. This both guarantees the model can't loop on
+  repeat calls and — for local models where `tools` triggers
+  grammar-constrained decoding for the whole response — keeps the final
+  answer fast. See [docs/architecture.md](architecture.md#withholding-tools-once-an-agent-has-what-it-needs).
 - Never sends `tool_choice` (some providers behind LiteLLM, e.g. Ollama,
   reject or mishandle it).
+- Optionally passes `temperature` through to the model call, when an
+  agent sets one — useful for keeping smaller local models focused and
+  consistently formatted.
 - Catches and cleanly reports (never raises past the loop): malformed
   tool-call arguments, unknown tool names, and exceptions raised by a
   tool's handler.
@@ -111,6 +122,11 @@ directly in the agent module.
   only call something a "recurring pattern" with at least two
   corroborating jobs; state explicitly when fewer failed jobs exist than
   requested or when root cause is uncertain.
+- **Runtime tuning**: `tool_call_budget=1` (one successful call is all
+  this agent ever needs — see
+  [docs/architecture.md](architecture.md#withholding-tools-once-an-agent-has-what-it-needs))
+  and `temperature=0.1` for focused, consistently formatted output from
+  smaller local models.
 
 Run it with `mantis awx-troubleshooter` or
 `python -m mantis.agents.awx_troubleshooter`.

@@ -85,6 +85,8 @@ def _build_runtime(
     tools: list[str] | None = None,
     registry: ToolRegistry | None = None,
     max_iterations: int = 8,
+    tool_call_budget: int | None = None,
+    temperature: float | None = None,
 ) -> AgentRuntime:
     runtime = AgentRuntime(
         name="test-agent",
@@ -93,6 +95,8 @@ def _build_runtime(
         model_config=LiteLLMConfig(url="http://localhost:4000", api_key="k", model="m"),
         registry=registry or ToolRegistry(),
         max_iterations=max_iterations,
+        tool_call_budget=tool_call_budget,
+        temperature=temperature,
     )
     runtime._client = FakeOpenAIClient(responses)
     return runtime
@@ -208,6 +212,32 @@ def test_run_detects_exact_duplicate_tool_calls():
     assert runtime.call_log[-1].outcome == "duplicate"
 
 
+def test_duplicate_tool_call_replays_cached_result_not_an_error():
+    # Regression test: a duplicate call must never be answered with an
+    # error that withholds data — a model that re-asks for the same thing
+    # (common with smaller/local models) must still get the real result,
+    # or it has nothing to work with and can end up parroting an error
+    # back as its "final answer" instead of ever producing a real one.
+    registry = ToolRegistry()
+    registry.register(_echo_tool(handler=lambda **kw: {"jobs": ["job-1", "job-2"]}))
+
+    responses = [
+        _tool_call_response(_tool_call("call_1", "echo", {"limit": 5})),
+        _tool_call_response(_tool_call("call_2", "echo", {"limit": 5})),
+        _final_message_response("done"),
+    ]
+    runtime = _build_runtime(responses, tools=["echo"], registry=registry)
+
+    runtime.run("do the thing")
+
+    third_call_messages = runtime._client.chat.completions.calls[2]["messages"]
+    tool_messages = [m for m in third_call_messages if m["role"] == "tool"]
+    duplicate_reply = json.loads(tool_messages[-1]["content"])
+
+    assert "error" not in duplicate_reply
+    assert duplicate_reply["result"] == {"jobs": ["job-1", "job-2"]}
+
+
 def test_run_raises_when_max_iterations_exceeded():
     registry = ToolRegistry()
     registry.register(_echo_tool())
@@ -238,3 +268,66 @@ def test_no_tools_key_sent_when_agent_has_no_tools():
 
     call_kwargs = runtime._client.chat.completions.calls[0]
     assert "tools" not in call_kwargs
+
+
+def test_tool_call_budget_withholds_tools_after_it_is_reached():
+    # Regression test for the real-world slowdown this was added to fix:
+    # once a single-tool agent has a successful result, tool schemas must
+    # stop being offered so the final answer isn't generated under
+    # tool-call grammar constraints (and so the model literally cannot
+    # loop on repeat calls).
+    registry = ToolRegistry()
+    registry.register(_echo_tool(handler=lambda **kw: {"ok": True}))
+
+    responses = [
+        _tool_call_response(_tool_call("call_1", "echo", {"x": 1})),
+        _final_message_response("done"),
+    ]
+    runtime = _build_runtime(
+        responses, tools=["echo"], registry=registry, tool_call_budget=1
+    )
+
+    result = runtime.run("do the thing")
+
+    assert result == "done"
+    first_call_kwargs = runtime._client.chat.completions.calls[0]
+    second_call_kwargs = runtime._client.chat.completions.calls[1]
+    assert "tools" in first_call_kwargs
+    assert "tools" not in second_call_kwargs
+
+
+def test_tool_call_budget_none_keeps_offering_tools_indefinitely():
+    registry = ToolRegistry()
+    registry.register(_echo_tool(handler=lambda **kw: {"ok": True}))
+
+    responses = [
+        _tool_call_response(_tool_call("call_1", "echo", {"x": 1})),
+        _tool_call_response(_tool_call("call_2", "echo", {"x": 2})),
+        _final_message_response("done"),
+    ]
+    runtime = _build_runtime(
+        responses, tools=["echo"], registry=registry, tool_call_budget=None
+    )
+
+    runtime.run("do the thing")
+
+    for call_kwargs in runtime._client.chat.completions.calls:
+        assert "tools" in call_kwargs
+
+
+def test_temperature_is_passed_through_when_set():
+    runtime = _build_runtime([_final_message_response("hi")], temperature=0.1)
+
+    runtime.run("hello")
+
+    call_kwargs = runtime._client.chat.completions.calls[0]
+    assert call_kwargs["temperature"] == 0.1
+
+
+def test_temperature_omitted_when_unset():
+    runtime = _build_runtime([_final_message_response("hi")])
+
+    runtime.run("hello")
+
+    call_kwargs = runtime._client.chat.completions.calls[0]
+    assert "temperature" not in call_kwargs
