@@ -10,8 +10,10 @@ shows about the system being investigated.
 This module defines that shared, small vocabulary:
 
 - :class:`QueryMeta` — provenance for a single tool call (source system,
-  when it was queried, the query window if any, whether the result was
-  truncated), attached as a ``meta`` key on a tool's result.
+  when it was queried vs. when the evidence was observed, the query
+  window if any, whether the result was truncated, and which fields are
+  Mantis-derived interpretation rather than source-reported data),
+  attached as a ``meta`` key on a tool's result.
 - :class:`ToolErrorKind` / :class:`ToolError` — a consistent way to
   represent a *tool-level* failure (couldn't reach/parse the source),
   never to be confused with the observed state of the system under
@@ -105,6 +107,20 @@ class QueryMeta:
             from, e.g. ``"awx"``, ``"prometheus"``, ``"loki"``.
         query_time: ISO 8601 UTC timestamp of when Mantis made this
             query. Defaults to now.
+        observation_time: ISO 8601 UTC timestamp the returned evidence
+            itself pertains to — when the thing being reported on was
+            actually observed, as distinct from ``query_time`` (when
+            Mantis asked about it). Set this at the ``meta`` level only
+            for tools that return a single point-in-time observation
+            (e.g. a Prometheus instant query's value, or a Loki query's
+            "most recent matching line" time). Leave it ``None`` for
+            tools returning multiple discrete records that each carry
+            their own natural timestamp — e.g. AWX's job list, where
+            every returned job has its own ``finished`` time and no
+            single ``meta.observation_time`` could represent the whole
+            batch without being misleading. Document which per-record
+            field serves that purpose instead (see
+            ``mantis.tools.awx.awx_recent_failed_jobs``).
         query_window: For range-style queries (e.g. Prometheus/Loki),
             the ``{"start": ..., "end": ...}`` window that was queried.
             ``None`` for point-in-time queries (e.g. AWX's job list).
@@ -113,14 +129,26 @@ class QueryMeta:
             limit covered). This is distinct from "fewer records exist
             than were requested" — that is not truncation, just a
             smaller true result.
+        derived_fields: Names of fields present in each returned record
+            that are Mantis-generated interpretation of the source data
+            (e.g. AWX's ``failure_excerpt``, computed by Mantis from raw
+            stdout) rather than data returned directly by the source
+            system. This is what makes "evidence vs. Mantis's own
+            interpretation" a machine-checkable distinction — an agent or
+            correlation step can consult ``meta.derived_fields`` instead
+            of having to know, out of band, which fields in a flat record
+            are which. Empty when a tool returns only source-reported
+            data verbatim.
         contract_version: Version of this shared contract shape. See
             :data:`CONTRACT_VERSION`.
     """
 
     source_system: str
     query_time: str = field(default_factory=_utc_now_iso)
+    observation_time: str | None = None
     query_window: dict[str, str] | None = None
     truncated: bool = False
+    derived_fields: list[str] = field(default_factory=list)
     contract_version: str = CONTRACT_VERSION
 
     def to_dict(self) -> dict[str, Any]:

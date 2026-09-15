@@ -44,6 +44,12 @@ FAILURE_MARKERS = [
     "ignored=",
 ]
 
+# Job-summary fields that are Mantis-generated interpretation of raw AWX
+# stdout, not data AWX itself reported. Published via
+# QueryMeta.derived_fields so this distinction is machine-checkable, not
+# just a naming convention — see mantis.contracts.QueryMeta.
+DERIVED_JOB_FIELDS = ("failure_excerpt", "stdout_tail")
+
 _JOB_FIELDS = (
     "id",
     "name",
@@ -117,7 +123,13 @@ def awx_recent_failed_jobs(limit: int = 5) -> dict[str, Any]:
         ``mantis.contracts.ToolError`` when present). ``meta.truncated``
         is true when AWX has more matching failed jobs than were
         returned — distinct from simply fewer jobs existing than
-        ``limit`` requested.
+        ``limit`` requested. ``meta.derived_fields`` names which job
+        fields (``failure_excerpt``, ``stdout_tail``) are Mantis-computed
+        interpretation rather than AWX-reported data.  ``meta.observation_time``
+        is deliberately left unset: this call returns multiple jobs, each
+        with its own natural observation time (its ``finished`` field) —
+        no single batch-level timestamp could represent that without
+        being misleading.
     """
     clamped_limit = max(1, min(limit, MAX_FAILED_JOBS_LIMIT))
 
@@ -135,6 +147,7 @@ def awx_recent_failed_jobs(limit: int = 5) -> dict[str, Any]:
     meta = QueryMeta(
         source_system="awx",
         truncated=page.total_count > len(summarized),
+        derived_fields=list(DERIVED_JOB_FIELDS),
     )
 
     return {

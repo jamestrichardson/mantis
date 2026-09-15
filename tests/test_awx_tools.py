@@ -242,6 +242,16 @@ def test_awx_recent_failed_jobs_returns_job_summaries(monkeypatch):
     assert result["meta"]["truncated"] is False
     assert "query_time" in result["meta"]
 
+    # derived_fields makes "evidence vs. Mantis interpretation" machine
+    # checkable: failure_excerpt/stdout_tail are Mantis-computed, every
+    # other job field is AWX-reported verbatim.
+    assert set(result["meta"]["derived_fields"]) == {"failure_excerpt", "stdout_tail"}
+
+    # observation_time is deliberately unset at the meta level: this call
+    # returns multiple jobs, each with its own natural observation time
+    # (its own "finished" field) — no single batch timestamp applies.
+    assert result["meta"]["observation_time"] is None
+
 
 @respx.mock
 def test_awx_recent_failed_jobs_reports_truncation_when_more_jobs_exist():

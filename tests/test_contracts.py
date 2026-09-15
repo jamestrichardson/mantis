@@ -66,6 +66,31 @@ def test_query_meta_truncated_and_window_default_to_falsy():
 
     assert meta.truncated is False
     assert meta.query_window is None
+    assert meta.observation_time is None
+    assert meta.derived_fields == []
+
+
+def test_query_meta_observation_time_for_point_in_time_tools():
+    # e.g. a Prometheus instant query: one observation, one timestamp.
+    meta = QueryMeta(
+        source_system="prometheus",
+        observation_time="2026-09-14T12:00:00+00:00",
+    )
+
+    payload = meta.to_dict()
+
+    assert payload["observation_time"] == "2026-09-14T12:00:00+00:00"
+
+
+def test_query_meta_derived_fields_names_mantis_computed_fields():
+    meta = QueryMeta(
+        source_system="awx",
+        derived_fields=["failure_excerpt", "stdout_tail"],
+    )
+
+    payload = meta.to_dict()
+
+    assert payload["derived_fields"] == ["failure_excerpt", "stdout_tail"]
 
 
 def test_query_meta_supports_a_query_window_for_range_queries():

@@ -119,10 +119,20 @@ about the system under investigation. `mantis.contracts` defines that
 shared, small vocabulary:
 
 - **`QueryMeta`** — provenance for a single tool call: `source_system`
-  (e.g. `"awx"`, `"prometheus"`), `query_time` (defaults to now),
-  `query_window` (for range-style queries; `None` for point-in-time
-  ones), `truncated` (more matching evidence exists than was returned —
-  distinct from *fewer records existing* than were requested), and
+  (e.g. `"awx"`, `"prometheus"`), `query_time` (when Mantis queried,
+  defaults to now), `observation_time` (when the evidence itself was
+  observed — set only for tools returning one point-in-time result, e.g.
+  a Prometheus instant query; left `None` for tools returning multiple
+  records that each carry their own natural timestamp, like AWX's job
+  list, since no single batch-level value could represent that without
+  being misleading — document which per-record field serves that purpose
+  instead), `query_window` (for range-style queries; `None` for
+  point-in-time ones), `truncated` (more matching evidence exists than
+  was returned — distinct from *fewer records existing* than were
+  requested), `derived_fields` (names of fields in each record that are
+  Mantis-computed interpretation rather than source-reported data — this
+  is what makes "evidence vs. interpretation" a machine-checkable
+  distinction instead of only a naming convention), and
   `contract_version`. Attach it as a `meta: QueryMeta(...).to_dict()` key
   on the tool's result.
 - **`ToolErrorKind` / `ToolError`** — a consistent, typed way to report a
@@ -203,6 +213,11 @@ even as the shared registry grows.
   returned — i.e. more evidence exists than what's in `jobs`. This is
   distinct from simply fewer failed jobs existing than the requested
   `limit`, which is not truncation.
+- `meta.derived_fields` is `["failure_excerpt", "stdout_tail"]`
+  (`mantis.tools.awx.DERIVED_JOB_FIELDS`) — every other job field is
+  AWX-reported verbatim. `meta.observation_time` is left `None`: this
+  call returns multiple jobs, each with its own `finished` timestamp, so
+  no single batch-level observation time applies.
 
 This preprocessing lives entirely in `mantis/tools/_text.py` and
 `mantis/tools/awx.py`; it can be improved (better heuristics, different
