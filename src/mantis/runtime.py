@@ -87,6 +87,23 @@ def _usage_to_dict(usage: Any) -> dict[str, Any] | None:
     return None
 
 
+def _message_to_dict(message: Any) -> dict[str, Any] | None:
+    """Best-effort conversion of an OpenAI-SDK message object to a plain
+    dict, preserving any provider-specific extra fields (the SDK's
+    ``ChatCompletionMessage`` allows extras, so a field like
+    ``reasoning_content`` some backends return alongside/instead of
+    ``content`` survives ``model_dump()`` even though this runtime never
+    reads it directly).
+    """
+    if message is None:
+        return None
+    if hasattr(message, "model_dump"):
+        return message.model_dump()
+    if isinstance(message, dict):
+        return dict(message)
+    return None
+
+
 @dataclass
 class ToolCallLogEntry:
     """A single record of a tool invocation attempt, for observability."""
@@ -171,6 +188,15 @@ class AgentRuntime:
         # return usage data. Consumers (e.g. the eval harness) that want a
         # total can sum the "total_tokens" key across entries.
         self.usage_log: list[dict[str, Any] | None] = []
+        # Diagnostic only: the raw final message, captured only when a run
+        # ends with neither tool calls nor usable answer text — a model
+        # producing no content and no tool_calls despite spending
+        # completion tokens usually means something (a provider-specific
+        # field like reasoning_content, or a malformed tool-call attempt)
+        # landed somewhere this runtime doesn't read. Left None otherwise
+        # to avoid bloating every successful run with a redundant dump of
+        # data already in the returned answer.
+        self.diagnostic_raw_message: dict[str, Any] | None = None
 
     def _tool_schemas(self) -> list[dict[str, Any]]:
         return [dict(tool.schema) for tool in self._resolved_tools.values()]
@@ -230,8 +256,24 @@ class AgentRuntime:
 
             tool_calls = getattr(message, "tool_calls", None)
             if not tool_calls:
-                logger.info("[%s] final answer produced on iteration %d", self.name, iteration)
-                return message.content or ""
+                final_answer = message.content or ""
+                if not final_answer.strip():
+                    # Empty content and no tool call, despite this being a
+                    # "final answer" turn — capture what the backend
+                    # actually sent so this is diagnosable without a live
+                    # re-run. See diagnostic_raw_message's docstring.
+                    self.diagnostic_raw_message = _message_to_dict(message)
+                    logger.warning(
+                        "[%s] iteration %d produced neither tool calls nor "
+                        "answer text; see diagnostic_raw_message",
+                        self.name,
+                        iteration,
+                    )
+                else:
+                    logger.info(
+                        "[%s] final answer produced on iteration %d", self.name, iteration
+                    )
+                return final_answer
 
             messages.append(
                 {

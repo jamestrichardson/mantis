@@ -25,6 +25,25 @@ def _fake_result(model: str, outcome: str = "ok") -> EvalResult:
     )
 
 
+def test_run_prints_a_note_when_raw_message_present(tmp_path, monkeypatch, capsys):
+    monkeypatch.chdir(tmp_path)
+    empty_answer_result = _fake_result("silent-model")
+    empty_answer_result.final_answer = ""
+    empty_answer_result.raw_message = {"content": "", "reasoning_content": "..."}
+    monkeypatch.setattr(
+        eval_cli, "run_comparison", lambda scenario, models, base_model_config=None: [
+            empty_answer_result
+        ]
+    )
+
+    eval_cli.main(
+        ["run", "--scenario", "awx-no-route", "--models", "silent-model", "--out", str(tmp_path / "r.jsonl")]
+    )
+
+    captured = capsys.readouterr()
+    assert "NOTE: empty answer" in captured.out
+
+
 def test_run_writes_jsonl_and_returns_zero_on_success(tmp_path, monkeypatch, capsys):
     monkeypatch.chdir(tmp_path)
     monkeypatch.setattr(

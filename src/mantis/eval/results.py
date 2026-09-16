@@ -67,6 +67,15 @@ class EvalResult:
             ``usage`` entry that has one; ``None`` if none do.
         error: Exception type and message when ``outcome == "error"``,
             else ``None``.
+        raw_message: The raw final-message payload (via
+            ``AgentRuntime.diagnostic_raw_message``), captured only when a
+            run ended with neither usable answer text nor a tool call —
+            e.g. a model spent completion tokens but they landed in a
+            provider-specific field (like ``reasoning_content``) this
+            runtime doesn't read, or a malformed tool-call attempt never
+            parsed into ``tool_calls``. ``None`` for a normal run, so this
+            never bloats the common case with a redundant dump of data
+            already in ``final_answer``.
         result_format_version: See :data:`RESULT_FORMAT_VERSION`.
     """
 
@@ -85,6 +94,7 @@ class EvalResult:
     usage: list[dict[str, Any] | None] = field(default_factory=list)
     total_tokens: int | None = None
     error: str | None = None
+    raw_message: dict[str, Any] | None = None
     result_format_version: str = RESULT_FORMAT_VERSION
 
     def to_dict(self) -> dict[str, Any]:

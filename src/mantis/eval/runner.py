@@ -9,10 +9,12 @@ import logging
 import time
 from datetime import datetime, timezone
 
+from openai import OpenAIError
+
 from mantis.config import LiteLLMConfig
 from mantis.eval.results import EvalResult, ToolCallSummary
 from mantis.eval.scenarios import Scenario
-from mantis.runtime import AgentRuntime
+from mantis.runtime import AgentRuntime, RuntimeError_
 
 logger = logging.getLogger(__name__)
 
@@ -29,13 +31,27 @@ def run_scenario(
 ) -> EvalResult:
     """Run ``scenario`` once against ``model_alias`` and return the result.
 
-    Never raises for a model/runtime failure (e.g. the model server is
-    unreachable, or the model never converges within the iteration
-    budget) — that's recorded as ``outcome="error"`` on the returned
-    result instead, so a multi-model comparison in
-    :func:`run_comparison` can't be aborted by one model's failure. Only
-    a genuine programming error (a bug in the scenario/runner itself)
-    propagates out.
+    Only two categories of failure are caught and recorded as
+    ``outcome="error"`` instead of raising:
+
+    - ``openai.OpenAIError`` (and subclasses) — the model/backend itself
+      misbehaved: unreachable, timed out, rate-limited, authentication
+      failure, a malformed response, etc.
+    - ``mantis.runtime.RuntimeError_`` (and subclasses, e.g.
+      ``MaxIterationsExceededError``) — the *model's own behavior* was
+      disqualifying (never converged, looped on tool calls).
+
+    Both are legitimate qualification signal about the model being
+    evaluated, which is why one model's failure must never abort a
+    multi-model comparison in :func:`run_comparison`.
+
+    Anything else — an ``AttributeError``, ``TypeError``, a bug in a
+    scenario's fixture code, or any other exception not in those two
+    categories — is a bug in Mantis itself (the harness, the runtime, or
+    a scenario), not evidence about the model, and must propagate rather
+    than being recorded as if the model had failed. Silently attributing
+    a Mantis defect to "model X errored" would corrupt qualification
+    data in exactly the way this harness exists to prevent.
     """
     model_config = dataclasses.replace(
         base_model_config or LiteLLMConfig.from_env(), model=model_alias
@@ -59,7 +75,7 @@ def run_scenario(
 
     try:
         final_answer = runtime.run(scenario.prompt)
-    except Exception as exc:  # noqa: BLE001 — deliberately broad: see docstring
+    except (OpenAIError, RuntimeError_) as exc:
         outcome = "error"
         error = f"{type(exc).__name__}: {exc}"
         logger.warning(
@@ -112,6 +128,7 @@ def run_scenario(
         usage=list(runtime.usage_log),
         total_tokens=total_tokens,
         error=error,
+        raw_message=runtime.diagnostic_raw_message,
     )
 
 
@@ -123,8 +140,10 @@ def run_comparison(
 ) -> list[EvalResult]:
     """Run ``scenario`` against each of ``model_aliases`` in turn.
 
-    One model's failure never prevents the rest from running — see
-    :func:`run_scenario`.
+    One model/backend failure never prevents the rest from running — but a
+    genuine bug in Mantis itself still raises and aborts the comparison
+    rather than being misattributed to whichever model was running at the
+    time. See :func:`run_scenario`.
     """
     config = base_model_config or LiteLLMConfig.from_env()
     return [

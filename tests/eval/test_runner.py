@@ -9,11 +9,22 @@ import json
 from dataclasses import dataclass
 from typing import Any
 
+import httpx
+import openai
+import pytest
+
 import mantis.runtime as runtime_module
 from mantis.config import LiteLLMConfig, Secret
 from mantis.eval.runner import run_comparison, run_scenario
 from mantis.eval.scenarios import Scenario
 from mantis.registry import Tool, ToolRegistry
+
+
+def _backend_error() -> openai.APIConnectionError:
+    """A real openai.OpenAIError, for tests that need to simulate a
+    genuine backend/network failure — as opposed to a bug in the test's
+    own fake harness, which must propagate rather than be swallowed."""
+    return openai.APIConnectionError(request=httpx.Request("POST", "http://example.test"))
 
 
 # ---------------------------------------------------------------------------
@@ -38,6 +49,9 @@ class FakeMessage:
     content: str | None = None
     tool_calls: list[FakeToolCall] | None = None
 
+    def model_dump(self) -> dict[str, Any]:
+        return {"content": self.content, "tool_calls": self.tool_calls}
+
 
 @dataclass
 class FakeChoice:
@@ -55,7 +69,10 @@ class FakeCompletions:
         self._responses = list(responses)
 
     def create(self, **kwargs):
-        return self._responses.pop(0)
+        item = self._responses.pop(0)
+        if isinstance(item, BaseException):
+            raise item
+        return item
 
 
 class FakeChat:
@@ -194,18 +211,72 @@ def test_run_scenario_counts_duplicate_and_malformed_calls(monkeypatch):
     assert result.duplicate_call_count == 1
 
 
-def test_run_scenario_records_error_outcome_without_raising(monkeypatch):
-    # No scripted responses at all -> FakeCompletions.create() will raise
-    # IndexError (pop from empty list) on the very first call, simulating
-    # an arbitrary model/runtime failure.
-    _patch_openai(monkeypatch, {"model-a": []})
+def test_run_scenario_records_error_outcome_for_a_backend_failure(monkeypatch):
+    _patch_openai(monkeypatch, {"model-a": [_backend_error()]})
     scenario = _echo_scenario()
 
     result = run_scenario(scenario, "model-a", base_model_config=_base_config())
 
     assert result.outcome == "error"
     assert result.final_answer is None
-    assert result.error is not None
+    assert "APIConnectionError" in result.error
+
+
+def test_run_scenario_records_error_outcome_for_max_iterations_exceeded(monkeypatch):
+    # A model that never stops calling tools (distinct arguments each
+    # time, so the duplicate-call cache never short-circuits it) is
+    # disqualifying model behavior, not a Mantis bug — must be recorded
+    # as outcome="error", not raised. AgentRuntime's default budget is 8
+    # iterations, so 9 distinct calls exceeds it.
+    _patch_openai(
+        monkeypatch,
+        {"model-a": [_tool_call_response("echo", {"x": i}) for i in range(9)]},
+    )
+    scenario = _echo_scenario()
+
+    result = run_scenario(scenario, "model-a", base_model_config=_base_config())
+
+    assert result.outcome == "error"
+    assert "MaxIterationsExceededError" in result.error
+
+
+def test_run_scenario_reraises_a_genuine_mantis_bug(monkeypatch):
+    # A bug in Mantis's own code (here: the fake test harness standing in
+    # for it) must never be recorded as outcome="error" and misattributed
+    # to the model — it must propagate and blow up the run loudly.
+    _patch_openai(monkeypatch, {"model-a": []})  # empty -> IndexError, not an OpenAIError
+    scenario = _echo_scenario()
+
+    with pytest.raises(IndexError):
+        run_scenario(scenario, "model-a", base_model_config=_base_config())
+
+
+def test_run_scenario_captures_raw_message_on_empty_answer_no_tool_calls(monkeypatch):
+    # Reproduces the real qualification finding this was built for: a
+    # model spends completion tokens but produces neither usable content
+    # nor a tool call.
+    response = FakeResponse(
+        choices=[FakeChoice(message=FakeMessage(content="", tool_calls=None))],
+        usage={"prompt_tokens": 800, "completion_tokens": 16, "total_tokens": 816},
+    )
+    _patch_openai(monkeypatch, {"model-a": [response]})
+    scenario = _echo_scenario()
+
+    result = run_scenario(scenario, "model-a", base_model_config=_base_config())
+
+    assert result.outcome == "ok"
+    assert result.final_answer == ""
+    assert result.raw_message is not None
+    assert result.raw_message["content"] == ""
+
+
+def test_run_scenario_raw_message_is_none_for_a_real_answer(monkeypatch):
+    _patch_openai(monkeypatch, {"model-a": [_final("a real answer")]})
+    scenario = _echo_scenario()
+
+    result = run_scenario(scenario, "model-a", base_model_config=_base_config())
+
+    assert result.raw_message is None
 
 
 def test_run_scenario_captures_usage_and_total_tokens(monkeypatch):
@@ -232,7 +303,7 @@ def test_run_comparison_runs_every_model_even_if_one_fails(monkeypatch):
         monkeypatch,
         {
             "good-model": [_final("all good")],
-            "bad-model": [],  # will error immediately
+            "bad-model": [_backend_error()],
         },
     )
     scenario = _echo_scenario()
@@ -242,6 +313,24 @@ def test_run_comparison_runs_every_model_even_if_one_fails(monkeypatch):
     assert [r.model for r in results] == ["good-model", "bad-model"]
     assert results[0].outcome == "ok"
     assert results[1].outcome == "error"
+
+
+def test_run_comparison_reraises_a_genuine_mantis_bug_and_stops(monkeypatch):
+    # Unlike a model/backend failure, a Mantis bug must abort the whole
+    # comparison rather than being recorded against whichever model was
+    # running — continuing on to the next model would risk masking that
+    # the harness itself is broken.
+    _patch_openai(
+        monkeypatch,
+        {
+            "good-model": [_final("all good")],
+            "buggy-model": [],  # -> IndexError, a bug, not a backend failure
+        },
+    )
+    scenario = _echo_scenario()
+
+    with pytest.raises(IndexError):
+        run_comparison(scenario, ["good-model", "buggy-model"], base_model_config=_base_config())
 
 
 def test_run_comparison_supports_a_single_model(monkeypatch):

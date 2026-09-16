@@ -72,6 +72,19 @@ def test_eval_result_defaults_are_empty_not_missing():
     assert result.malformed_call_count == 0
     assert result.total_tokens is None
     assert result.error is None
+    assert result.raw_message is None
+
+
+def test_eval_result_raw_message_serializes_when_present():
+    result = _make_result(
+        final_answer="",
+        raw_message={"content": "", "tool_calls": None, "reasoning_content": "..."},
+    )
+
+    payload = result.to_dict()
+
+    json.dumps(payload)  # must not raise
+    assert payload["raw_message"]["reasoning_content"] == "..."
 
 
 def test_tool_call_summary_to_dict():

@@ -33,6 +33,17 @@ class FakeToolCall:
 class FakeMessage:
     content: str | None = None
     tool_calls: list[FakeToolCall] | None = None
+    reasoning_content: str | None = None
+    """Simulates a provider-specific extra field (e.g. some backends put
+    chain-of-thought here instead of/alongside content) — exercises
+    AgentRuntime's model_dump()-based diagnostic capture."""
+
+    def model_dump(self) -> dict[str, Any]:
+        return {
+            "content": self.content,
+            "tool_calls": self.tool_calls,
+            "reasoning_content": self.reasoning_content,
+        }
 
 
 @dataclass
@@ -402,3 +413,52 @@ def test_usage_log_has_one_entry_per_iteration():
     runtime.run("do the thing")
 
     assert [entry["total_tokens"] for entry in runtime.usage_log] == [22, 38]
+
+
+def test_diagnostic_raw_message_captured_when_answer_is_empty_and_no_tool_calls():
+    # Regression test for a real qualification finding: a model that spends
+    # completion tokens but produces neither usable content nor a tool
+    # call (e.g. output landed in a provider-specific field like
+    # reasoning_content) must be diagnosable from the run itself.
+    response = FakeResponse(
+        choices=[
+            FakeChoice(
+                message=FakeMessage(
+                    content="", tool_calls=None, reasoning_content="(unparsed attempt)"
+                )
+            )
+        ],
+        usage=FakeUsage(prompt_tokens=800, completion_tokens=16, total_tokens=816),
+    )
+    runtime = _build_runtime([response])
+
+    result = runtime.run("hello")
+
+    assert result == ""
+    assert runtime.diagnostic_raw_message == {
+        "content": "",
+        "tool_calls": None,
+        "reasoning_content": "(unparsed attempt)",
+    }
+
+
+def test_diagnostic_raw_message_not_captured_for_a_real_answer():
+    runtime = _build_runtime([_final_message_response("a real answer")])
+
+    runtime.run("hello")
+
+    assert runtime.diagnostic_raw_message is None
+
+
+def test_diagnostic_raw_message_captured_when_answer_is_whitespace_only():
+    # Whitespace-only content is still "no usable answer" for diagnostic
+    # purposes, same as truly empty content.
+    response = FakeResponse(
+        choices=[FakeChoice(message=FakeMessage(content="   \n", tool_calls=None))]
+    )
+    runtime = _build_runtime([response])
+
+    result = runtime.run("hello")
+
+    assert result == "   \n"
+    assert runtime.diagnostic_raw_message is not None

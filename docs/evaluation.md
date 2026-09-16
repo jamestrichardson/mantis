@@ -93,17 +93,54 @@ One `EvalResult` per (scenario, model) pair, in
 | `usage` | Per-iteration token usage dicts when LiteLLM returns them, else `None` per entry |
 | `total_tokens` | Sum of `usage[*].total_tokens` when available, else `None` |
 | `error` | Exception type/message when `outcome == "error"` |
+| `raw_message` | The raw final-message payload, captured **only** when a run ended with neither usable answer text nor a tool call — `None` otherwise. See "Diagnosing an empty/silent run" below. |
 | `result_format_version` | See versioning below |
 
 `tool_calls`/`usage` are built directly from `AgentRuntime.call_log` /
 `AgentRuntime.usage_log` after `run()` returns — the runner never
 re-derives or duplicates that bookkeeping.
 
-**One model's failure never aborts a multi-model comparison.** A model
-that's unreachable, times out, or never converges within the iteration
-budget is caught inside `run_scenario` and recorded as `outcome="error"`
-with the exception type/message in `error` — `run_comparison` always
-returns one result per requested model.
+**A model/backend failure never aborts a multi-model comparison — but a
+Mantis bug does, deliberately.** `run_scenario` only catches two
+exception categories and records them as `outcome="error"`: `openai.
+OpenAIError` (the backend is unreachable, times out, rate-limits, etc.)
+and `mantis.runtime.RuntimeError_` (e.g. `MaxIterationsExceededError` —
+the model never converged). Both are real signal *about the model being
+evaluated*. Anything else — an `AttributeError`, a bug in a scenario's
+fixture, any exception outside those two categories — is a bug in Mantis
+itself, and propagates out of `run_comparison` rather than being silently
+recorded as if that model had failed. An evaluation harness that
+swallowed its own bugs as "model X errored" would corrupt exactly the
+qualification data it exists to produce.
+
+### Diagnosing an empty/silent run
+
+A model can end a run with `outcome="ok"` but an empty `final_answer` and
+zero `tool_calls` — that's not a Mantis failure, it's the model itself
+producing nothing usable, and it's a real qualification finding (this
+happened during initial local qualification runs: two of five candidate
+models did this on `awx-no-route`, one spending real completion tokens to
+do it). Two different things can cause it:
+
+- **Zero completion tokens** (`usage[*].completion_tokens == 0`): the
+  model/backend didn't generate anything at all — check that the alias
+  actually resolves to a working model in LiteLLM, and that any
+  model-specific required parameters (e.g. Qwen3's `enable_thinking`)
+  aren't missing.
+- **Nonzero completion tokens, still empty `content`/`tool_calls`**: the
+  model generated *something*, but it landed somewhere this runtime
+  doesn't read as a standard OpenAI response — most often a
+  provider-specific field (e.g. `reasoning_content`) or a tool-call
+  syntax the backend didn't translate into the standard `tool_calls`
+  field (gpt-oss's Harmony format is a known case of this depending on
+  Ollama/LiteLLM version).
+
+When this happens, `AgentRuntime` captures the *entire* raw message
+(`message.model_dump()`, which the OpenAI SDK's message model allows to
+include provider-specific extra fields) into
+`diagnostic_raw_message`/`EvalResult.raw_message` — so the JSONL record
+itself tells you which of the two cases you're looking at, without a live
+re-run. `mantis eval run`'s summary prints a `NOTE:` line pointing at it.
 
 ### Versioning
 

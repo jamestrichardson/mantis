@@ -54,6 +54,11 @@ def _print_summary(results: list[EvalResult]) -> None:
             print(f"    error: {result.error}")
         else:
             print(f"    answer: {answer_preview}{'...' if len(answer_preview) == 80 else ''}")
+        if result.raw_message is not None:
+            print(
+                "    NOTE: empty answer + no tool call — see raw_message "
+                "in the output file for what the backend actually sent"
+            )
 
 
 def _cmd_run(args: argparse.Namespace) -> int:
