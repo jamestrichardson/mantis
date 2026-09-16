@@ -11,7 +11,7 @@ requires-python = ">=3.11"
 license = { text = "Apache-2.0" }
 authors = [{ name = "James Richardson" }]
 dependencies = [
-    "openai>=1.40.0",
+    "openai>=3.13.0",
     "httpx>=0.27.0",
     "python-dotenv>=1.0.0",
 ]
