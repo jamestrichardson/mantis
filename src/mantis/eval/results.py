@@ -11,9 +11,12 @@ import dataclasses
 from dataclasses import dataclass, field
 from typing import Any
 
-RESULT_FORMAT_VERSION = "1.0"
+RESULT_FORMAT_VERSION = "2.0"
 """Bumped on a breaking change to :class:`EvalResult`'s shape (a field
-removed or renamed). Adding a new optional field does not require a bump."""
+removed or renamed). Adding a new optional field does not require a bump.
+2.0: replaced ``score`` (``{"checks", "passed", "total"}``) with
+``evaluation`` (``{"passed", "score", "max_score", "checks", "hard_failures"}``)
+— see ``mantis.eval.scoring.Evaluation``."""
 
 
 @dataclass
@@ -76,6 +79,18 @@ class EvalResult:
             parsed into ``tool_calls``. ``None`` for a normal run, so this
             never bloats the common case with a redundant dump of data
             already in ``final_answer``.
+        evaluation: Deterministic scoring against the scenario's
+            ``expectations`` (see ``mantis.eval.scoring.Evaluation.to_dict``),
+            computed and attached by ``run_scenario`` —
+            ``{"passed": bool, "score": N, "max_score": M, "checks": [...],
+            "hard_failures": [...]}``. ``passed`` is governed solely by
+            ``hard_failures`` being empty, independent of the numeric
+            score — a run can score less than max and still pass (missed
+            quality checks only), or score highly and still fail (one
+            hard requirement violated). ``None`` when the scenario
+            declares no expectations (unscored), not when scoring ran and
+            found failures — an unscored run and an all-failing scored
+            run are different things and must stay distinguishable.
         result_format_version: See :data:`RESULT_FORMAT_VERSION`.
     """
 
@@ -95,6 +110,7 @@ class EvalResult:
     total_tokens: int | None = None
     error: str | None = None
     raw_message: dict[str, Any] | None = None
+    evaluation: dict[str, Any] | None = None
     result_format_version: str = RESULT_FORMAT_VERSION
 
     def to_dict(self) -> dict[str, Any]:

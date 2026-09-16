@@ -150,6 +150,55 @@ def _base_config() -> LiteLLMConfig:
 
 
 # ---------------------------------------------------------------------------
+# Scoring integration
+# ---------------------------------------------------------------------------
+
+
+def test_run_scenario_attaches_evaluation_when_scenario_has_expectations(monkeypatch):
+    from mantis.eval.expectations import RequiredAnswerPattern
+
+    _patch_openai(monkeypatch, {"model-a": [_final("the answer mentions host03")]})
+    scenario = _echo_scenario(
+        expectations=[RequiredAnswerPattern("host03", name="cited_host03")]
+    )
+
+    result = run_scenario(scenario, "model-a", base_model_config=_base_config())
+
+    assert result.evaluation is not None
+    assert result.evaluation["passed"] is True
+    assert result.evaluation["score"] == 1
+    assert result.evaluation["max_score"] == 1
+    assert result.evaluation["checks"][0]["name"] == "cited_host03"
+
+
+def test_run_scenario_evaluation_is_none_without_expectations(monkeypatch):
+    _patch_openai(monkeypatch, {"model-a": [_final("hello")]})
+    scenario = _echo_scenario()  # no expectations
+
+    result = run_scenario(scenario, "model-a", base_model_config=_base_config())
+
+    assert result.evaluation is None
+
+
+def test_run_scenario_evaluation_reflects_a_hard_failure(monkeypatch):
+    from mantis.eval.expectations import ForbiddenAnswerPattern
+
+    _patch_openai(monkeypatch, {"model-a": [_final("the firewall caused it")]})
+    scenario = _echo_scenario(
+        expectations=[
+            ForbiddenAnswerPattern("firewall caused", name="no_firewall_blame", hard=True)
+        ]
+    )
+
+    result = run_scenario(scenario, "model-a", base_model_config=_base_config())
+
+    assert result.evaluation["passed"] is False
+    assert result.evaluation["score"] == 0
+    assert result.evaluation["max_score"] == 1
+    assert result.evaluation["hard_failures"] == ["no_firewall_blame"]
+
+
+# ---------------------------------------------------------------------------
 # run_scenario
 # ---------------------------------------------------------------------------
 

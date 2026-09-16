@@ -59,6 +59,62 @@ def _print_summary(results: list[EvalResult]) -> None:
                 "    NOTE: empty answer + no tool call — see raw_message "
                 "in the output file for what the backend actually sent"
             )
+        _print_evaluation(result)
+
+
+def _print_evaluation(result: EvalResult) -> None:
+    """Print the PASS/FAIL breakdown for a scored result. No-op if the
+    scenario declared no expectations (result.evaluation is None)."""
+    if result.evaluation is None:
+        return
+    ev = result.evaluation
+    print()
+    for check in ev["checks"]:
+        if check["passed"]:
+            status = "PASS"
+        else:
+            status = "HARD FAIL" if check["hard"] else "FAIL"
+        detail = f" — {check['detail']}" if check["detail"] else ""
+        print(f"    {status}: {check['name']}{detail}")
+    overall = "PASS" if ev["passed"] else "FAIL"
+    print(
+        f"\n    Result: {overall}  "
+        f"(score: {ev['score']}/{ev['max_score']}, hard failures: {len(ev['hard_failures'])})"
+    )
+
+
+def _print_comparison_table(results: list[EvalResult]) -> None:
+    """Print a MODEL/RESULT/SCORE/HARD FAILS/TOOL ERRORS/TIME/TOKENS table
+    across every model in this invocation. No-op if nothing in this run
+    was scored."""
+    if not any(r.evaluation is not None for r in results):
+        return
+
+    headers = ["MODEL", "RESULT", "SCORE", "HARD FAILS", "TOOL ERRORS", "TIME", "TOKENS"]
+    rows = []
+    for r in results:
+        if r.evaluation is not None:
+            result_col = "PASS" if r.evaluation["passed"] else "FAIL"
+            score_col = f"{r.evaluation['score']}/{r.evaluation['max_score']}"
+            hard_fail_col = str(len(r.evaluation["hard_failures"]))
+        else:
+            result_col = score_col = hard_fail_col = "—"
+        tool_error_count = sum(1 for tc in r.tool_calls if tc.outcome == "error")
+        time_col = f"{r.elapsed_seconds:.1f}s"
+        tokens_col = str(r.total_tokens) if r.total_tokens is not None else "—"
+        rows.append(
+            [r.model, result_col, score_col, hard_fail_col, str(tool_error_count), time_col, tokens_col]
+        )
+
+    widths = [max(len(headers[i]), *(len(row[i]) for row in rows)) for i in range(len(headers))]
+
+    def _fmt(cols: list[str]) -> str:
+        return "  ".join(col.ljust(widths[i]) for i, col in enumerate(cols))
+
+    print()
+    print(_fmt(headers))
+    for row in rows:
+        print(_fmt(row))
 
 
 def _cmd_run(args: argparse.Namespace) -> int:
@@ -89,6 +145,7 @@ def _cmd_run(args: argparse.Namespace) -> int:
     _write_jsonl(results, out_path)
 
     _print_summary(results)
+    _print_comparison_table(results)
     print(f"\nWrote {len(results)} result(s) to {out_path}")
 
     return 0 if all(r.outcome == "ok" for r in results) else 1

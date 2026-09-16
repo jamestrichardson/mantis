@@ -11,7 +11,7 @@ import mantis.eval.cli as eval_cli
 from mantis.eval.results import EvalResult
 
 
-def _fake_result(model: str, outcome: str = "ok") -> EvalResult:
+def _fake_result(model: str, outcome: str = "ok", evaluation: dict | None = None) -> EvalResult:
     return EvalResult(
         scenario="awx-no-route",
         scenario_version="1.0",
@@ -22,7 +22,21 @@ def _fake_result(model: str, outcome: str = "ok") -> EvalResult:
         outcome=outcome,
         final_answer="answer" if outcome == "ok" else None,
         error=None if outcome == "ok" else "boom",
+        evaluation=evaluation,
     )
+
+
+def _evaluation(checks: list[dict]) -> dict:
+    """Build an evaluation dict from explicit checks, mirroring
+    mantis.eval.scoring.Evaluation.to_dict()'s derivation logic."""
+    hard_failures = [c["name"] for c in checks if c["hard"] and not c["passed"]]
+    return {
+        "checks": checks,
+        "passed": not hard_failures,
+        "score": sum(1 for c in checks if c["passed"]),
+        "max_score": len(checks),
+        "hard_failures": hard_failures,
+    }
 
 
 def test_run_prints_a_note_when_raw_message_present(tmp_path, monkeypatch, capsys):
@@ -156,3 +170,89 @@ def test_models_flag_is_comma_split(tmp_path, monkeypatch):
     )
 
     assert seen_models["value"] == ["model-a", "model-b", "model-c"]
+
+
+# ---------------------------------------------------------------------------
+# Scoring output: PASS/FAIL breakdown + comparison table
+# ---------------------------------------------------------------------------
+
+
+def test_run_prints_pass_fail_breakdown_and_score(tmp_path, monkeypatch, capsys):
+    monkeypatch.chdir(tmp_path)
+    evaluation = _evaluation(
+        [
+            {"name": "check 0", "passed": True, "hard": False, "detail": ""},
+            {"name": "check 1", "passed": True, "hard": False, "detail": ""},
+            {"name": "did not blame the firewall", "passed": False, "hard": True, "detail": ""},
+        ]
+    )
+    scored = _fake_result("model-a", evaluation=evaluation)
+    monkeypatch.setattr(
+        eval_cli, "run_comparison", lambda scenario, models, base_model_config=None: [scored]
+    )
+
+    eval_cli.main(["run", "--scenario", "awx-no-route", "--models", "model-a"])
+
+    captured = capsys.readouterr()
+    assert "PASS: check 0" in captured.out
+    assert "PASS: check 1" in captured.out
+    assert "HARD FAIL: did not blame the firewall" in captured.out
+    assert "score: 2/3" in captured.out
+    assert "Result: FAIL" in captured.out
+
+
+def test_run_without_expectations_prints_no_evaluation_section(tmp_path, monkeypatch, capsys):
+    monkeypatch.chdir(tmp_path)
+    unscored = _fake_result("model-a", evaluation=None)
+    monkeypatch.setattr(
+        eval_cli, "run_comparison", lambda scenario, models, base_model_config=None: [unscored]
+    )
+
+    eval_cli.main(["run", "--scenario", "awx-no-route", "--models", "model-a"])
+
+    captured = capsys.readouterr()
+    assert "Result:" not in captured.out
+    assert "PASS:" not in captured.out
+    assert "FAIL:" not in captured.out
+
+
+def test_run_prints_comparison_table_when_scored(tmp_path, monkeypatch, capsys):
+    monkeypatch.chdir(tmp_path)
+    all_pass = _evaluation([{"name": f"c{i}", "passed": True, "hard": True, "detail": ""} for i in range(3)])
+    one_hard_fail = _evaluation(
+        [
+            {"name": "c0", "passed": True, "hard": False, "detail": ""},
+            {"name": "c1", "passed": True, "hard": False, "detail": ""},
+            {"name": "c2", "passed": False, "hard": True, "detail": ""},
+        ]
+    )
+    results = [
+        _fake_result("qwen3:30b", evaluation=all_pass),
+        _fake_result("gpt-oss:20b", evaluation=one_hard_fail),
+    ]
+    monkeypatch.setattr(
+        eval_cli, "run_comparison", lambda scenario, models, base_model_config=None: results
+    )
+
+    eval_cli.main(["run", "--scenario", "awx-no-route", "--models", "qwen3:30b,gpt-oss:20b"])
+
+    captured = capsys.readouterr()
+    assert "MODEL" in captured.out and "RESULT" in captured.out and "TOKENS" in captured.out
+    assert "qwen3:30b" in captured.out
+    assert "3/3" in captured.out
+    assert "gpt-oss:20b" in captured.out
+    assert "2/3" in captured.out
+
+
+def test_run_omits_comparison_table_when_nothing_scored(tmp_path, monkeypatch, capsys):
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(
+        eval_cli, "run_comparison", lambda scenario, models, base_model_config=None: [
+            _fake_result("model-a", evaluation=None)
+        ]
+    )
+
+    eval_cli.main(["run", "--scenario", "awx-no-route", "--models", "model-a"])
+
+    captured = capsys.readouterr()
+    assert "MODEL" not in captured.out
