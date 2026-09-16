@@ -12,6 +12,9 @@ name: container-publish
 #   - release published -> immutable SemVer tags + `latest`. `latest` only
 #                        ever moves here, never on an ordinary main push or
 #                        PR build.
+#
+# Every published tag is a linux/amd64 + linux/arm64 multi-platform
+# manifest list (arm64 built via QEMU emulation on the amd64 runner).
 
 on:
   pull_request:
@@ -35,6 +38,10 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+
+      - uses: docker/setup-qemu-action@v3
+        with:
+          platforms: arm64
 
       - uses: docker/setup-buildx-action@v3
 
@@ -68,11 +75,18 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
+      # Multi-platform manifest list, pushed straight to the registry.
+      # buildx can't --load a multi-platform build into the local docker
+      # daemon (only a single-arch image can be loaded), which is why the
+      # smoke test above only builds/loads the runner's native platform —
+      # the actual arm64 legs are built here for the first time, but from
+      # the same GHA cache scope, so this only does new work for arm64.
       - name: Push
         uses: docker/build-push-action@v6
         with:
           context: .
           push: true
+          platforms: linux/amd64,linux/arm64
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
           cache-from: type=gha
@@ -84,6 +98,10 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+
+      - uses: docker/setup-qemu-action@v3
+        with:
+          platforms: arm64
 
       - uses: docker/setup-buildx-action@v3
 
@@ -121,11 +139,18 @@ jobs:
 
       # Re-run against the same GHA cache scope, so this is a near-instant
       # cache hit rather than a full rebuild.
+      # Multi-platform manifest list, pushed straight to the registry.
+      # buildx can't --load a multi-platform build into the local docker
+      # daemon (only a single-arch image can be loaded), which is why the
+      # smoke test above only builds/loads the runner's native platform —
+      # the actual arm64 legs are built here for the first time, but from
+      # the same GHA cache scope, so this only does new work for arm64.
       - name: Push
         uses: docker/build-push-action@v6
         with:
           context: .
           push: true
+          platforms: linux/amd64,linux/arm64
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
           cache-from: type=gha
@@ -146,6 +171,10 @@ jobs:
         run: |
           tag="${{ github.event.release.tag_name }}"
           echo "version=${tag#mantis-v}" >> "$GITHUB_OUTPUT"
+
+      - uses: docker/setup-qemu-action@v3
+        with:
+          platforms: arm64
 
       - uses: docker/setup-buildx-action@v3
 
@@ -181,11 +210,18 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
+      # Multi-platform manifest list, pushed straight to the registry.
+      # buildx can't --load a multi-platform build into the local docker
+      # daemon (only a single-arch image can be loaded), which is why the
+      # smoke test above only builds/loads the runner's native platform —
+      # the actual arm64 legs are built here for the first time, but from
+      # the same GHA cache scope, so this only does new work for arm64.
       - name: Push
         uses: docker/build-push-action@v6
         with:
           context: .
           push: true
+          platforms: linux/amd64,linux/arm64
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
           cache-from: type=gha

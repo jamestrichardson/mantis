@@ -96,8 +96,10 @@ already shipped.
 ## Container images
 
 `.github/workflows/container-publish.yml` publishes to
-`ghcr.io/jamestrichardson/mantis`. There are three independent tag
-policies:
+`ghcr.io/jamestrichardson/mantis`. Every tag is a `linux/amd64` +
+`linux/arm64` multi-platform manifest — `docker pull`/`docker run`
+picks the right one automatically, no `--platform` flag needed. There
+are three independent tag policies:
 
 | Trigger | Tags | Notes |
 | --- | --- | --- |
