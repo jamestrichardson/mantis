@@ -49,6 +49,12 @@ local tests above. Three independent jobs, all required to pass:
   Never pushes from CI; publishing an image is release-triggered, added
   in a follow-on release-engineering workflow.
 
+Commit messages should follow the
+[conventional-commit](https://www.conventionalcommits.org/) convention
+(`feat:`, `fix:`, `docs:`, `chore:`, ...) — `release-please` uses commit
+type to drive version bumps and changelog entries. See
+[docs/release.md](release.md) for the full policy.
+
 To reproduce any of these locally before pushing:
 
 ```bash
