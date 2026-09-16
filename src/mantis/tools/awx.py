@@ -105,13 +105,21 @@ def _summarize_job(client: AWXClient, job: dict[str, Any]) -> dict[str, Any]:
     return result
 
 
-def awx_recent_failed_jobs(limit: int = 5) -> dict[str, Any]:
+def awx_recent_failed_jobs(limit: int = 5, *, _client: AWXClient | None = None) -> dict[str, Any]:
     """Fetch the most recently finished failed AWX jobs, with preprocessed
     stdout evidence for each.
 
     Args:
         limit: Number of jobs to return. Clamped to
             ``[1, MAX_FAILED_JOBS_LIMIT]``.
+        _client: Test/evaluation-only override for the AWX client.
+            Keyword-only and leading-underscore so it's never something a
+            model's tool-call arguments could accidentally set (the
+            runtime only ever passes keys the model supplied in its JSON
+            arguments). Defaults to a real client built from
+            ``AWXConfig.from_env()``. Used by ``mantis.eval`` to run this
+            exact production code path against fixture data instead of
+            live AWX — see ``mantis/eval/fixtures/awx.py``.
 
     Returns:
         A dict with ``meta`` (provenance — see ``mantis.contracts.QueryMeta``),
@@ -133,7 +141,7 @@ def awx_recent_failed_jobs(limit: int = 5) -> dict[str, Any]:
     """
     clamped_limit = max(1, min(limit, MAX_FAILED_JOBS_LIMIT))
 
-    client = _get_client()
+    client = _client or _get_client()
     try:
         page = client.list_jobs(
             status="failed",

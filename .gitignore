@@ -1,3 +1,6 @@
+# Mantis eval harness output (mantis eval run's default --out location)
+eval-results/
+
 # Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[codz]
