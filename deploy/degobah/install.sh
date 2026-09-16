@@ -40,5 +40,5 @@ Installed degobah deployment files:
 Next:
   1. Edit ${DEPLOY_ROOT}/runtime.env.
   2. Authenticate Docker to ghcr.io if the package requires it.
-  3. Deploy an explicit tag, for example: ${BIN_PATH} pr-59
+  3. Deploy an explicit tag, for example: ${BIN_PATH} pr-123
 EOF
