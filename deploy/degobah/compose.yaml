@@ -1,0 +1,38 @@
+services:
+  mantis:
+    image: ${MANTIS_IMAGE_REF:?MANTIS_IMAGE_REF must be set by mantis-deploy}
+    container_name: mantis
+    restart: unless-stopped
+
+    env_file:
+      - runtime.env
+
+    environment:
+      MANTIS_DEPLOYED_TAG: ${MANTIS_DEPLOYED_TAG:-unknown}
+      MANTIS_HEALTH_URL: ${MANTIS_HEALTH_URL:-}
+
+    ports:
+      - "9108:9108"
+
+    # Mantis is currently CLI-oriented rather than a long-running service.
+    # Keep the selected image resident so operators can test PR/release builds
+    # with `docker compose exec mantis mantis ...`. When a service command is
+    # added, set MANTIS_CONTAINER_COMMAND in deploy.env without changing the
+    # deployment primitive.
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - "${MANTIS_CONTAINER_COMMAND:-exec sleep infinity}"
+
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - >-
+          if [ -n "$${MANTIS_HEALTH_URL:-}" ]; then
+            python -c 'import os, urllib.request; urllib.request.urlopen(os.environ["MANTIS_HEALTH_URL"], timeout=2).read(1)'
+          else
+            kill -0 1
+          fi
+      interval: 2s
+      timeout: 3s
+      retries: 20
+      start_period: 2s
