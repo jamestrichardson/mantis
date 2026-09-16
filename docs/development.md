@@ -32,6 +32,31 @@ HTTP interactions are mocked with `respx` (for AWX) and the OpenAI client
 is stubbed directly (for the runtime). See `tests/conftest.py` for the
 baseline environment variables tests run with.
 
+## Continuous integration
+
+`.github/workflows/ci.yml` runs on every pull request and every push to
+`main`. It never requires a live AWX/LiteLLM backend — same rule as
+local tests above. Three independent jobs, all required to pass:
+
+- **test** — `pytest` against the supported Python versions. 3.11 is the
+  minimum supported version (see `requires-python` in `pyproject.toml`);
+  CI also runs 3.12 so regressions against the newer interpreter surface
+  before a user hits them.
+- **build-package** — `python -m build` produces a wheel and sdist, to
+  catch packaging metadata breakage independent of `pytest -e` editable
+  installs.
+- **docker-build** — builds the image from the repository `Dockerfile`.
+  Never pushes from CI; publishing an image is release-triggered, added
+  in a follow-on release-engineering workflow.
+
+To reproduce any of these locally before pushing:
+
+```bash
+pytest                              # same as the test job
+python -m build                     # same as build-package (needs: pip install build)
+docker build -t mantis:local .      # same as docker-build
+```
+
 ## Running agents
 
 ```bash

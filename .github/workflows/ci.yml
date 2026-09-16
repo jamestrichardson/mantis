@@ -1,0 +1,82 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: Test (Python ${{ matrix.python-version }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.11", "3.12"]
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: pip
+          cache-dependency-path: pyproject.toml
+
+      - name: Install Mantis (editable, with dev extras)
+        run: pip install -e ".[dev]"
+
+      - name: Run deterministic test suite
+        run: pytest
+
+  build-package:
+    name: Build Python package
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+          cache-dependency-path: pyproject.toml
+
+      - name: Install build tooling
+        run: pip install --no-cache-dir build
+
+      - name: Build wheel and sdist
+        run: python -m build
+
+      - name: Verify build artifacts exist
+        run: |
+          ls dist/*.whl
+          ls dist/*.tar.gz
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: mantis-dist
+          path: dist/
+          retention-days: 7
+
+  docker-build:
+    name: Build container image
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: docker/setup-buildx-action@v3
+
+      - name: Build image (validation only, no push)
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: false
+          tags: mantis:ci
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
