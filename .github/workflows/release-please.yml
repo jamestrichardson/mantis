@@ -1,0 +1,36 @@
+name: release-please
+
+on:
+  push:
+    branches: [main]
+
+permissions:
+  contents: write
+  pull-requests: write
+
+concurrency:
+  group: release-please-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  release-please:
+    runs-on: ubuntu-latest
+    steps:
+      # release-please needs to create/push commits and open/merge the
+      # release PR *as an actor other than github-actions[bot]*: the
+      # built-in GITHUB_TOKEN's commits/tags deliberately don't trigger
+      # other workflows (anti-recursion), which would silently break the
+      # downstream GHCR publish workflow's `on: release` trigger. A
+      # GitHub App installation token behaves like a real actor instead.
+      - uses: actions/create-github-app-token@v2
+        id: app-token
+        with:
+          app-id: ${{ secrets.RELEASE_PLEASE_APP_ID }}
+          private-key: ${{ secrets.RELEASE_PLEASE_APP_PRIVATE_KEY }}
+
+      - uses: googleapis/release-please-action@v4
+        id: release
+        with:
+          token: ${{ steps.app-token.outputs.token }}
+          config-file: release-please-config.json
+          manifest-file: .release-please-manifest.json
