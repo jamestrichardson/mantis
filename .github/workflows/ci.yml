@@ -58,7 +58,7 @@ jobs:
           ls dist/*.whl
           ls dist/*.tar.gz
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: mantis-dist
           path: dist/
