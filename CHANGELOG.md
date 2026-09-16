@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.2.0](https://github.com/jamestrichardson/mantis/compare/mantis-v1.1.0...mantis-v1.2.0) (2026-09-16)
+
+
+### Features
+
+* **deploy:** add explicit-tag deploy and rollback for degobah ([#62](https://github.com/jamestrichardson/mantis/issues/62)) ([4d4f557](https://github.com/jamestrichardson/mantis/commit/4d4f557b01d0f2e752743d8461dd989474cfe4ef)), closes [#59](https://github.com/jamestrichardson/mantis/issues/59)
+
 ## [1.1.0](https://github.com/jamestrichardson/mantis/compare/mantis-v1.0.0...mantis-v1.1.0) (2026-09-16)
 
 
