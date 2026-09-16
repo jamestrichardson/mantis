@@ -1,5 +1,15 @@
 # Changelog
 
+## [1.1.0](https://github.com/jamestrichardson/mantis/compare/mantis-v1.0.0...mantis-v1.1.0) (2026-09-16)
+
+
+### Features
+
+* **release:** build and publish linux/amd64 + linux/arm64 images ([2a6646e](https://github.com/jamestrichardson/mantis/commit/2a6646e3a0351fccf2d0aa880786a1d3e840bd6c))
+* **release:** publish a pr-&lt;number&gt; image on pull requests ([4330b21](https://github.com/jamestrichardson/mantis/commit/4330b2108c20eaaceaf1db4a6f7b5a12cad4d5e5))
+* **release:** publish container images to GHCR ([0517bca](https://github.com/jamestrichardson/mantis/commit/0517bca28ca2df34c836b2e86a773187b8d2e8f3))
+* **release:** publish container images to GHCR ([#43](https://github.com/jamestrichardson/mantis/issues/43)) ([f40ede3](https://github.com/jamestrichardson/mantis/commit/f40ede334dc6afb4531c9f01b74c4b0fdb413f2d))
+
 ## [1.0.0](https://github.com/jamestrichardson/mantis/compare/mantis-v0.1.0...mantis-v1.0.0) (2026-09-16)
 
 
