@@ -92,3 +92,44 @@ tag history, not local workflow state, so re-running the workflow (or
 having it run on a merge that doesn't change any package) never creates
 a duplicate release PR or duplicate tag/release for a version that's
 already shipped.
+
+## Container images
+
+`.github/workflows/container-publish.yml` publishes to
+`ghcr.io/jamestrichardson/mantis`. Every tag is a `linux/amd64` +
+`linux/arm64` multi-platform manifest — `docker pull`/`docker run`
+picks the right one automatically, no `--platform` flag needed. There
+are three independent tag policies:
+
+| Trigger | Tags | Notes |
+| --- | --- | --- |
+| Pull request | `pr-<number>`, `sha-<short-sha>` | Rebuilt on every push to the PR branch, so you can pull and test a change before merging it. Skipped for Dependabot PRs. This repo has no external-fork PRs — a fork PR's token wouldn't have `packages: write` anyway, so this fails closed rather than leaking anything. |
+| Push to `main` | `dev`, `sha-<short-sha>` | Rebuilt on every merge to `main`. `dev` always points at the current tip of `main`. For quickly trying out unreleased work. |
+| Release published | `<version>`, `<major>.<minor>`, `<major>`, `latest` | Only ever produced from an actual GitHub Release (see [Flow](#flow) above). `latest` **only** moves here — an ordinary merge to `main` or PR build never touches it. |
+
+```bash
+docker pull ghcr.io/jamestrichardson/mantis:latest      # newest stable release
+docker pull ghcr.io/jamestrichardson/mantis:1.0.0        # pinned version
+docker pull ghcr.io/jamestrichardson/mantis:dev          # tip of main, unreleased
+docker pull ghcr.io/jamestrichardson/mantis:pr-58        # a specific PR's build
+docker pull ghcr.io/jamestrichardson/mantis:sha-0a25bfe  # exact commit
+```
+
+All three jobs build the image, load it locally, and run a smoke test
+(`docker run <image>` must print the CLI usage banner) *before* logging
+in and pushing — a broken image is never published.
+
+Configuration and secrets are never baked into the image; everything
+is supplied at container-run time via environment variables — see
+[docs/configuration.md](configuration.md) for the full list
+(`LITELLM_URL`, `AWX_TOKEN`, etc.):
+
+```bash
+docker run --rm \
+  -e LITELLM_URL=https://litellm.internal \
+  -e LITELLM_API_KEY=... \
+  -e AWX_URL=https://awx.internal \
+  -e AWX_TOKEN=... \
+  ghcr.io/jamestrichardson/mantis:latest \
+  awx-troubleshooter
+```

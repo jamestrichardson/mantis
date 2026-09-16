@@ -1,0 +1,228 @@
+name: container-publish
+
+# Three independent publish paths, deliberately separate from ci.yml's
+# validation-only docker-build job:
+#   - pull_request    -> `pr-<number>` + `sha-<short>` tags, so a PR's build
+#                        can be pulled and tested before merge. Safe here
+#                        because this repo has no external-fork PRs — a
+#                        fork PR's GITHUB_TOKEN wouldn't have packages:write
+#                        anyway, so this would just fail closed, not leak.
+#   - push to main    -> fast-moving `dev` + immutable `sha-<short>` tags,
+#                        for pulling/testing whatever's on main right now.
+#   - release published -> immutable SemVer tags + `latest`. `latest` only
+#                        ever moves here, never on an ordinary main push or
+#                        PR build.
+#
+# Every published tag is a linux/amd64 + linux/arm64 multi-platform
+# manifest list (arm64 built via QEMU emulation on the amd64 runner).
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  release:
+    types: [published]
+
+permissions:
+  contents: read
+  packages: write
+
+concurrency:
+  group: container-publish-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  pr:
+    name: Publish PR image
+    if: github.event_name == 'pull_request' && github.actor != 'dependabot[bot]'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: docker/setup-qemu-action@v3
+        with:
+          platforms: arm64
+
+      - uses: docker/setup-buildx-action@v3
+
+      - uses: docker/metadata-action@v5
+        id: meta
+        with:
+          images: ghcr.io/${{ github.repository }}
+          tags: |
+            type=raw,value=pr-${{ github.event.pull_request.number }}
+            type=sha,prefix=sha-,format=short
+
+      - name: Build (local)
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: false
+          load: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Smoke test
+        run: |
+          image="$(head -n1 <<< '${{ steps.meta.outputs.tags }}')"
+          docker run --rm "$image" | grep -q "Usage: mantis"
+
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      # Multi-platform manifest list, pushed straight to the registry.
+      # buildx can't --load a multi-platform build into the local docker
+      # daemon (only a single-arch image can be loaded), which is why the
+      # smoke test above only builds/loads the runner's native platform —
+      # the actual arm64 legs are built here for the first time, but from
+      # the same GHA cache scope, so this only does new work for arm64.
+      - name: Push
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: true
+          platforms: linux/amd64,linux/arm64
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+  dev:
+    name: Publish dev image
+    if: github.event_name == 'push'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: docker/setup-qemu-action@v3
+        with:
+          platforms: arm64
+
+      - uses: docker/setup-buildx-action@v3
+
+      - uses: docker/metadata-action@v5
+        id: meta
+        with:
+          images: ghcr.io/${{ github.repository }}
+          tags: |
+            type=raw,value=dev
+            type=sha,prefix=sha-,format=short
+
+      # Build and load locally first so the smoke test can run before
+      # anything is pushed to the registry.
+      - name: Build (local)
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: false
+          load: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Smoke test
+        run: |
+          image="$(head -n1 <<< '${{ steps.meta.outputs.tags }}')"
+          docker run --rm "$image" | grep -q "Usage: mantis"
+
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      # Re-run against the same GHA cache scope, so this is a near-instant
+      # cache hit rather than a full rebuild.
+      # Multi-platform manifest list, pushed straight to the registry.
+      # buildx can't --load a multi-platform build into the local docker
+      # daemon (only a single-arch image can be loaded), which is why the
+      # smoke test above only builds/loads the runner's native platform —
+      # the actual arm64 legs are built here for the first time, but from
+      # the same GHA cache scope, so this only does new work for arm64.
+      - name: Push
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: true
+          platforms: linux/amd64,linux/arm64
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+  release:
+    name: Publish release image
+    if: github.event_name == 'release' && !github.event.release.prerelease
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # release-please tags as `mantis-v1.2.3` (package-scoped, so a future
+      # monorepo split wouldn't collide); strip the prefix to get the bare
+      # SemVer string metadata-action's semver tag rules expect.
+      - name: Extract version from release tag
+        id: version
+        run: |
+          tag="${{ github.event.release.tag_name }}"
+          echo "version=${tag#mantis-v}" >> "$GITHUB_OUTPUT"
+
+      - uses: docker/setup-qemu-action@v3
+        with:
+          platforms: arm64
+
+      - uses: docker/setup-buildx-action@v3
+
+      - uses: docker/metadata-action@v5
+        id: meta
+        with:
+          images: ghcr.io/${{ github.repository }}
+          tags: |
+            type=semver,pattern={{version}},value=${{ steps.version.outputs.version }}
+            type=semver,pattern={{major}}.{{minor}},value=${{ steps.version.outputs.version }}
+            type=semver,pattern={{major}},value=${{ steps.version.outputs.version }}
+            type=raw,value=latest
+
+      - name: Build (local)
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: false
+          load: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Smoke test
+        run: |
+          image="$(head -n1 <<< '${{ steps.meta.outputs.tags }}')"
+          docker run --rm "$image" | grep -q "Usage: mantis"
+
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      # Multi-platform manifest list, pushed straight to the registry.
+      # buildx can't --load a multi-platform build into the local docker
+      # daemon (only a single-arch image can be loaded), which is why the
+      # smoke test above only builds/loads the runner's native platform —
+      # the actual arm64 legs are built here for the first time, but from
+      # the same GHA cache scope, so this only does new work for arm64.
+      - name: Push
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: true
+          platforms: linux/amd64,linux/arm64
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
