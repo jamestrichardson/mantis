@@ -1,5 +1,7 @@
 # Mantis
 
+[![CI](https://github.com/jamestrichardson/mantis/actions/workflows/ci.yml/badge.svg)](https://github.com/jamestrichardson/mantis/actions/workflows/ci.yml)
+
 **M**onitoring, **A**utomation, **N**etwork **T**riage & **I**nfrastructure **S**ystem
 
 Mantis is an operations-focused AI agent framework. It provides specialized
