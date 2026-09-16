@@ -14,7 +14,7 @@ from openai import OpenAIError
 from mantis.config import LiteLLMConfig
 from mantis.eval.results import EvalResult, ToolCallSummary
 from mantis.eval.scenarios import Scenario
-from mantis.eval.scoring import score_result
+from mantis.eval.scoring import evaluate_result
 from mantis.runtime import AgentRuntime, RuntimeError_
 
 logger = logging.getLogger(__name__)
@@ -133,8 +133,8 @@ def run_scenario(
     )
 
     if scenario.expectations:
-        score = score_result(scenario.expectations, result)
-        result = dataclasses.replace(result, score=score.to_dict())
+        evaluation = evaluate_result(scenario.expectations, result)
+        result = dataclasses.replace(result, evaluation=evaluation.to_dict())
 
     return result
 

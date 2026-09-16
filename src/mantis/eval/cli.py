@@ -59,35 +59,52 @@ def _print_summary(results: list[EvalResult]) -> None:
                 "    NOTE: empty answer + no tool call — see raw_message "
                 "in the output file for what the backend actually sent"
             )
-        _print_score(result)
+        _print_evaluation(result)
 
 
-def _print_score(result: EvalResult) -> None:
+def _print_evaluation(result: EvalResult) -> None:
     """Print the PASS/FAIL breakdown for a scored result. No-op if the
-    scenario declared no expectations (result.score is None)."""
-    if result.score is None:
+    scenario declared no expectations (result.evaluation is None)."""
+    if result.evaluation is None:
         return
+    ev = result.evaluation
     print()
-    for check in result.score["checks"]:
-        status = "PASS" if check["passed"] else "FAIL"
-        print(f"    {status}: {check['label']}")
-    print(f"\n    Score: {result.score['passed']}/{result.score['total']}")
+    for check in ev["checks"]:
+        if check["passed"]:
+            status = "PASS"
+        else:
+            status = "HARD FAIL" if check["hard"] else "FAIL"
+        detail = f" — {check['detail']}" if check["detail"] else ""
+        print(f"    {status}: {check['name']}{detail}")
+    overall = "PASS" if ev["passed"] else "FAIL"
+    print(
+        f"\n    Result: {overall}  "
+        f"(score: {ev['score']}/{ev['max_score']}, hard failures: {len(ev['hard_failures'])})"
+    )
 
 
 def _print_comparison_table(results: list[EvalResult]) -> None:
-    """Print a MODEL/PASS/TOOL ERRORS/TIME/TOKENS table across every model
-    in this invocation. No-op if nothing in this run was scored."""
-    if not any(r.score is not None for r in results):
+    """Print a MODEL/RESULT/SCORE/HARD FAILS/TOOL ERRORS/TIME/TOKENS table
+    across every model in this invocation. No-op if nothing in this run
+    was scored."""
+    if not any(r.evaluation is not None for r in results):
         return
 
-    headers = ["MODEL", "PASS", "TOOL ERRORS", "TIME", "TOKENS"]
+    headers = ["MODEL", "RESULT", "SCORE", "HARD FAILS", "TOOL ERRORS", "TIME", "TOKENS"]
     rows = []
     for r in results:
-        score_col = f"{r.score['passed']}/{r.score['total']}" if r.score is not None else "—"
+        if r.evaluation is not None:
+            result_col = "PASS" if r.evaluation["passed"] else "FAIL"
+            score_col = f"{r.evaluation['score']}/{r.evaluation['max_score']}"
+            hard_fail_col = str(len(r.evaluation["hard_failures"]))
+        else:
+            result_col = score_col = hard_fail_col = "—"
         tool_error_count = sum(1 for tc in r.tool_calls if tc.outcome == "error")
         time_col = f"{r.elapsed_seconds:.1f}s"
         tokens_col = str(r.total_tokens) if r.total_tokens is not None else "—"
-        rows.append([r.model, score_col, str(tool_error_count), time_col, tokens_col])
+        rows.append(
+            [r.model, result_col, score_col, hard_fail_col, str(tool_error_count), time_col, tokens_col]
+        )
 
     widths = [max(len(headers[i]), *(len(row[i]) for row in rows)) for i in range(len(headers))]
 

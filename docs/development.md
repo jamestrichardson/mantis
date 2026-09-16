@@ -65,11 +65,13 @@ src/mantis/
 │   └── awx_troubleshooter.py  # AWX Troubleshooting Agent
 └── eval/                      # evaluation harness — see docs/evaluation.md
     ├── scenarios.py           # Scenario, ScenarioRegistry
+    ├── expectations.py        # deterministic check vocabulary (RequiredToolCall, ...)
+    ├── scoring.py             # evaluate_result(): expectations -> Evaluation
     ├── runner.py              # run_scenario(), run_comparison()
     ├── results.py             # EvalResult, ToolCallSummary
     ├── cli.py                 # `mantis eval run|list-scenarios|list-models`
     └── fixtures/
-        └── awx.py             # FixtureAWXClient + awx-no-route scenario
+        └── awx.py             # FixtureAWXClient + six golden AWX scenarios
 ```
 
 See [docs/evaluation.md](evaluation.md) for the evaluation harness itself
