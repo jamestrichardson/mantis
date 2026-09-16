@@ -1,0 +1,344 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+DEPLOY_ROOT="${MANTIS_DEPLOY_ROOT:-/opt/mantis}"
+DEPLOY_ENV="${DEPLOY_ROOT}/deploy.env"
+COMPOSE_FILE="${DEPLOY_ROOT}/compose.yaml"
+STATE_DIR="${DEPLOY_ROOT}/state"
+SERVICE_NAME="${MANTIS_SERVICE_NAME:-mantis}"
+CONTAINER_NAME="${MANTIS_CONTAINER_NAME:-mantis}"
+LOCK_FILE="${DEPLOY_ROOT}/.deploy.lock"
+
+log() { printf '[mantis-deploy] %s\n' "$*"; }
+err() { printf '[mantis-deploy] ERROR: %s\n' "$*" >&2; }
+die() { err "$*"; exit 1; }
+
+usage() {
+  cat <<'USAGE'
+Usage:
+  mantis-deploy <tag>       Deploy an explicit GHCR tag (for example pr-46 or 1.0.0)
+  mantis-deploy status      Show configured/running image and health state
+  mantis-deploy rollback    Redeploy the previous known-good immutable image
+  mantis-deploy help        Show this help
+
+The tag "latest" is intentionally refused. A selected tag is pulled once,
+resolved to an immutable digest, and that digest is what Docker Compose runs.
+USAGE
+}
+
+require_command() {
+  command -v "$1" >/dev/null 2>&1 || die "Required command not found: $1"
+}
+
+read_env_value() {
+  local key="$1" file="$2" line value
+  line="$(grep -E "^${key}=" "$file" | tail -n 1 || true)"
+  [[ -n "$line" ]] || return 1
+  value="${line#*=}"
+  if [[ "$value" == \"*\" && "$value" == *\" ]]; then
+    value="${value:1:${#value}-2}"
+  elif [[ "$value" == \'*\' && "$value" == *\' ]]; then
+    value="${value:1:${#value}-2}"
+  fi
+  printf '%s' "$value"
+}
+
+set_env_value() {
+  local key="$1" value="$2" file="$3" tmp
+  tmp="$(mktemp "${file}.tmp.XXXXXX")"
+  awk -v key="$key" -v value="$value" '
+    BEGIN { found = 0 }
+    index($0, key "=") == 1 { print key "=" value; found = 1; next }
+    { print }
+    END { if (!found) print key "=" value }
+  ' "$file" >"$tmp"
+  chmod --reference="$file" "$tmp" 2>/dev/null || true
+  mv "$tmp" "$file"
+}
+
+read_state() {
+  local name="$1"
+  [[ -f "${STATE_DIR}/${name}" ]] || return 1
+  cat "${STATE_DIR}/${name}"
+}
+
+write_state() {
+  local name="$1" value="$2"
+  printf '%s\n' "$value" >"${STATE_DIR}/${name}"
+}
+
+remove_state() { rm -f "${STATE_DIR}/$1"; }
+
+validate_tag() {
+  local tag="$1"
+  [[ "$tag" != "latest" ]] || die "Refusing to deploy 'latest'; use an explicit PR, SHA, dev, or SemVer tag"
+  [[ "$tag" =~ ^[A-Za-z0-9_][A-Za-z0-9_.-]{0,127}$ ]] || die "Invalid Docker tag: ${tag}"
+}
+
+compose() {
+  docker compose --env-file "$DEPLOY_ENV" -f "$COMPOSE_FILE" "$@"
+}
+
+container_state() {
+  docker inspect --format '{{.State.Status}}' "$CONTAINER_NAME" 2>/dev/null || true
+}
+
+container_health() {
+  docker inspect --format '{{if .State.Health}}{{.State.Health.Status}}{{else}}none{{end}}' "$CONTAINER_NAME" 2>/dev/null || true
+}
+
+running_image_ref() {
+  docker inspect --format '{{.Config.Image}}' "$CONTAINER_NAME" 2>/dev/null || true
+}
+
+running_image_id() {
+  docker inspect --format '{{.Image}}' "$CONTAINER_NAME" 2>/dev/null || true
+}
+
+wait_for_health() {
+  local timeout="$1" interval="$2" deadline state health
+  deadline=$((SECONDS + timeout))
+
+  while (( SECONDS < deadline )); do
+    state="$(container_state)"
+    health="$(container_health)"
+
+    case "$state" in
+      exited|dead|removing) return 1 ;;
+      running)
+        if [[ "$health" == "healthy" || "$health" == "none" ]]; then
+          return 0
+        fi
+        [[ "$health" != "unhealthy" ]] || return 1
+        ;;
+    esac
+
+    sleep "$interval"
+  done
+
+  return 1
+}
+
+resolve_digest_ref() {
+  local tagged_ref="$1" repository="$2" digest_ref
+  digest_ref="$({ docker image inspect --format '{{range .RepoDigests}}{{println .}}{{end}}' "$tagged_ref" 2>/dev/null || true; } \
+    | awk -v prefix="${repository}@" 'index($0, prefix) == 1 { print; exit }')"
+  [[ -n "$digest_ref" ]] || die "Pulled ${tagged_ref}, but Docker did not report an immutable RepoDigest"
+  printf '%s' "$digest_ref"
+}
+
+emit_event() {
+  local action="$1" outcome="$2" tag="$3" image_ref="$4" timestamp json
+  timestamp="$(date -u +'%Y-%m-%dT%H:%M:%SZ')"
+  json="{\"event\":\"mantis_deployment\",\"timestamp\":\"${timestamp}\",\"action\":\"${action}\",\"outcome\":\"${outcome}\",\"requested_tag\":\"${tag}\",\"image_ref\":\"${image_ref}\",\"host\":\"$(hostname -s)\"}"
+
+  command -v logger >/dev/null 2>&1 && logger -t mantis-deploy -- "$json" || true
+
+  # Also write successful deployment events into the container's stdout so
+  # the existing Alloy Docker source ships them to Loki.
+  if [[ "$(container_state)" == "running" ]]; then
+    printf '%s\n' "$json" | docker exec -i "$CONTAINER_NAME" /bin/sh -c 'cat >/proc/1/fd/1' >/dev/null 2>&1 || true
+  fi
+}
+
+ensure_layout() {
+  [[ -f "$COMPOSE_FILE" ]] || die "Missing ${COMPOSE_FILE}; install deploy/degobah/compose.yaml first"
+  [[ -f "$DEPLOY_ENV" ]] || die "Missing ${DEPLOY_ENV}; copy deploy.env.example and configure it first"
+  mkdir -p "$STATE_DIR"
+  touch "$LOCK_FILE"
+
+  require_command docker
+  docker compose version >/dev/null 2>&1 || die "Docker Compose v2 is required (docker compose)"
+  require_command flock
+}
+
+image_repository() {
+  local repository
+  repository="${MANTIS_IMAGE_REPOSITORY:-$(read_env_value MANTIS_IMAGE_REPOSITORY "$DEPLOY_ENV" || true)}"
+  [[ -n "$repository" ]] || die "MANTIS_IMAGE_REPOSITORY is not set in ${DEPLOY_ENV}"
+  [[ "$repository" =~ ^[A-Za-z0-9._/-]+$ ]] || die "Invalid image repository: ${repository}"
+  printf '%s' "$repository"
+}
+
+health_timeout() {
+  local value
+  value="${MANTIS_HEALTH_TIMEOUT_SECONDS:-$(read_env_value MANTIS_HEALTH_TIMEOUT_SECONDS "$DEPLOY_ENV" || true)}"
+  value="${value:-60}"
+  [[ "$value" =~ ^[1-9][0-9]*$ ]] || die "MANTIS_HEALTH_TIMEOUT_SECONDS must be a positive integer"
+  printf '%s' "$value"
+}
+
+health_interval() {
+  local value
+  value="${MANTIS_HEALTH_INTERVAL_SECONDS:-$(read_env_value MANTIS_HEALTH_INTERVAL_SECONDS "$DEPLOY_ENV" || true)}"
+  value="${value:-2}"
+  [[ "$value" =~ ^[1-9][0-9]*$ ]] || die "MANTIS_HEALTH_INTERVAL_SECONDS must be a positive integer"
+  printf '%s' "$value"
+}
+
+apply_image() {
+  local tag="$1" immutable_ref="$2" timeout interval
+  timeout="$(health_timeout)"
+  interval="$(health_interval)"
+
+  set_env_value MANTIS_IMAGE_REF "$immutable_ref" "$DEPLOY_ENV"
+  set_env_value MANTIS_DEPLOYED_TAG "$tag" "$DEPLOY_ENV"
+
+  compose up -d --no-deps --force-recreate "$SERVICE_NAME"
+
+  if wait_for_health "$timeout" "$interval"; then
+    return 0
+  fi
+
+  err "Container failed health/readiness check after ${timeout}s"
+  compose logs --tail=100 "$SERVICE_NAME" >&2 || true
+  return 1
+}
+
+record_success() {
+  local tag="$1" immutable_ref="$2" old_tag="$3" old_ref="$4"
+
+  if [[ -n "$old_tag" && -n "$old_ref" ]]; then
+    write_state previous-tag "$old_tag"
+    write_state previous-ref "$old_ref"
+  fi
+
+  write_state current-tag "$tag"
+  write_state current-ref "$immutable_ref"
+}
+
+restore_previous_after_failure() {
+  local old_tag="$1" old_ref="$2"
+
+  if [[ -z "$old_tag" || -z "$old_ref" ]]; then
+    err "No previous known-good deployment exists; stopping failed container"
+    compose stop "$SERVICE_NAME" >/dev/null 2>&1 || true
+    return 1
+  fi
+
+  log "Rolling back automatically to ${old_tag} (${old_ref})"
+  docker pull "$old_ref" >/dev/null
+
+  if apply_image "$old_tag" "$old_ref"; then
+    write_state current-tag "$old_tag"
+    write_state current-ref "$old_ref"
+    emit_event rollback success "$old_tag" "$old_ref"
+    log "Rollback succeeded"
+    return 0
+  fi
+
+  emit_event rollback failure "$old_tag" "$old_ref"
+  err "Rollback failed; manual intervention required"
+  return 1
+}
+
+deploy_tag() {
+  local tag="$1" repository tagged_ref immutable_ref old_tag old_ref
+  validate_tag "$tag"
+  repository="$(image_repository)"
+  tagged_ref="${repository}:${tag}"
+  old_tag="$(read_state current-tag || true)"
+  old_ref="$(read_state current-ref || true)"
+
+  log "Pulling ${tagged_ref}"
+  docker pull "$tagged_ref"
+  immutable_ref="$(resolve_digest_ref "$tagged_ref" "$repository")"
+  log "Resolved ${tag} -> ${immutable_ref}"
+
+  if ! apply_image "$tag" "$immutable_ref"; then
+    emit_event deploy failure "$tag" "$immutable_ref"
+    restore_previous_after_failure "$old_tag" "$old_ref" || true
+    return 1
+  fi
+
+  record_success "$tag" "$immutable_ref" "$old_tag" "$old_ref"
+  emit_event deploy success "$tag" "$immutable_ref"
+  log "Deployed ${tag} (${immutable_ref})"
+}
+
+rollback() {
+  local target_tag target_ref current_tag current_ref
+  target_tag="$(read_state previous-tag || true)"
+  target_ref="$(read_state previous-ref || true)"
+  current_tag="$(read_state current-tag || true)"
+  current_ref="$(read_state current-ref || true)"
+
+  [[ -n "$target_tag" && -n "$target_ref" ]] || die "No previous known-good deployment is recorded"
+
+  log "Rolling back ${current_tag:-unknown} -> ${target_tag}"
+  docker pull "$target_ref" >/dev/null
+
+  if ! apply_image "$target_tag" "$target_ref"; then
+    emit_event rollback failure "$target_tag" "$target_ref"
+    die "Rollback target failed health/readiness check; current state files were not changed"
+  fi
+
+  write_state current-tag "$target_tag"
+  write_state current-ref "$target_ref"
+  if [[ -n "$current_tag" && -n "$current_ref" ]]; then
+    write_state previous-tag "$current_tag"
+    write_state previous-ref "$current_ref"
+  else
+    remove_state previous-tag
+    remove_state previous-ref
+  fi
+
+  emit_event rollback success "$target_tag" "$target_ref"
+  log "Rollback complete: ${target_tag} (${target_ref})"
+}
+
+status() {
+  local configured_tag configured_ref current_tag current_ref previous_tag previous_ref state health image image_id started
+  configured_tag="$(read_env_value MANTIS_DEPLOYED_TAG "$DEPLOY_ENV" || true)"
+  configured_ref="$(read_env_value MANTIS_IMAGE_REF "$DEPLOY_ENV" || true)"
+  current_tag="$(read_state current-tag || true)"
+  current_ref="$(read_state current-ref || true)"
+  previous_tag="$(read_state previous-tag || true)"
+  previous_ref="$(read_state previous-ref || true)"
+  state="$(container_state)"
+  health="$(container_health)"
+  image="$(running_image_ref)"
+  image_id="$(running_image_id)"
+  started="$(docker inspect --format '{{.State.StartedAt}}' "$CONTAINER_NAME" 2>/dev/null || true)"
+
+  cat <<EOF_STATUS
+Configured tag:    ${configured_tag:-unknown}
+Configured image:  ${configured_ref:-unknown}
+Current tag:       ${current_tag:-unknown}
+Current image:     ${current_ref:-unknown}
+Previous tag:      ${previous_tag:-none}
+Previous image:    ${previous_ref:-none}
+Running image:     ${image:-not running}
+Running image ID:  ${image_id:-n/a}
+Container state:   ${state:-not found}
+Container health:  ${health:-n/a}
+Started at:        ${started:-n/a}
+EOF_STATUS
+}
+
+main() {
+  local command="${1:-help}"
+
+  case "$command" in
+    -h|--help|help)
+      usage
+      return 0
+      ;;
+  esac
+
+  ensure_layout
+
+  exec 9>"$LOCK_FILE"
+  flock -n 9 || die "Another mantis-deploy operation is already running"
+
+  case "$command" in
+    status) status ;;
+    rollback) rollback ;;
+    *)
+      [[ $# -eq 1 ]] || die "Deploy accepts exactly one tag argument"
+      deploy_tag "$command"
+      ;;
+  esac
+}
+
+main "$@"
