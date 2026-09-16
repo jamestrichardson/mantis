@@ -1,0 +1,138 @@
+name: container-publish
+
+# Two independent publish paths, deliberately separate from ci.yml's
+# validation-only docker-build job:
+#   - push to main    -> fast-moving `dev` + immutable `sha-<short>` tags,
+#                        for pulling/testing whatever's on main right now.
+#   - release published -> immutable SemVer tags + `latest`. `latest` only
+#                        ever moves here, never on an ordinary main push.
+# Never runs on pull_request — untrusted PR code never gets push access to
+# the registry.
+
+on:
+  push:
+    branches: [main]
+  release:
+    types: [published]
+
+permissions:
+  contents: read
+  packages: write
+
+concurrency:
+  group: container-publish-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  dev:
+    name: Publish dev image
+    if: github.event_name == 'push'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: docker/setup-buildx-action@v3
+
+      - uses: docker/metadata-action@v5
+        id: meta
+        with:
+          images: ghcr.io/${{ github.repository }}
+          tags: |
+            type=raw,value=dev
+            type=sha,prefix=sha-,format=short
+
+      # Build and load locally first so the smoke test can run before
+      # anything is pushed to the registry.
+      - name: Build (local)
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: false
+          load: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Smoke test
+        run: |
+          image="$(head -n1 <<< '${{ steps.meta.outputs.tags }}')"
+          docker run --rm "$image" | grep -q "Usage: mantis"
+
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      # Re-run against the same GHA cache scope, so this is a near-instant
+      # cache hit rather than a full rebuild.
+      - name: Push
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+  release:
+    name: Publish release image
+    if: github.event_name == 'release' && !github.event.release.prerelease
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # release-please tags as `mantis-v1.2.3` (package-scoped, so a future
+      # monorepo split wouldn't collide); strip the prefix to get the bare
+      # SemVer string metadata-action's semver tag rules expect.
+      - name: Extract version from release tag
+        id: version
+        run: |
+          tag="${{ github.event.release.tag_name }}"
+          echo "version=${tag#mantis-v}" >> "$GITHUB_OUTPUT"
+
+      - uses: docker/setup-buildx-action@v3
+
+      - uses: docker/metadata-action@v5
+        id: meta
+        with:
+          images: ghcr.io/${{ github.repository }}
+          tags: |
+            type=semver,pattern={{version}},value=${{ steps.version.outputs.version }}
+            type=semver,pattern={{major}}.{{minor}},value=${{ steps.version.outputs.version }}
+            type=semver,pattern={{major}},value=${{ steps.version.outputs.version }}
+            type=raw,value=latest
+
+      - name: Build (local)
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: false
+          load: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Smoke test
+        run: |
+          image="$(head -n1 <<< '${{ steps.meta.outputs.tags }}')"
+          docker run --rm "$image" | grep -q "Usage: mantis"
+
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Push
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max

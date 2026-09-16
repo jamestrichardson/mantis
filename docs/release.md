@@ -92,3 +92,42 @@ tag history, not local workflow state, so re-running the workflow (or
 having it run on a merge that doesn't change any package) never creates
 a duplicate release PR or duplicate tag/release for a version that's
 already shipped.
+
+## Container images
+
+`.github/workflows/container-publish.yml` publishes to
+`ghcr.io/jamestrichardson/mantis`. It never runs on pull requests —
+only on a push to `main` or a published Release — so untrusted PR code
+never gets registry push access. There are two independent tag
+policies:
+
+| Trigger | Tags | Notes |
+| --- | --- | --- |
+| Push to `main` | `dev`, `sha-<short-sha>` | Rebuilt on every merge to `main`. `dev` always points at the current tip of `main`; `sha-<short-sha>` is an immutable per-commit tag. For quickly trying out unreleased work. |
+| Release published | `<version>`, `<major>.<minor>`, `<major>`, `latest` | Only ever produced from an actual GitHub Release (see [Flow](#flow) above). `latest` **only** moves here — an ordinary merge to `main` never touches it. |
+
+```bash
+docker pull ghcr.io/jamestrichardson/mantis:latest      # newest stable release
+docker pull ghcr.io/jamestrichardson/mantis:1.0.0        # pinned version
+docker pull ghcr.io/jamestrichardson/mantis:dev          # tip of main, unreleased
+docker pull ghcr.io/jamestrichardson/mantis:sha-0a25bfe  # exact commit
+```
+
+Both jobs build the image, load it locally, and run a smoke test
+(`docker run <image>` must print the CLI usage banner) *before* logging
+in and pushing — a broken image is never published.
+
+Configuration and secrets are never baked into the image; everything
+is supplied at container-run time via environment variables — see
+[docs/configuration.md](configuration.md) for the full list
+(`LITELLM_URL`, `AWX_TOKEN`, etc.):
+
+```bash
+docker run --rm \
+  -e LITELLM_URL=https://litellm.internal \
+  -e LITELLM_API_KEY=... \
+  -e AWX_URL=https://awx.internal \
+  -e AWX_TOKEN=... \
+  ghcr.io/jamestrichardson/mantis:latest \
+  awx-troubleshooter
+```
