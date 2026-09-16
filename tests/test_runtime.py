@@ -43,6 +43,24 @@ class FakeChoice:
 @dataclass
 class FakeResponse:
     choices: list[FakeChoice]
+    usage: Any = None
+
+
+@dataclass
+class FakeUsage:
+    """Mimics the OpenAI SDK's pydantic-based usage object closely enough
+    to exercise AgentRuntime's model_dump()-based extraction."""
+
+    prompt_tokens: int
+    completion_tokens: int
+    total_tokens: int
+
+    def model_dump(self) -> dict[str, int]:
+        return {
+            "prompt_tokens": self.prompt_tokens,
+            "completion_tokens": self.completion_tokens,
+            "total_tokens": self.total_tokens,
+        }
 
 
 class FakeCompletions:
@@ -132,6 +150,7 @@ def test_run_dispatches_tool_call_and_returns_final_answer():
 
     assert result == "done"
     assert runtime.call_log[-1].outcome == "ok"
+    assert runtime.call_log[-1].result == {"got": 1}
     # The tool result must be fed back to the model as a tool message.
     second_call_messages = runtime._client.chat.completions.calls[1]["messages"]
     tool_messages = [m for m in second_call_messages if m["role"] == "tool"]
@@ -186,6 +205,7 @@ def test_run_handles_integration_exception_cleanly():
     assert result == "recovered"
     assert runtime.call_log[-1].outcome == "error"
     assert "integration exploded" in runtime.call_log[-1].detail
+    assert runtime.call_log[-1].result is None
 
 
 def test_run_detects_exact_duplicate_tool_calls():
@@ -210,6 +230,7 @@ def test_run_detects_exact_duplicate_tool_calls():
     assert result == "done"
     assert call_count["n"] == 1  # handler only actually executed once
     assert runtime.call_log[-1].outcome == "duplicate"
+    assert runtime.call_log[-1].result == {"n": 1}  # the cached result
 
 
 def test_duplicate_tool_call_replays_cached_result_not_an_error():
@@ -331,3 +352,53 @@ def test_temperature_omitted_when_unset():
 
     call_kwargs = runtime._client.chat.completions.calls[0]
     assert "temperature" not in call_kwargs
+
+
+def test_usage_log_captures_usage_when_backend_returns_it():
+    response = FakeResponse(
+        choices=[FakeChoice(message=FakeMessage(content="hi", tool_calls=None))],
+        usage=FakeUsage(prompt_tokens=10, completion_tokens=5, total_tokens=15),
+    )
+    runtime = _build_runtime([response])
+
+    runtime.run("hello")
+
+    assert runtime.usage_log == [
+        {"prompt_tokens": 10, "completion_tokens": 5, "total_tokens": 15}
+    ]
+
+
+def test_usage_log_entry_is_none_when_backend_omits_usage():
+    runtime = _build_runtime([_final_message_response("hi")])
+
+    runtime.run("hello")
+
+    assert runtime.usage_log == [None]
+
+
+def test_usage_log_has_one_entry_per_iteration():
+    registry = ToolRegistry()
+    registry.register(_echo_tool())
+
+    responses = [
+        FakeResponse(
+            choices=[
+                FakeChoice(
+                    message=FakeMessage(
+                        content=None,
+                        tool_calls=[_tool_call("call_1", "echo", {"x": 1})],
+                    )
+                )
+            ],
+            usage=FakeUsage(prompt_tokens=20, completion_tokens=2, total_tokens=22),
+        ),
+        FakeResponse(
+            choices=[FakeChoice(message=FakeMessage(content="done", tool_calls=None))],
+            usage=FakeUsage(prompt_tokens=30, completion_tokens=8, total_tokens=38),
+        ),
+    ]
+    runtime = _build_runtime(responses, tools=["echo"], registry=registry)
+
+    runtime.run("do the thing")
+
+    assert [entry["total_tokens"] for entry in runtime.usage_log] == [22, 38]

@@ -286,6 +286,39 @@ def test_awx_recent_failed_jobs_reports_truncation_when_more_jobs_exist():
     assert result["meta"]["truncated"] is True
 
 
+def test_awx_recent_failed_jobs_accepts_a_client_override():
+    # This is the injection point mantis.eval uses to run this exact
+    # production code path against fixture data instead of live AWX — no
+    # real AWXConfig/env vars should be required when a client is given.
+    class StubClient:
+        def list_jobs(self, *, status, order_by, page_size):
+            from mantis.integrations.awx import JobListPage
+
+            return JobListPage(
+                jobs=[
+                    {
+                        "id": 1,
+                        "name": "stub-job",
+                        "status": "failed",
+                        "started": "2026-09-14T10:00:00Z",
+                        "finished": "2026-09-14T10:05:00Z",
+                        "elapsed": 1.0,
+                        "failed": True,
+                        "job_explanation": "",
+                    }
+                ],
+                total_count=1,
+            )
+
+        def get_job_stdout(self, job_id):
+            return "PLAY RECAP\nok=1 failed=0"
+
+    result = awx_recent_failed_jobs(limit=1, _client=StubClient())
+
+    assert result["returned_count"] == 1
+    assert result["jobs"][0]["id"] == 1
+
+
 @respx.mock
 def test_awx_recent_failed_jobs_clamps_limit_above_max():
     route = respx.get("https://awx.example.test/api/v2/jobs/").mock(

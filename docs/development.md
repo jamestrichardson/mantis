@@ -61,9 +61,19 @@ src/mantis/
 ├── tools/
 │   ├── _text.py               # excerpt/tail preprocessing helpers
 │   └── awx.py                 # awx_recent_failed_jobs (semantic tool)
-└── agents/
-    └── awx_troubleshooter.py  # AWX Troubleshooting Agent
+├── agents/
+│   └── awx_troubleshooter.py  # AWX Troubleshooting Agent
+└── eval/                      # evaluation harness — see docs/evaluation.md
+    ├── scenarios.py           # Scenario, ScenarioRegistry
+    ├── runner.py              # run_scenario(), run_comparison()
+    ├── results.py             # EvalResult, ToolCallSummary
+    ├── cli.py                 # `mantis eval run|list-scenarios|list-models`
+    └── fixtures/
+        └── awx.py             # FixtureAWXClient + awx-no-route scenario
 ```
+
+See [docs/evaluation.md](evaluation.md) for the evaluation harness itself
+(running scenarios, adding a new one, the result format).
 
 ## Adding an integration
 

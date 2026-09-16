@@ -59,6 +59,34 @@ class MaxIterationsExceededError(RuntimeError_):
     producing a final answer."""
 
 
+def build_openai_client(model_config: LiteLLMConfig) -> OpenAI:
+    """Build an OpenAI-compatible client pointed at LiteLLM.
+
+    Shared by :class:`AgentRuntime` and anything else that needs to talk
+    to LiteLLM directly without going through a full agent run — e.g.
+    ``mantis eval list-models``, which just needs to list what LiteLLM has
+    configured.
+    """
+    base_url = model_config.url.rstrip("/")
+    if not base_url.endswith("/v1"):
+        base_url = f"{base_url}/v1"
+    return OpenAI(base_url=base_url, api_key=model_config.api_key.get_secret_value())
+
+
+def _usage_to_dict(usage: Any) -> dict[str, Any] | None:
+    """Best-effort conversion of an OpenAI-SDK usage object to a plain
+    dict. Not every LiteLLM-fronted backend returns usage data, so this
+    must degrade to ``None`` rather than raise.
+    """
+    if usage is None:
+        return None
+    if hasattr(usage, "model_dump"):
+        return usage.model_dump()
+    if isinstance(usage, dict):
+        return dict(usage)
+    return None
+
+
 @dataclass
 class ToolCallLogEntry:
     """A single record of a tool invocation attempt, for observability."""
@@ -68,6 +96,10 @@ class ToolCallLogEntry:
     arguments: dict[str, Any] | None
     outcome: str  # "ok", "duplicate", "unknown_tool", "bad_arguments", "error"
     detail: str = ""
+    result: Any = None
+    """The tool's return value for "ok"/"duplicate" outcomes (the cached
+    value on a duplicate replay); None for outcomes with no successful
+    result (bad_arguments/unknown_tool/error)."""
 
 
 @dataclass
@@ -108,6 +140,12 @@ class AgentRuntime:
             more reliably-formatted output from smaller local models —
             useful for keeping tool-calling agents on task. ``None``
             (default) omits the parameter and uses the backend's default.
+
+    After a call to :meth:`run`, two attributes hold a record of what
+    happened, in order: ``call_log`` (tool-call attempts and their
+    outcomes) and ``usage_log`` (per-iteration token usage, when the
+    backend reports it). Both accumulate across repeated ``run()`` calls
+    on the same instance rather than resetting.
     """
 
     name: str
@@ -123,17 +161,16 @@ class AgentRuntime:
         if self.model_config is None:
             self.model_config = LiteLLMConfig.from_env()
 
-        base_url = self.model_config.url.rstrip("/")
-        if not base_url.endswith("/v1"):
-            base_url = f"{base_url}/v1"
-
-        self._client = OpenAI(
-            base_url=base_url, api_key=self.model_config.api_key.get_secret_value()
-        )
+        self._client = build_openai_client(self.model_config)
         self._resolved_tools: dict[str, Tool] = {
             tool.name: tool for tool in self.registry.subset(self.tools)
         }
         self.call_log: list[ToolCallLogEntry] = []
+        # Per-iteration token usage, one entry per model call in the last
+        # run(), in order. None for an iteration where the backend didn't
+        # return usage data. Consumers (e.g. the eval harness) that want a
+        # total can sum the "total_tokens" key across entries.
+        self.usage_log: list[dict[str, Any] | None] = []
 
     def _tool_schemas(self) -> list[dict[str, Any]]:
         return [dict(tool.schema) for tool in self._resolved_tools.values()]
@@ -187,6 +224,7 @@ class AgentRuntime:
                 kwargs["temperature"] = self.temperature
 
             response = self._client.chat.completions.create(**kwargs)
+            self.usage_log.append(_usage_to_dict(getattr(response, "usage", None)))
             choice = response.choices[0]
             message = choice.message
 
@@ -269,7 +307,10 @@ class AgentRuntime:
             )
             logger.info("[%s] %s", self.name, detail)
             self.call_log.append(
-                ToolCallLogEntry(iteration, tool_name, arguments, "duplicate", detail)
+                ToolCallLogEntry(
+                    iteration, tool_name, arguments, "duplicate", detail,
+                    result=tool_result_cache[dedupe_key],
+                )
             )
             # Never withhold data the model is asking for, even on a repeat
             # call — a small/local model may not attend well to a tool
@@ -311,6 +352,6 @@ class AgentRuntime:
 
         tool_result_cache[dedupe_key] = result
         self.call_log.append(
-            ToolCallLogEntry(iteration, tool_name, arguments, "ok")
+            ToolCallLogEntry(iteration, tool_name, arguments, "ok", result=result)
         )
         return json.dumps(result, default=str), True
