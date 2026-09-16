@@ -19,7 +19,7 @@ GitHub Actions -> ghcr.io/jamestrichardson/mantis:<tag>
                          Docker Compose on degobah
 ```
 
-A requested mutable tag such as `pr-59` is resolved to an immutable GHCR digest before the container is started. This matters when the same PR tag is rebuilt: each deployment runs the exact digest that was pulled, and rollback can return to the previous digest even when its tag has since moved.
+A requested mutable tag such as `pr-123` is resolved to an immutable GHCR digest before the container is started. This matters when the same PR tag is rebuilt: each deployment runs the exact digest that was pulled, and rollback can return to the previous digest even when its tag has since moved.
 
 ## Initial setup
 
@@ -67,7 +67,7 @@ If the package is public, no registry login is required.
 Deploy a PR build:
 
 ```bash
-sudo mantis-deploy pr-59
+sudo mantis-deploy pr-123
 ```
 
 Deploy a release:
