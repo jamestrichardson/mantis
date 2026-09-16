@@ -15,6 +15,13 @@ from __future__ import annotations
 from typing import Any
 
 from mantis.agents.awx_troubleshooter import ALLOWED_TOOLS, SYSTEM_PROMPT
+from mantis.eval.expectations import (
+    ForbiddenClaim,
+    MaxToolCalls,
+    MustProduceFinalAnswer,
+    RequiredEvidence,
+    RequiredToolCall,
+)
 from mantis.eval.scenarios import Scenario, default_scenarios
 from mantis.integrations.awx import JobListPage
 from mantis.registry import Tool, ToolRegistry
@@ -117,10 +124,16 @@ def build_no_route_registry() -> ToolRegistry:
 # (ALLOWED_TOOLS, tool_call_budget=1, temperature=0.1) rather than an
 # eval-only prompt — this scenario qualifies models against exactly what
 # production actually runs, per #13's model-qualification goal.
+#
+# expectations encode the "golden behavior" from the description below as
+# deterministic, non-LLM-judged checks (#36): call the tool exactly once,
+# cite the actual evidence (host03, a network-reachability
+# classification, the fact that only one job exists), never overclaim an
+# unproven specific root cause, and actually produce a final answer.
 default_scenarios.register(
     Scenario(
         name="awx-no-route",
-        version="1.0",
+        version="1.1",
         description=(
             "A single failed AWX job whose stdout shows an SSH "
             '"No route to host" UNREACHABLE! failure. Golden behavior: '
@@ -134,5 +147,34 @@ default_scenarios.register(
         build_registry=build_no_route_registry,
         tool_call_budget=1,
         temperature=0.1,
+        expectations=[
+            RequiredToolCall(
+                "awx_recent_failed_jobs",
+                min_count=1,
+                max_count=1,
+                label="called AWX exactly once",
+            ),
+            RequiredEvidence("host03", label="cited host03"),
+            RequiredEvidence(
+                ["network reachability", "network issue", "reachability problem", "unreachable"],
+                label="classified the evidence as a network reachability problem",
+            ),
+            RequiredEvidence(
+                ["1 failed job", "one failed job", "only 1", "single failed job"],
+                label="correctly reported only one failed job exists",
+            ),
+            ForbiddenClaim(
+                [
+                    "firewall caused",
+                    "due to a firewall",
+                    "firewall rule",
+                    "firewall issue",
+                    "firewall misconfiguration",
+                ],
+                label="did not assert firewall was the root cause",
+            ),
+            MaxToolCalls(1, label="stopped after receiving sufficient evidence"),
+            MustProduceFinalAnswer(),
+        ],
     )
 )

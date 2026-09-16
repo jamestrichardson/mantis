@@ -10,10 +10,13 @@ codebase.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
-from typing import Callable
+from dataclasses import dataclass, field
+from typing import TYPE_CHECKING, Callable
 
 from mantis.registry import ToolRegistry
+
+if TYPE_CHECKING:
+    from mantis.eval.expectations import Expectation
 
 
 @dataclass(frozen=True)
@@ -45,6 +48,14 @@ class Scenario:
             same rationale as ``tool_call_budget`` — a scenario should
             reproduce the real agent's tuning, not evaluate a model under
             different conditions than production actually uses.
+        expectations: Deterministic, non-LLM-judged checks against a
+            completed run — see ``mantis.eval.expectations`` for the
+            vocabulary (required/max tool calls, required evidence,
+            forbidden claims, must-produce-a-final-answer). Empty by
+            default: a scenario with no expectations still runs and
+            produces a raw result, it just isn't scored. Evaluated by
+            ``mantis.eval.scoring.score_result`` and attached to the run's
+            ``EvalResult.score``.
     """
 
     name: str
@@ -56,6 +67,7 @@ class Scenario:
     build_registry: Callable[[], ToolRegistry]
     tool_call_budget: int | None = None
     temperature: float | None = None
+    expectations: list["Expectation"] = field(default_factory=list)
 
 
 class ScenarioNotFoundError(KeyError):

@@ -150,6 +150,49 @@ def _base_config() -> LiteLLMConfig:
 
 
 # ---------------------------------------------------------------------------
+# Scoring integration
+# ---------------------------------------------------------------------------
+
+
+def test_run_scenario_attaches_score_when_scenario_has_expectations(monkeypatch):
+    from mantis.eval.expectations import RequiredEvidence
+
+    _patch_openai(monkeypatch, {"model-a": [_final("the answer mentions host03")]})
+    scenario = _echo_scenario(expectations=[RequiredEvidence("host03", label="cited host03")])
+
+    result = run_scenario(scenario, "model-a", base_model_config=_base_config())
+
+    assert result.score is not None
+    assert result.score["passed"] == 1
+    assert result.score["total"] == 1
+    assert result.score["checks"][0]["label"] == "cited host03"
+
+
+def test_run_scenario_score_is_none_without_expectations(monkeypatch):
+    _patch_openai(monkeypatch, {"model-a": [_final("hello")]})
+    scenario = _echo_scenario()  # no expectations
+
+    result = run_scenario(scenario, "model-a", base_model_config=_base_config())
+
+    assert result.score is None
+
+
+def test_run_scenario_score_reflects_a_failing_expectation(monkeypatch):
+    from mantis.eval.expectations import ForbiddenClaim
+
+    _patch_openai(monkeypatch, {"model-a": [_final("the firewall caused it")]})
+    scenario = _echo_scenario(
+        expectations=[ForbiddenClaim("firewall caused", label="did not blame the firewall")]
+    )
+
+    result = run_scenario(scenario, "model-a", base_model_config=_base_config())
+
+    assert result.score["passed"] == 0
+    assert result.score["total"] == 1
+    assert result.score["checks"][0]["passed"] is False
+
+
+# ---------------------------------------------------------------------------
 # run_scenario
 # ---------------------------------------------------------------------------
 

@@ -69,9 +69,10 @@ def test_awx_no_route_scenario_is_registered():
 
     scenario = default_scenarios.get("awx-no-route")
 
-    assert scenario.version == "1.0"
+    assert scenario.version == "1.1"
     assert "awx_recent_failed_jobs" in scenario.agent_tools
     assert scenario.tool_call_budget == 1
+    assert len(scenario.expectations) == 7
 
 
 def test_awx_no_route_scenario_matches_the_real_awx_troubleshooter_prompt():

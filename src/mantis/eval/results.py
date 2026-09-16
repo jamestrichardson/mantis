@@ -76,6 +76,13 @@ class EvalResult:
             parsed into ``tool_calls``. ``None`` for a normal run, so this
             never bloats the common case with a redundant dump of data
             already in ``final_answer``.
+        score: Deterministic scoring against the scenario's
+            ``expectations`` (see ``mantis.eval.scoring.ScoreReport.to_dict``),
+            computed and attached by ``run_scenario`` — ``{"checks": [...],
+            "passed": N, "total": M}``. ``None`` when the scenario declares
+            no expectations (unscored), not when scoring ran and found
+            failures — an unscored run and an all-failing scored run are
+            different things and must stay distinguishable.
         result_format_version: See :data:`RESULT_FORMAT_VERSION`.
     """
 
@@ -95,6 +102,7 @@ class EvalResult:
     total_tokens: int | None = None
     error: str | None = None
     raw_message: dict[str, Any] | None = None
+    score: dict[str, Any] | None = None
     result_format_version: str = RESULT_FORMAT_VERSION
 
     def to_dict(self) -> dict[str, Any]:
