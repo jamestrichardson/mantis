@@ -1,7 +1,7 @@
 # Reliability
 
-Mantis is moving from one remote integration (AWX) to several
-(Prometheus, Loki, network, Git, Kubernetes). This page is the shared
+Mantis has moved from one remote integration (AWX) to several (network,
+Prometheus, Loki today; Git, Kubernetes planned). This page is the shared
 reliability contract every integration adopts — explicit timeouts, one
 failure taxonomy, safe bounded retries, run/tool deadlines, and a
 run-local failure guard — implemented once in `mantis.reliability` and
@@ -147,9 +147,11 @@ the one place that translates between them, so a tool's result shape
 never needs to change as the internal taxonomy gets more precise.
 `AWXError`/`AWXStdoutError` (`mantis.integrations.awx`) both subclass
 `IntegrationError` — `AgentRuntime` catches the shared base class
-generically and never imports an AWX-specific type, which is what lets
-a future Prometheus/Loki client plug into the exact same runtime
-handling by subclassing `IntegrationError` the same way.
+generically and never imports an AWX-specific type, which is what let
+`PrometheusError` (`mantis.integrations.prometheus`, #9) and
+`LokiError` (`mantis.integrations.loki`, #10) plug into the exact same
+runtime handling by subclassing `IntegrationError` the same way, and
+what will let any future integration do the same.
 
 Classification never depends on string-matching exception text: HTTP
 statuses go through `classify_http_status()`, transport-level exceptions

@@ -1,7 +1,15 @@
 # Observability
 
-Mantis exposes two independent, collector-agnostic surfaces — it never
-holds credentials for or talks directly to Loki, Prometheus, or Grafana:
+This page is about Mantis's own operational telemetry — how Mantis
+reports on itself, not how it gathers evidence about the systems it
+troubleshoots. For *that* (Mantis actively querying Prometheus/Loki as
+evidence sources), see [docs/prometheus.md](prometheus.md) and
+[docs/loki.md](loki.md) — those are a completely separate concern from
+this page and don't change anything documented here.
+
+For its own telemetry, Mantis exposes two independent,
+collector-agnostic surfaces — it never holds credentials for or talks
+directly to a collector or dashboard system to *emit* this telemetry:
 
 - **Structured JSON logs** to stdout/stderr, for a host-side collector
   (Grafana Alloy) to ship to Loki.

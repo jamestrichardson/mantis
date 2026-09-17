@@ -235,6 +235,48 @@ class PrometheusConfig:
 
 
 @dataclass(frozen=True)
+class LokiConfig:
+    """Connection settings for Loki (#10).
+
+    Mirrors :class:`PrometheusConfig` exactly: authentication is
+    optional (an unauthenticated Loki endpoint works with no further
+    configuration), a bearer token takes priority over basic auth when
+    both are set, and ``verify_ssl`` defaults to ``True`` (disabling TLS
+    verification requires the explicit ``MANTIS_LOKI_VERIFY_SSL=false``
+    opt-out, for the same machine-in-the-middle reasons documented on
+    :class:`PrometheusConfig`).
+
+    ``tenant_id``, when set, is sent as a static ``X-Scope-OrgID`` header
+    on every request (Loki's multi-tenancy convention) — this is
+    deployment configuration, never something the model selects or
+    supplies per call (see ``docs/loki.md``'s "Tenant handling" section
+    and #10's security requirements).
+    """
+
+    url: str
+    bearer_token: Secret | None = None
+    basic_auth_username: str | None = None
+    basic_auth_password: Secret | None = None
+    tenant_id: str | None = None
+    verify_ssl: bool = True
+
+    @classmethod
+    def from_env(cls) -> "LokiConfig":
+        bearer_token = os.environ.get("MANTIS_LOKI_BEARER_TOKEN")
+        basic_auth_username = os.environ.get("MANTIS_LOKI_BASIC_AUTH_USERNAME")
+        basic_auth_password = os.environ.get("MANTIS_LOKI_BASIC_AUTH_PASSWORD")
+        tenant_id = os.environ.get("MANTIS_LOKI_TENANT_ID")
+        return cls(
+            url=_require("MANTIS_LOKI_URL").rstrip("/"),
+            bearer_token=Secret(bearer_token) if bearer_token else None,
+            basic_auth_username=basic_auth_username or None,
+            basic_auth_password=Secret(basic_auth_password) if basic_auth_password else None,
+            tenant_id=tenant_id or None,
+            verify_ssl=_getenv_bool("MANTIS_LOKI_VERIFY_SSL", True),
+        )
+
+
+@dataclass(frozen=True)
 class ReliabilityConfig:
     """The shared reliability contract's configurable knobs (see
     ``mantis.reliability`` and ``docs/reliability.md``) — one shared
