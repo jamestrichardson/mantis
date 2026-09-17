@@ -356,6 +356,21 @@ def check_tcp_connect(
     timeout is capped at ``min(DEFAULT_CONNECT_TIMEOUT_SECONDS,
     deadline.remaining())`` so a single slow candidate can never itself
     exceed the caller's remaining budget.
+
+    If the deadline is what stops remaining candidates from being tried
+    — whether none were attempted yet, or one or more already failed —
+    the overall ``status`` is ``budget_exceeded``, never a
+    precedence-derived status from the incomplete set of observations
+    gathered so far: a later, untried candidate might have connected, so
+    reporting e.g. ``connection_refused`` as if the probe had run to
+    completion would overstate what's actually known. The per-address
+    evidence already gathered is still preserved in ``attempts``. This
+    is distinct from exhausting every bounded candidate on its own
+    (deadline was never the limiting factor) or hitting
+    :data:`MAX_ADDRESSES_ATTEMPTED` (a deliberate bound, not a budget
+    failure) — both of those still use the precedence-derived status.
+    See ``docs/network-tcp-connectivity.md``'s "Failure precedence"
+    section.
     """
     observed_at = datetime.now(timezone.utc).isoformat()
 
@@ -409,9 +424,11 @@ def check_tcp_connect(
     candidates = candidates[:MAX_ADDRESSES_ATTEMPTED]
 
     attempts: list[AddressAttempt] = []
+    deadline_stopped_remaining_candidates = False
     for family, sockaddr in candidates:
         if deadline is not None and deadline.expired():
             truncated = True
+            deadline_stopped_remaining_candidates = True
             break
 
         timeout_seconds = DEFAULT_CONNECT_TIMEOUT_SECONDS
@@ -419,6 +436,7 @@ def check_tcp_connect(
             timeout_seconds = min(timeout_seconds, deadline.remaining())
             if timeout_seconds <= 0:
                 truncated = True
+                deadline_stopped_remaining_candidates = True
                 break
 
         attempt = _attempt_connect(family, sockaddr, timeout_seconds=timeout_seconds, clock=clock)
@@ -438,9 +456,20 @@ def check_tcp_connect(
                 observed_at=observed_at,
             )
 
-    if not attempts:
-        # Every candidate was skipped -- only possible when the deadline
-        # was exhausted before even the first attempt could start.
+    if not attempts or deadline_stopped_remaining_candidates:
+        # Either nothing was ever attempted (deadline exhausted before
+        # the first candidate could start), or the deadline is
+        # specifically what stopped us from trying the rest of the
+        # bounded candidate set. Either way, the probe did not finish
+        # evaluating that set, so the overall status must say so rather
+        # than reporting a precedence-derived status from an incomplete
+        # set of observations -- a later, untried candidate might have
+        # connected. This is deliberately distinct from simply
+        # exhausting every candidate (deadline_stopped_remaining_candidates
+        # stays False then) or hitting MAX_ADDRESSES_ATTEMPTED (a
+        # deliberate bound, not a budget failure) -- both of those still
+        # use the precedence-derived status below. Per-address evidence
+        # already gathered is still preserved in ``attempts``.
         status = ConnectStatus.BUDGET_EXCEEDED.value
     else:
         status = _classify_overall(attempts)

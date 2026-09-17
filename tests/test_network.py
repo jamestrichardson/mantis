@@ -442,6 +442,100 @@ def test_deadline_exhausted_after_one_candidate_stops_later_candidates(monkeypat
     assert result.truncated is True
 
 
+def test_deadline_exhausted_after_a_failed_attempt_reports_budget_exceeded_not_the_failure(monkeypatch):
+    # Regression test (PR #75 review): a real observed failure (e.g.
+    # connection_refused) on one address must not become the overall
+    # status when the deadline is what stopped us from trying the
+    # remaining candidates -- a later, untried address might have
+    # connected. The per-address evidence is still preserved.
+    infos = [_addrinfo(socket.AF_INET, "10.0.0.10"), _addrinfo(socket.AF_INET, "10.0.0.11")]
+    monkeypatch.setattr(network, "_resolve", lambda host, port: infos)
+    clock = FakeClock()
+    deadline = Deadline.after(1.0, clock=clock)
+
+    def fake_connect(family, sockaddr, *, timeout_seconds):
+        clock.advance(10.0)  # consumes the whole remaining deadline
+        raise OSError(errno.ECONNREFUSED, "refused")
+
+    monkeypatch.setattr(network, "_connect", fake_connect)
+
+    result = check_tcp_connect("host.example", 22, deadline=deadline, clock=clock)
+
+    assert result.status == ConnectStatus.BUDGET_EXCEEDED.value
+    assert result.connected is False
+    assert result.truncated is True
+    assert len(result.attempts) == 1
+    assert result.attempts[0].address == "10.0.0.10"
+    assert result.attempts[0].status == ConnectStatus.CONNECTION_REFUSED.value
+
+
+def test_deadline_stopping_remaining_candidates_takes_precedence_over_higher_ranked_failures(monkeypatch):
+    # Even a host_unreachable observation (top of the failure precedence
+    # order) must not win over budget_exceeded when the deadline is why
+    # the remaining candidates were never tried.
+    infos = [
+        _addrinfo(socket.AF_INET, "10.0.0.10"),
+        _addrinfo(socket.AF_INET, "10.0.0.11"),
+        _addrinfo(socket.AF_INET, "10.0.0.12"),
+    ]
+    monkeypatch.setattr(network, "_resolve", lambda host, port: infos)
+    clock = FakeClock()
+    deadline = Deadline.after(1.0, clock=clock)
+    call_count = {"n": 0}
+
+    def fake_connect(family, sockaddr, *, timeout_seconds):
+        call_count["n"] += 1
+        if call_count["n"] == 1:
+            raise OSError(errno.EHOSTUNREACH, "no route to host")
+        clock.advance(10.0)  # second attempt consumes the whole remaining deadline
+        raise OSError(errno.ECONNREFUSED, "refused")
+
+    monkeypatch.setattr(network, "_connect", fake_connect)
+
+    result = check_tcp_connect("host.example", 22, deadline=deadline, clock=clock)
+
+    assert result.status == ConnectStatus.BUDGET_EXCEEDED.value
+    assert len(result.attempts) == 2
+    assert call_count["n"] == 2
+
+
+def test_deadline_reached_exactly_when_candidates_are_exhausted_does_not_force_budget_exceeded(monkeypatch):
+    # If the deadline is still fine when the loop naturally runs out of
+    # candidates (not stopped early by it), the precedence-derived
+    # status still applies -- budget exhaustion is never implied just
+    # because time happened to be tight.
+    infos = [_addrinfo(socket.AF_INET, "10.0.0.10")]
+    monkeypatch.setattr(network, "_resolve", lambda host, port: infos)
+    clock = FakeClock()
+    deadline = Deadline.after(300.0, clock=clock)
+
+    def fake_connect(family, sockaddr, *, timeout_seconds):
+        raise OSError(errno.ECONNREFUSED, "refused")
+
+    monkeypatch.setattr(network, "_connect", fake_connect)
+
+    result = check_tcp_connect("host.example", 22, deadline=deadline, clock=clock)
+
+    assert result.status == ConnectStatus.CONNECTION_REFUSED.value
+
+
+def test_max_addresses_cap_reached_does_not_force_budget_exceeded(monkeypatch):
+    # Hitting MAX_ADDRESSES_ATTEMPTED is a deliberate bound, not a
+    # budget failure -- must not be conflated with deadline exhaustion.
+    infos = [_addrinfo(socket.AF_INET, f"10.0.0.{i}") for i in range(MAX_ADDRESSES_ATTEMPTED + 2)]
+    monkeypatch.setattr(network, "_resolve", lambda host, port: infos)
+
+    def fake_connect(family, sockaddr, *, timeout_seconds):
+        raise OSError(errno.ECONNREFUSED, "refused")
+
+    monkeypatch.setattr(network, "_connect", fake_connect)
+
+    result = check_tcp_connect("host.example", 22)
+
+    assert result.status == ConnectStatus.CONNECTION_REFUSED.value
+    assert result.truncated is True
+
+
 def test_socket_timeout_is_capped_by_remaining_deadline(monkeypatch):
     infos = [_addrinfo(socket.AF_INET, "10.0.0.1")]
     monkeypatch.setattr(network, "_resolve", lambda host, port: infos)

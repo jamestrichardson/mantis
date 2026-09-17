@@ -39,7 +39,7 @@ directly).
 | `network_unreachable` | The OS reported `ENETUNREACH`. | This is what Mantis's OS observed from its own vantage point — it does not identify which broken router/interface/route is responsible. |
 | `host_unreachable` | The OS reported `EHOSTUNREACH`. | Same caveat as `network_unreachable` — a vantage-point observation, not a root-cause diagnosis. |
 | `connection_error` | Any other `OSError` during connect. | Catch-all for less common OS-level failures; see the attempt's bounded `message`/`errno` for detail. |
-| `budget_exceeded` | The tool/run deadline was already exhausted before any connect attempt could start. | A budget/scheduling outcome, not a network observation — see "Deadline semantics". |
+| `budget_exceeded` | The tool/run deadline is why one or more of the bounded candidate addresses were never attempted — either none were tried at all, or the deadline expired after some already failed. | A budget/scheduling outcome, not a network observation, and not a claim that the untried candidates would have failed too — see "Deadline semantics" and "Failure precedence". |
 | `invalid_input` | `host`/`port` failed validation before any resolver/socket work. | Not one of the eight statuses above — no network activity was ever attempted. See "Input validation". |
 
 Every status is mapped deterministically from the OS/socket outcome
@@ -132,6 +132,25 @@ evidence. See `tests/test_network.py`'s
 `test_overall_status_precedence_is_deterministic_regardless_of_order`
 for the parametrized proof (both orderings of every pair, same result).
 
+**`budget_exceeded` overrides this precedence entirely** when the
+deadline — not simply running out of candidates — is why the remaining
+bounded candidates were never tried. For example: address 1 observes
+`connection_refused`, the deadline then expires, and address 2 (still
+within `MAX_ADDRESSES_ATTEMPTED`) is never attempted. The overall
+`status` is `budget_exceeded`, not `connection_refused` — even though
+`connection_refused` outranks every other failure in the table above —
+because the probe did not finish evaluating the bounded candidate set;
+a later, untried candidate might have connected. Reporting
+`connection_refused` here would overstate what was actually observed.
+The `connection_refused` observation on address 1 is still preserved in
+`attempts`, and `truncated` is `true`. This is deliberately distinct
+from exhausting every candidate without deadline pressure, or hitting
+`MAX_ADDRESSES_ATTEMPTED` (a deliberate bound, not a budget failure) —
+both of those still use the precedence-derived status normally. See
+`tests/test_network.py`'s
+`test_deadline_exhausted_after_a_failed_attempt_reports_budget_exceeded_not_the_failure`
+and `test_deadline_stopping_remaining_candidates_takes_precedence_over_higher_ranked_failures`.
+
 ## Deadline semantics (#15)
 
 A TCP probe is a current-state **observation**, not an idempotent HTTP
@@ -149,7 +168,10 @@ is not a retry loop (see above).
   deadline is given (e.g. a direct/manual call).
 - If the deadline is already exhausted before the first attempt can
   start, the result is `status="budget_exceeded"` with zero attempts —
-  never phrased as a network fact.
+  never phrased as a network fact. If the deadline instead expires
+  *after* one or more candidates already failed, `status` is still
+  `budget_exceeded` (not the failure those candidates observed) — see
+  "Failure precedence" above for why.
 - Latency/duration is measured with monotonic time
   (`time.monotonic`, injectable for deterministic tests).
 
