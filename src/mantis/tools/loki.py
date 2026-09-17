@@ -219,37 +219,59 @@ def validate_logql(query: Any) -> str:
 
 
 def _parse_time_input(value: Any) -> float:
-    """Parse a model-facing time value into a Unix epoch float.
+    """Parse a time value into a Unix epoch float.
 
-    Accepts either an RFC3339 string or a plain Unix timestamp
-    (``int``/``float``) -- identical acceptance rules to #9's
-    ``mantis.tools.prometheus._parse_time_input`` (see its docstring and
-    ``docs/loki.md``'s "Time input" section). This is the *request*
-    boundary's time parsing; it is a distinct concern from parsing
-    Loki's own returned per-line nanosecond timestamps, which is handled
-    losslessly in integer nanoseconds by :func:`_format_ns_timestamp`
-    instead -- see that function's docstring for why request-time float
-    precision and response-time integer precision are deliberately
-    different.
+    The model-facing contract (``LOKI_QUERY_SCHEMA``'s ``start``/``end``
+    parameters) is **RFC3339 string only** -- deliberately narrower than
+    accepting "RFC3339 or a Unix timestamp" through one JSON string-typed
+    schema field, which would either silently reject a numeric-looking
+    string (a plain JSON schema string field cannot itself distinguish
+    "this string holds a number" from "this string holds a date", and
+    this function does not attempt numeric-string sniffing) or require
+    an ``anyOf``-shaped schema that's needlessly complex for local models
+    to reason about (see #10's PR #80 review). A plain Unix timestamp
+    (``int``/``float``) is still accepted here for direct Python/test
+    callers -- e.g. ``mantis.eval.fixtures.loki`` and this module's own
+    tests pass one -- it simply isn't exposed through the tool schema.
+
+    This is the *request* boundary's time parsing; it is a distinct
+    concern from parsing Loki's own returned per-line nanosecond
+    timestamps, which is handled losslessly in integer nanoseconds by
+    :func:`_format_ns_timestamp` instead -- see that function's
+    docstring for why request-time float precision and response-time
+    integer precision are deliberately different.
+
+    Whichever form is given, the resulting epoch value must actually be
+    representable as a timestamp -- a finite-but-absurd numeric value
+    (e.g. ``1e300``) passes a bare ``math.isfinite()`` check but would
+    later raise ``OverflowError``/``OSError`` out of
+    :func:`_format_timestamp`/:func:`_to_ns_string`, *after* HTTP work
+    may have already started. Checked here instead, before any HTTP
+    call, via the same ``datetime.fromtimestamp()`` representability
+    probe those functions themselves rely on.
     """
     if isinstance(value, bool):
         raise TimeValidationError("time value must be a string or number, not a boolean")
     if isinstance(value, (int, float)):
-        value = float(value)
-        if not math.isfinite(value):
+        parsed_value = float(value)
+        if not math.isfinite(parsed_value):
             raise TimeValidationError(f"time value must be a finite number, got {value!r}")
-        return value
-    if isinstance(value, str):
+    elif isinstance(value, str):
         try:
             parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
         except ValueError as exc:
-            raise TimeValidationError(
-                f"time value must be RFC3339 or a Unix timestamp, got {value!r}"
-            ) from exc
+            raise TimeValidationError(f"time value must be an RFC3339 timestamp, got {value!r}") from exc
         if parsed.tzinfo is None:
             parsed = parsed.replace(tzinfo=timezone.utc)
-        return parsed.timestamp()
-    raise TimeValidationError(f"time value must be a string or number, got {type(value).__name__}")
+        parsed_value = parsed.timestamp()
+    else:
+        raise TimeValidationError(f"time value must be a string or number, got {type(value).__name__}")
+
+    try:
+        datetime.fromtimestamp(parsed_value, tz=timezone.utc)
+    except (OverflowError, OSError, ValueError) as exc:
+        raise TimeValidationError(f"time value is not a representable timestamp: {value!r}") from exc
+    return parsed_value
 
 
 def _validate_range(start: float, end: float) -> None:
@@ -676,9 +698,13 @@ def loki_query(
             failure"'``. Validated mechanically (type, non-empty, bounded
             length, no control characters) -- never parsed. See
             :func:`validate_logql`.
-        start: Range start, an RFC3339 string or Unix timestamp.
-        end: Range end, an RFC3339 string or Unix timestamp. Must be
-            after ``start``, and the window must not exceed
+        start: Range start, an RFC3339 timestamp string (the model-facing
+            contract -- see :func:`_parse_time_input`). A plain Unix
+            timestamp (``int``/``float``) also works for direct
+            Python/test callers, but is not advertised in the tool
+            schema.
+        end: Range end, same accepted forms as ``start``. Must be after
+            ``start``, and the window must not exceed
             :data:`MAX_RANGE_SECONDS`.
         direction: ``"forward"`` (oldest-first) or ``"backward"``
             (newest-first, the default if omitted). Determines the order
@@ -770,11 +796,17 @@ LOKI_QUERY_SCHEMA = {
                 },
                 "start": {
                     "type": "string",
-                    "description": "Range start: an RFC3339 timestamp or Unix timestamp.",
+                    "description": (
+                        "Range start, as an RFC3339 timestamp, e.g. "
+                        "'2026-09-17T12:00:00Z'."
+                    ),
                 },
                 "end": {
                     "type": "string",
-                    "description": "Range end: an RFC3339 timestamp or Unix timestamp. Must be after start.",
+                    "description": (
+                        "Range end, as an RFC3339 timestamp. Must be "
+                        "after start."
+                    ),
                 },
                 "direction": {
                     "type": "string",

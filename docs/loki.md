@@ -105,8 +105,8 @@ check, or monitored time-series state.
 
 - `query`: LogQL text, validated mechanically (see "LogQL validation"
   below) — never parsed.
-- `start`/`end`: RFC3339 or Unix timestamp, `start` before `end`, window
-  bounded (see "Range bounding" below).
+- `start`/`end`: RFC3339 timestamp, `start` before `end`, window bounded
+  (see "Range bounding" below).
 - `direction`: `"forward"` (oldest-first) or `"backward"` (newest-first,
   the default). Determines the order Loki returns each stream's lines
   in; `loki_query` preserves that order exactly, it never re-sorts
@@ -114,16 +114,36 @@ check, or monitored time-series state.
 
 ## Time input
 
-Both an RFC3339 string (`"2026-09-17T12:00:00Z"`) and a plain Unix
-timestamp (`1700000000`) are accepted for `start`/`end` — identical
-acceptance rules to #9's Prometheus tools, no broader natural-language
-date parser was built. The normalized requested window is always
-reported back in the result's `query` section as RFC3339, regardless of
-which input form was used.
+The model-facing contract (`LOKI_QUERY_SCHEMA`'s `start`/`end`
+parameters) is **RFC3339 string only** (e.g. `"2026-09-17T12:00:00Z"`) —
+deliberately narrower than accepting "RFC3339 or a Unix timestamp"
+through one JSON string-typed field. A JSON schema string parameter
+can't itself distinguish "this string holds a number" from "this string
+holds a date", and a numeric-looking string (`"1700000000"`) does not
+parse as RFC3339 — advertising both forms through a single `type:
+"string"` field was a real interface mismatch (a numeric string the
+schema's own description implied was valid would actually be rejected).
+The alternative, an `anyOf`-shaped schema accepting either a string or a
+number, was deliberately avoided too: needless complexity for local
+models to reason about for a single narrow benefit. See #10's PR #80
+review.
+
+A plain Unix timestamp (`int`/`float`, e.g. `1700000000`) is still
+accepted by `mantis.tools.loki._parse_time_input` for direct Python/test
+callers — `mantis.eval.fixtures.loki` and this module's own tests pass
+one — it simply isn't exposed through the tool schema a model sees. The
+normalized requested window is always reported back in the result's
+`query` section as RFC3339, regardless of which input form was used.
 
 A numeric `start`/`end` must be finite — `float("nan")` and
 `+inf`/`-inf` are rejected explicitly (`math.isfinite()`), the same
-non-finite-input guard #9 established.
+non-finite-input guard #9 established. Beyond mere finiteness, the
+resulting epoch value must also be *representable* as a timestamp: a
+finite-but-absurd value like `1e300` is rejected by `_parse_time_input`
+itself (via the same `datetime.fromtimestamp()` probe
+`_format_timestamp`/`_to_ns_string` would otherwise use later) rather
+than being allowed to reach — and fail inside — those functions only
+after HTTP work may have already started.
 
 This request-boundary time parsing is a distinct concern from parsing
 Loki's own *returned* per-line timestamps — see "Nanosecond timestamp

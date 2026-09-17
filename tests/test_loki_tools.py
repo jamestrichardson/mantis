@@ -109,10 +109,14 @@ def test_validate_logql_accepts_exactly_max_chars():
 
 
 def test_parse_time_input_accepts_unix_timestamp():
+    # Not exposed in LOKI_QUERY_SCHEMA (model-facing contract is RFC3339
+    # string only -- see docs/loki.md's "Time input" section and PR #80's
+    # review), but still accepted for direct Python/test callers.
     assert _parse_time_input(1700000000) == 1700000000.0
 
 
 def test_parse_time_input_accepts_rfc3339():
+    # The actual model-facing/schema-supported form.
     assert _parse_time_input("2023-11-14T22:13:20Z") == 1700000000.0
 
 
@@ -126,6 +130,17 @@ def test_parse_time_input_rejects_garbage_string():
         _parse_time_input("not-a-time")
 
 
+def test_parse_time_input_rejects_numeric_looking_string():
+    # Regression test (PR #80 review): a numeric string like "1700000000"
+    # is not RFC3339 and is rejected -- this is exactly why the schema
+    # no longer advertises "or Unix timestamp" for a string-typed field;
+    # a model sending a numeric string through the documented schema
+    # would previously have been silently rejected despite the old
+    # description implying it would work.
+    with pytest.raises(TimeValidationError):
+        _parse_time_input("1700000000")
+
+
 def test_parse_time_input_rejects_other_types():
     with pytest.raises(TimeValidationError):
         _parse_time_input([1, 2, 3])
@@ -135,6 +150,46 @@ def test_parse_time_input_rejects_other_types():
 def test_parse_time_input_rejects_non_finite_numbers(value):
     with pytest.raises(TimeValidationError, match="finite"):
         _parse_time_input(value)
+
+
+def test_parse_time_input_rejects_finite_but_unrepresentable_numeric_time():
+    # Regression test (PR #80 review): 1e300 is finite (passes
+    # math.isfinite()) but datetime.fromtimestamp() cannot represent it
+    # -- this must be caught during validation, before any HTTP call,
+    # not left to raise OverflowError/OSError later out of
+    # _format_timestamp()/_to_ns_string().
+    with pytest.raises(TimeValidationError, match="representable"):
+        _parse_time_input(1e300)
+
+
+@respx.mock
+def test_absurd_numeric_time_rejected_end_to_end_with_zero_http_calls(loki_client):
+    route = respx.get("https://loki.example.test/loki/api/v1/query_range").mock(
+        return_value=httpx.Response(200, json=_success("streams", []))
+    )
+
+    result = loki_query('{job="sshd"}', 1e300, 3600, _client=loki_client)
+
+    assert route.call_count == 0
+    assert result["query_error"]["type"] == "invalid_input"
+
+
+@respx.mock
+def test_documented_rfc3339_time_form_works_end_to_end(loki_client):
+    # Proves the schema-supported form (RFC3339 string) actually works,
+    # not just that the rejected forms are rejected.
+    route = respx.get("https://loki.example.test/loki/api/v1/query_range").mock(
+        return_value=httpx.Response(200, json=_success("streams", []))
+    )
+
+    result = loki_query(
+        '{job="sshd"}', "2023-11-14T22:00:00Z", "2023-11-14T23:00:00Z", _client=loki_client
+    )
+
+    assert route.call_count == 1
+    assert result["query_error"] is None
+    assert result["query"]["start"] == "2023-11-14T22:00:00+00:00"
+    assert result["query"]["end"] == "2023-11-14T23:00:00+00:00"
 
 
 # ---------------------------------------------------------------------------
