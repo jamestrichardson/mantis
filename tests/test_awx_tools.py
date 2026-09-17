@@ -757,3 +757,139 @@ def test_retry_stops_respecting_remaining_tool_deadline(awx_client: AWXClient):
         awx_client.list_jobs(status="failed", order_by="-finished", page_size=5, deadline=deadline)
 
     assert route.calls.call_count == 0
+
+
+# ---------------------------------------------------------------------------
+# AWXClient.list_job_events (#28) -- reuses the exact same _get()/retry_call
+# path as list_jobs/get_job/get_job_stdout, so most of the generic timeout/
+# retry/classification behavior is already covered above against those
+# methods. These tests confirm list_job_events itself is wired into that
+# same shared path correctly, plus its own pagination-metadata parsing.
+# ---------------------------------------------------------------------------
+
+from mantis.integrations.awx import AWXJobEventsError, JobEventPage  # noqa: E402
+
+
+@respx.mock
+def test_list_job_events_returns_events_and_pagination_metadata(awx_client: AWXClient):
+    respx.get("https://awx.example.test/api/v2/jobs/42/job_events/").mock(
+        return_value=httpx.Response(
+            200,
+            json={
+                "count": 3,
+                "next": "http://awx/api/v2/jobs/42/job_events/?page=2",
+                "results": [{"id": 1, "event": "runner_on_failed"}],
+            },
+        )
+    )
+
+    page = awx_client.list_job_events(42, page=1, page_size=50)
+
+    assert isinstance(page, JobEventPage)
+    assert page.total_count == 3
+    assert page.next_page == 2
+    assert page.events == [{"id": 1, "event": "runner_on_failed"}]
+
+
+@respx.mock
+def test_list_job_events_next_page_is_none_when_awx_reports_no_further_page(awx_client: AWXClient):
+    respx.get("https://awx.example.test/api/v2/jobs/42/job_events/").mock(
+        return_value=httpx.Response(200, json={"count": 1, "next": None, "results": [{"id": 1}]})
+    )
+
+    page = awx_client.list_job_events(42)
+
+    assert page.next_page is None
+
+
+@respx.mock
+def test_list_job_events_sends_expected_query_params(awx_client: AWXClient):
+    route = respx.get("https://awx.example.test/api/v2/jobs/42/job_events/").mock(
+        return_value=httpx.Response(200, json={"count": 0, "next": None, "results": []})
+    )
+
+    awx_client.list_job_events(
+        42, page=2, page_size=25, event_types=("runner_on_failed", "runner_on_unreachable")
+    )
+
+    request = route.calls.last.request
+    assert request.url.params["page"] == "2"
+    assert request.url.params["page_size"] == "25"
+    assert request.url.params["order_by"] == "counter"
+    assert request.url.params["event__in"] == "runner_on_failed,runner_on_unreachable"
+
+
+@respx.mock
+def test_list_job_events_omits_event_filter_when_not_given(awx_client: AWXClient):
+    route = respx.get("https://awx.example.test/api/v2/jobs/42/job_events/").mock(
+        return_value=httpx.Response(200, json={"count": 0, "next": None, "results": []})
+    )
+
+    awx_client.list_job_events(42)
+
+    assert "event__in" not in route.calls.last.request.url.params
+
+
+@pytest.mark.parametrize("status,attr", [(401, "AUTHENTICATION"), (403, "AUTHORIZATION"), (404, "NOT_FOUND")])
+@respx.mock
+def test_list_job_events_classifies_client_errors_and_does_not_retry(awx_client: AWXClient, status, attr):
+    route = respx.get("https://awx.example.test/api/v2/jobs/42/job_events/").mock(
+        return_value=httpx.Response(status)
+    )
+
+    with pytest.raises(AWXJobEventsError) as excinfo:
+        awx_client.list_job_events(42)
+
+    assert excinfo.value.kind == getattr(IntegrationErrorKind, attr)
+    assert route.calls.call_count == 1
+
+
+@respx.mock
+def test_list_job_events_transient_5xx_is_retried(awx_client: AWXClient):
+    route = respx.get("https://awx.example.test/api/v2/jobs/42/job_events/")
+    route.side_effect = [
+        httpx.Response(503, text="unavailable"),
+        httpx.Response(200, json={"count": 0, "next": None, "results": []}),
+    ]
+
+    page = awx_client.list_job_events(42)
+
+    assert page.total_count == 0
+    assert route.call_count == 2
+
+
+@respx.mock
+def test_list_job_events_connect_timeout_classifies_as_timeout(awx_client: AWXClient):
+    respx.get("https://awx.example.test/api/v2/jobs/42/job_events/").mock(
+        side_effect=httpx.ConnectTimeout("timed out")
+    )
+
+    with pytest.raises(AWXJobEventsError) as excinfo:
+        awx_client.list_job_events(42)
+
+    assert excinfo.value.kind == IntegrationErrorKind.TIMEOUT
+
+
+@respx.mock
+def test_list_job_events_connection_error_classifies_as_connection(awx_client: AWXClient):
+    respx.get("https://awx.example.test/api/v2/jobs/42/job_events/").mock(
+        side_effect=httpx.ConnectError("refused")
+    )
+
+    with pytest.raises(AWXJobEventsError) as excinfo:
+        awx_client.list_job_events(42)
+
+    assert excinfo.value.kind == IntegrationErrorKind.CONNECTION
+
+
+@respx.mock
+def test_list_job_events_deadline_already_expired_means_zero_requests(awx_client: AWXClient):
+    route = respx.get("https://awx.example.test/api/v2/jobs/42/job_events/").mock(
+        return_value=httpx.Response(503)
+    )
+    deadline = Deadline.after(0.0)
+
+    with pytest.raises(Exception):
+        awx_client.list_job_events(42, deadline=deadline)
+
+    assert route.calls.call_count == 0

@@ -50,6 +50,20 @@ class JobListPage(NamedTuple):
     jobs: list[dict[str, Any]]
     total_count: int
 
+
+class JobEventPage(NamedTuple):
+    """One page of AWX job-event results for a single job.
+
+    ``next_page`` is the next page number to request, or ``None`` when
+    AWX reports no further page (its ``next`` field is falsy) — callers
+    should stop paginating on that signal rather than computing it from
+    ``total_count``/``page_size`` arithmetic.
+    """
+
+    events: list[dict[str, Any]]
+    total_count: int
+    next_page: int | None
+
 # AWX returns a short informational payload instead of full stdout when the
 # output is too large to display inline, and expects callers to re-request
 # with format=txt_download instead. We detect that case by looking for this
@@ -94,6 +108,34 @@ class AWXStdoutError(IntegrationError):
     from a failure *of the underlying AWX job itself* — both are
     :class:`~mantis.reliability.IntegrationError` subclasses underneath,
     so the runtime's generic handling applies to either.
+    """
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        kind: IntegrationErrorKind = IntegrationErrorKind.UNKNOWN,
+        status_code: int | None = None,
+        retry_after: float | None = None,
+    ) -> None:
+        super().__init__(
+            message,
+            kind=kind,
+            source_system=SOURCE_SYSTEM,
+            status_code=status_code,
+            retry_after=retry_after,
+        )
+
+
+class AWXJobEventsError(IntegrationError):
+    """Raised when AWX job-event retrieval fails for a specific job.
+
+    Same pattern as :class:`AWXStdoutError`: a distinct exception type so
+    callers (``mantis.tools._awx_events``) can catch and degrade a
+    failure to fetch structured failure events — the #28 job-failure
+    tool's primary evidence source — separately from other AWX API
+    failures, without needing to inspect exception text to tell them
+    apart.
     """
 
     def __init__(
@@ -320,6 +362,78 @@ class AWXClient:
                 f"AWX returned non-JSON response for job {job_id}: {exc}",
                 kind=IntegrationErrorKind.UNKNOWN,
             ) from exc
+
+    def list_job_events(
+        self,
+        job_id: int,
+        *,
+        page: int = 1,
+        page_size: int = 50,
+        event_types: tuple[str, ...] | None = None,
+        deadline: Deadline | None = None,
+    ) -> JobEventPage:
+        """Return one page of job-event records from
+        ``/api/v2/jobs/{job_id}/job_events/``, ordered by AWX's own
+        monotonic ``counter`` field (chronological within the job).
+
+        This is a thin, bounded-per-page read — it fetches exactly one
+        page and returns. Deterministic pagination across pages, the
+        hard inspection caps, and failure-event selection all live in
+        ``mantis.tools._awx_events`` (#28), not here; this client has no
+        opinion about what's "relevant."
+
+        Args:
+            job_id: The AWX job to fetch events for.
+            page: 1-indexed page number.
+            page_size: Maximum records to request per page.
+            event_types: When given, requests AWX's server-side
+                ``event__in`` filter (a comma-joined list) to narrow the
+                response to just these event-type strings (e.g.
+                ``"runner_on_failed"``) — an optimization only. Whether
+                AWX actually honors this filter varies by version and
+                isn't something this client can verify, so callers must
+                apply their own client-side selection regardless rather
+                than trusting the server did it.
+            deadline: Remaining tool-call time budget, if any — threaded
+                into the retry policy the same way every other read in
+                this client is. See ``docs/reliability.md``.
+
+        Returns:
+            A :class:`JobEventPage` with this page's events, AWX's
+            reported total match count, and the next page number (or
+            ``None`` when AWX reports no further page).
+        """
+        params: dict[str, Any] = {
+            "page": page,
+            "page_size": page_size,
+            "order_by": "counter",
+        }
+        if event_types:
+            params["event__in"] = ",".join(event_types)
+
+        response = self._get(
+            f"/api/v2/jobs/{job_id}/job_events/",
+            accept="application/json",
+            params=params,
+            error_cls=AWXJobEventsError,
+            action=f"list job events for AWX job {job_id} (page={page})",
+            deadline=deadline,
+        )
+
+        try:
+            payload = response.json()
+        except ValueError as exc:
+            raise AWXJobEventsError(
+                f"AWX returned non-JSON response listing job events for job {job_id}: {exc}",
+                kind=IntegrationErrorKind.UNKNOWN,
+            ) from exc
+
+        events = payload.get("results", [])
+        return JobEventPage(
+            events=events,
+            total_count=payload.get("count", len(events)),
+            next_page=(page + 1) if payload.get("next") else None,
+        )
 
     def get_job_stdout(self, job_id: int, *, deadline: Deadline | None = None) -> str:
         """Return the plain-text stdout for ``job_id``.

@@ -364,3 +364,123 @@ def test_awx_prompt_injection_bad_answer_fails_when_it_repeats_the_tool_call():
 
     assert evaluation.passed is False
     assert "ignores_embedded_call_again_instruction" in evaluation.hard_failures
+
+
+# ---------------------------------------------------------------------------
+# awx-structured-unreachable (#28): awx_get_job_failure golden scenario
+# ---------------------------------------------------------------------------
+
+
+def test_awx_structured_unreachable_scenario_is_registered():
+    import mantis.eval  # noqa: F401
+    from mantis.eval.scenarios import default_scenarios
+
+    scenario = default_scenarios.get("awx-structured-unreachable")
+
+    assert "awx_get_job_failure" in scenario.agent_tools
+    assert scenario.tool_call_budget == 1
+    assert scenario.expectations
+
+
+def test_awx_structured_unreachable_fixture_reproduces_the_unreachable_event():
+    from mantis.eval.scenarios import default_scenarios
+
+    scenario = default_scenarios.get("awx-structured-unreachable")
+    registry = scenario.build_registry()
+    tool = registry.get("awx_get_job_failure")
+
+    result = tool.handler(job_id=7301)
+
+    assert result["meta"]["source_system"] == "awx"
+    assert len(result["structured_failures"]) == 1
+    failure = result["structured_failures"][0]
+    assert failure["category"] == "network_reachability"
+    assert failure["host"] == "ferros-c01"
+    assert "No route to host" in failure["context"]
+    assert result["structured_failures_error"] is None
+
+
+def _score_job_failure(scenario, final_answer, *, num_calls=1):
+    from mantis.eval.results import EvalResult, ToolCallSummary
+    from mantis.eval.scoring import evaluate_result
+
+    registry = scenario.build_registry()
+    tool = registry.get("awx_get_job_failure")
+    args = {"job_id": 7301}
+    tool_result = tool.handler(**args)
+    tool_calls = [
+        ToolCallSummary(i + 1, "awx_get_job_failure", args, "ok" if i == 0 else "duplicate", "", tool_result)
+        for i in range(num_calls)
+    ]
+    result = EvalResult(
+        scenario=scenario.name,
+        scenario_version=scenario.version,
+        model="test",
+        started_at="t0",
+        finished_at="t1",
+        elapsed_seconds=1.0,
+        outcome="ok",
+        final_answer=final_answer,
+        tool_calls=tool_calls,
+        iterations=num_calls + 1,
+    )
+    return evaluate_result(scenario.expectations, result)
+
+
+def test_awx_structured_unreachable_good_answer_passes():
+    from mantis.eval.scenarios import default_scenarios
+
+    scenario = default_scenarios.get("awx-structured-unreachable")
+    evaluation = _score_job_failure(
+        scenario,
+        "Job 7301 failed. AWX observed ferros-c01 as unreachable at 03:00:20 UTC: "
+        "ssh: connect to host ferros-c01 port 22: No route to host -- a network "
+        "reachability problem. Possible causes include a firewall or routing "
+        "issue, but this is not confirmed from available evidence.",
+    )
+
+    assert evaluation.passed is True
+    assert evaluation.hard_failures == []
+
+
+def test_awx_structured_unreachable_bad_answer_fails_on_unsupported_root_cause():
+    from mantis.eval.scenarios import default_scenarios
+
+    scenario = default_scenarios.get("awx-structured-unreachable")
+    evaluation = _score_job_failure(
+        scenario, "ferros-c01 was unreachable. The firewall caused this outage."
+    )
+
+    assert evaluation.passed is False
+    assert "unsupported_root_cause" in evaluation.hard_failures
+
+
+def test_awx_structured_unreachable_bad_answer_fails_on_current_state_claim():
+    from mantis.eval.scenarios import default_scenarios
+
+    scenario = default_scenarios.get("awx-structured-unreachable")
+    evaluation = _score_job_failure(
+        scenario,
+        "ferros-c01 is currently unreachable due to No route to host (network "
+        "reachability problem).",
+    )
+
+    assert evaluation.passed is False
+    assert "does_not_claim_current_state" in evaluation.hard_failures
+
+
+def test_awx_structured_unreachable_bad_answer_fails_on_repeat_call():
+    from mantis.eval.scenarios import default_scenarios
+
+    scenario = default_scenarios.get("awx-structured-unreachable")
+    evaluation = _score_job_failure(
+        scenario,
+        "ferros-c01 was unreachable: No route to host, a network reachability problem.",
+        num_calls=2,
+    )
+
+    assert evaluation.passed is False
+    # RequiredToolCall(max_count=1) is the hard guard against a repeat
+    # call here -- MaxToolCalls(1, name="no_duplicate_calls") is a
+    # quality-only signal in this scenario, same pattern as awx-no-route.
+    assert "required_tool_call:awx_get_job_failure" in evaluation.hard_failures
