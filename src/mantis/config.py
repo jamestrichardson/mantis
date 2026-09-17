@@ -31,6 +31,7 @@ git-ignored and must never contain checked-in credentials.
 
 from __future__ import annotations
 
+import math
 import os
 from dataclasses import dataclass
 from pathlib import Path
@@ -69,6 +70,46 @@ def _getenv_bool(name: str, default: bool) -> bool:
     if raw is None:
         return default
     return raw.strip().lower() in ("1", "true", "yes", "on")
+
+
+def _getenv_float(name: str, default: float) -> float:
+    raw = os.environ.get(name)
+    if raw is None:
+        return default
+    try:
+        return float(raw)
+    except ValueError as exc:
+        raise ConfigurationError(f"{name} must be a number, got {raw!r}") from exc
+
+
+def _getenv_int(name: str, default: int) -> int:
+    raw = os.environ.get(name)
+    if raw is None:
+        return default
+    try:
+        return int(raw)
+    except ValueError as exc:
+        raise ConfigurationError(f"{name} must be an integer, got {raw!r}") from exc
+
+
+def _check_positive(name: str, value: float) -> None:
+    # math.isfinite() rejects both NaN and +/-inf explicitly — without it,
+    # float("inf") silently passes a bare "value > 0" check (inf > 0 is
+    # True), and float("nan") produces confusing downstream behavior in
+    # random.uniform(), time.sleep(), and httpx.Timeout construction
+    # rather than a clear startup error.
+    if not math.isfinite(value) or not value > 0:
+        raise ConfigurationError(f"{name} must be a finite number > 0, got {value!r}")
+
+
+def _check_non_negative(name: str, value: float) -> None:
+    if not math.isfinite(value) or value < 0:
+        raise ConfigurationError(f"{name} must be a finite number >= 0, got {value!r}")
+
+
+def _check_at_least(name: str, value: int, minimum: int) -> None:
+    if value < minimum:
+        raise ConfigurationError(f"{name} must be >= {minimum}, got {value!r}")
 
 
 def _require(name: str) -> str:
@@ -154,4 +195,74 @@ class AWXConfig:
             url=_require("AWX_URL").rstrip("/"),
             token=_require_secret("AWX_TOKEN"),
             verify_ssl=_getenv_bool("AWX_VERIFY_SSL", True),
+        )
+
+
+@dataclass(frozen=True)
+class ReliabilityConfig:
+    """The shared reliability contract's configurable knobs (see
+    ``mantis.reliability`` and ``docs/reliability.md``) — one shared
+    config for every integration/tool, not one set of magic numbers per
+    integration. Every value has a named default; nothing here needs to
+    be set to get sensible, documented behavior.
+    """
+
+    http_connect_timeout_seconds: float = 5.0
+    http_read_timeout_seconds: float = 25.0
+    retry_max_attempts: int = 3
+    retry_backoff_base_seconds: float = 0.5
+    retry_backoff_cap_seconds: float = 8.0
+    tool_timeout_seconds: float = 45.0
+    run_timeout_seconds: float = 300.0
+    short_circuit_threshold: int = 3
+
+    def __post_init__(self) -> None:
+        # Range validation, not just type validation — a value that
+        # parses fine (0, -5, ...) but is nonsensical must still fail
+        # loudly at startup/construction rather than surface later as an
+        # internal assertion failure deep in mantis.reliability.retry_call
+        # (e.g. retry_max_attempts=0 skips its loop entirely with no
+        # error ever raised). Applies to direct construction too, not
+        # only .from_env(), since __post_init__ runs either way.
+        _check_positive("http_connect_timeout_seconds", self.http_connect_timeout_seconds)
+        _check_positive("http_read_timeout_seconds", self.http_read_timeout_seconds)
+        _check_at_least("retry_max_attempts", self.retry_max_attempts, 1)
+        _check_non_negative("retry_backoff_base_seconds", self.retry_backoff_base_seconds)
+        _check_non_negative("retry_backoff_cap_seconds", self.retry_backoff_cap_seconds)
+        if self.retry_backoff_cap_seconds < self.retry_backoff_base_seconds:
+            raise ConfigurationError(
+                "retry_backoff_cap_seconds must be >= retry_backoff_base_seconds "
+                f"(got cap={self.retry_backoff_cap_seconds!r}, "
+                f"base={self.retry_backoff_base_seconds!r})"
+            )
+        _check_positive("tool_timeout_seconds", self.tool_timeout_seconds)
+        _check_positive("run_timeout_seconds", self.run_timeout_seconds)
+        _check_at_least("short_circuit_threshold", self.short_circuit_threshold, 1)
+
+    @classmethod
+    def from_env(cls) -> "ReliabilityConfig":
+        defaults = cls()
+        return cls(
+            http_connect_timeout_seconds=_getenv_float(
+                "MANTIS_HTTP_CONNECT_TIMEOUT_SECONDS", defaults.http_connect_timeout_seconds
+            ),
+            http_read_timeout_seconds=_getenv_float(
+                "MANTIS_HTTP_READ_TIMEOUT_SECONDS", defaults.http_read_timeout_seconds
+            ),
+            retry_max_attempts=_getenv_int("MANTIS_RETRY_MAX_ATTEMPTS", defaults.retry_max_attempts),
+            retry_backoff_base_seconds=_getenv_float(
+                "MANTIS_RETRY_BACKOFF_BASE_SECONDS", defaults.retry_backoff_base_seconds
+            ),
+            retry_backoff_cap_seconds=_getenv_float(
+                "MANTIS_RETRY_BACKOFF_CAP_SECONDS", defaults.retry_backoff_cap_seconds
+            ),
+            tool_timeout_seconds=_getenv_float(
+                "MANTIS_TOOL_TIMEOUT_SECONDS", defaults.tool_timeout_seconds
+            ),
+            run_timeout_seconds=_getenv_float(
+                "MANTIS_RUN_TIMEOUT_SECONDS", defaults.run_timeout_seconds
+            ),
+            short_circuit_threshold=_getenv_int(
+                "MANTIS_SHORT_CIRCUIT_THRESHOLD", defaults.short_circuit_threshold
+            ),
         )

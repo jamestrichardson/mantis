@@ -17,10 +17,15 @@ from mantis.tools.awx import FAILURE_MARKERS, awx_recent_failed_jobs
 
 @pytest.fixture
 def awx_client() -> AWXClient:
+    # sleep=lambda *_: None: no test in this file should ever really wait
+    # out a retry backoff (see #15 / mantis.reliability) — a real delay
+    # here would make retry-triggering tests (a mocked 500/503/etc.)
+    # slow without adding any coverage value.
     return AWXClient(
         config=AWXConfig(
             url="https://awx.example.test", token=Secret("tok"), verify_ssl=True
-        )
+        ),
+        sleep=lambda *_: None,
     )
 
 
@@ -291,7 +296,7 @@ def test_awx_recent_failed_jobs_accepts_a_client_override():
     # production code path against fixture data instead of live AWX — no
     # real AWXConfig/env vars should be required when a client is given.
     class StubClient:
-        def list_jobs(self, *, status, order_by, page_size):
+        def list_jobs(self, *, status, order_by, page_size, deadline=None):
             from mantis.integrations.awx import JobListPage
 
             return JobListPage(
@@ -310,7 +315,7 @@ def test_awx_recent_failed_jobs_accepts_a_client_override():
                 total_count=1,
             )
 
-        def get_job_stdout(self, job_id):
+        def get_job_stdout(self, job_id, *, deadline=None):
             return "PLAY RECAP\nok=1 failed=0"
 
     result = awx_recent_failed_jobs(limit=1, _client=StubClient())
@@ -354,7 +359,14 @@ def test_awx_recent_failed_jobs_separates_stdout_error_from_job_failure():
         params={"format": "txt"},
     ).mock(return_value=httpx.Response(500, text="server error"))
 
-    result = awx_recent_failed_jobs(limit=1)
+    # 500 is a retryable classification (see mantis.reliability) — inject
+    # a no-op sleep so this test doesn't really wait out the backoff
+    # between the retry attempts it deliberately triggers.
+    client = AWXClient(
+        config=AWXConfig(url="https://awx.example.test", token=Secret("tok"), verify_ssl=True),
+        sleep=lambda *_: None,
+    )
+    result = awx_recent_failed_jobs(limit=1, _client=client)
 
     job = result["jobs"][0]
     assert job["stdout_retrieval_error"] is not None
@@ -364,9 +376,106 @@ def test_awx_recent_failed_jobs_separates_stdout_error_from_job_failure():
 
     # stdout_retrieval_error is a typed ToolError (mantis.contracts), not a
     # bare string — its "kind" must never be confused with the job's own
-    # failure reason above.
-    assert job["stdout_retrieval_error"]["kind"] == "retrieval_error"
+    # failure reason above. A 500 from AWX's own stdout endpoint classifies
+    # as upstream_error (see mantis.reliability.classify_http_status) —
+    # distinct from e.g. a connection failure reaching AWX at all.
+    assert job["stdout_retrieval_error"]["kind"] == "upstream_error"
     assert "message" in job["stdout_retrieval_error"]
+
+
+@respx.mock
+def test_awx_recent_failed_jobs_reports_swallowed_stdout_failures_via_reliability_report():
+    # Regression test (PR #72 review): a per-job stdout failure never
+    # raises out of awx_recent_failed_jobs — it degrades into that job's
+    # own stdout_retrieval_error so the other jobs' evidence still comes
+    # back. But AgentRuntime's run-local breaker (RunLocalBreaker) resets
+    # on every "successful" tool call, so a swallowed failure like this
+    # one must still be reported into the breaker via _reliability_report,
+    # or an unhealthy AWX could be hit repeatedly across many jobs/calls
+    # without the breaker ever noticing. See docs/reliability.md.
+    jobs_payload = {
+        "results": [
+            {"id": 301, "name": "job-a", "status": "failed", "failed": True},
+            {"id": 302, "name": "job-b", "status": "failed", "failed": True},
+        ]
+    }
+    respx.get("https://awx.example.test/api/v2/jobs/").mock(
+        return_value=httpx.Response(200, json=jobs_payload)
+    )
+    respx.get(
+        "https://awx.example.test/api/v2/jobs/301/stdout/", params={"format": "txt"}
+    ).mock(return_value=httpx.Response(500, text="server error"))
+    respx.get(
+        "https://awx.example.test/api/v2/jobs/302/stdout/", params={"format": "txt"}
+    ).mock(return_value=httpx.Response(200, text="ok stdout"))
+
+    client = AWXClient(
+        config=AWXConfig(url="https://awx.example.test", token=Secret("tok"), verify_ssl=True),
+        sleep=lambda *_: None,
+    )
+    reported: list[IntegrationErrorKind] = []
+    result = awx_recent_failed_jobs(
+        limit=2, _client=client, _reliability_report=reported.append
+    )
+
+    # Only the job whose stdout retrieval actually failed is reported —
+    # once, matching the single AWXStdoutError it swallowed.
+    assert reported == [IntegrationErrorKind.SERVER_ERROR]
+    assert result["jobs"][0]["stdout_retrieval_error"] is not None
+    assert result["jobs"][1]["stdout_retrieval_error"] is None
+
+
+@respx.mock
+def test_awx_recent_failed_jobs_stops_requesting_stdout_once_the_breaker_opens_mid_call():
+    # Regression test (PR #72 review, round 2): reporting a degraded
+    # failure into the breaker fixes visibility for the *next* tool call,
+    # but awx_recent_failed_jobs would still keep requesting stdout for
+    # every remaining job in the SAME call after the breaker opens unless
+    # it actually checks _reliability_report's return value and stops.
+    # With short_circuit_threshold=3 and five jobs all failing stdout,
+    # only the first three should ever be requested at all.
+    jobs_payload = {
+        "results": [
+            {"id": 500 + i, "name": f"job-{i}", "status": "failed", "failed": True}
+            for i in range(5)
+        ]
+    }
+    respx.get("https://awx.example.test/api/v2/jobs/").mock(
+        return_value=httpx.Response(200, json=jobs_payload)
+    )
+    stdout_route = respx.route(
+        method="GET", url__regex=r"https://awx\.example\.test/api/v2/jobs/\d+/stdout/"
+    ).mock(return_value=httpx.Response(500, text="server error"))
+
+    client = AWXClient(
+        config=AWXConfig(url="https://awx.example.test", token=Secret("tok"), verify_ssl=True),
+        sleep=lambda *_: None,
+    )
+    breaker = RunLocalBreaker(threshold=3)
+
+    def reliability_report(kind: IntegrationErrorKind) -> bool:
+        breaker.record_failure("awx", kind)
+        return breaker.is_open("awx")
+
+    result = awx_recent_failed_jobs(
+        limit=5, _client=client, _reliability_report=reliability_report
+    )
+
+    # Three logical stdout retrievals, each exhausting the default
+    # 3-attempt retry budget -> 9 real HTTP requests total. Jobs 4 and 5
+    # must never reach the network at all.
+    assert stdout_route.call_count == 3 * client.reliability.retry_max_attempts
+
+    jobs = result["jobs"]
+    assert len(jobs) == 5
+    for job in jobs[:3]:
+        # Attempted and failed -- a real AWXStdoutError-derived message.
+        assert job["stdout_retrieval_error"] is not None
+        assert "skip" not in job["stdout_retrieval_error"]["message"].lower()
+    for job in jobs[3:]:
+        # Never attempted at all -- distinct wording from an actual failure.
+        assert job["stdout_retrieval_error"] is not None
+        assert "skip" in job["stdout_retrieval_error"]["message"].lower()
 
 
 @respx.mock
@@ -437,3 +546,214 @@ def test_awx_recent_failed_jobs_tool_is_registered_as_containing_untrusted_text(
 
     tool = default_registry.get("awx_recent_failed_jobs")
     assert tool.contains_untrusted_text is True
+
+
+# ---------------------------------------------------------------------------
+# Reliability (#15): explicit timeouts, classification, retry behavior
+# ---------------------------------------------------------------------------
+
+from mantis.reliability import Deadline, IntegrationErrorKind, RunLocalBreaker  # noqa: E402
+
+
+def test_awx_client_uses_explicit_connect_and_read_timeouts(awx_client: AWXClient):
+    # No production request may rely on httpx's implicit default timeout
+    # — every request must carry an explicit, named, configured timeout.
+    with awx_client._client(accept="application/json") as client:
+        timeout = client.timeout
+    assert timeout.connect == awx_client.reliability.http_connect_timeout_seconds
+    assert timeout.read == awx_client.reliability.http_read_timeout_seconds
+    assert timeout.connect is not None
+    assert timeout.read is not None
+
+
+def test_awx_client_caps_effective_timeout_at_the_remaining_deadline(awx_client: AWXClient):
+    # Regression test (PR #72 review): the configured connect/read
+    # timeouts are a ceiling, not a promise. With only 2s left of tool
+    # budget, a request must not still be configured with the full
+    # (much larger) default read timeout — that would leave the
+    # advertised per-tool-call budget far looser than what's documented.
+    deadline = Deadline.after(2.0)
+
+    with awx_client._client(accept="application/json", deadline=deadline) as client:
+        timeout = client.timeout
+
+    assert timeout.connect <= 2.0
+    assert timeout.read <= 2.0
+    assert timeout.connect < awx_client.reliability.http_connect_timeout_seconds
+    assert timeout.read < awx_client.reliability.http_read_timeout_seconds
+
+
+def test_awx_client_does_not_shrink_timeout_below_configured_value_when_deadline_is_generous(
+    awx_client: AWXClient,
+):
+    # The cap only ever narrows the effective timeout — a deadline with
+    # more time remaining than the configured timeout must not stretch
+    # it beyond what was actually configured.
+    deadline = Deadline.after(10_000.0)
+
+    with awx_client._client(accept="application/json", deadline=deadline) as client:
+        timeout = client.timeout
+
+    assert timeout.connect == awx_client.reliability.http_connect_timeout_seconds
+    assert timeout.read == awx_client.reliability.http_read_timeout_seconds
+
+
+def test_awx_client_uses_full_configured_timeout_when_no_deadline_given(awx_client: AWXClient):
+    with awx_client._client(accept="application/json", deadline=None) as client:
+        timeout = client.timeout
+
+    assert timeout.connect == awx_client.reliability.http_connect_timeout_seconds
+    assert timeout.read == awx_client.reliability.http_read_timeout_seconds
+
+
+def test_reliability_config_defaults_are_conservative_but_bounded():
+    from mantis.config import ReliabilityConfig
+
+    config = ReliabilityConfig()
+    assert 0 < config.http_connect_timeout_seconds <= 10
+    assert config.http_connect_timeout_seconds < config.http_read_timeout_seconds
+    assert config.retry_max_attempts >= 1
+
+
+@respx.mock
+def test_connect_timeout_classifies_as_timeout_kind(awx_client: AWXClient):
+    respx.get("https://awx.example.test/api/v2/jobs/").mock(side_effect=httpx.ConnectTimeout("timed out"))
+
+    with pytest.raises(AWXError) as excinfo:
+        awx_client.list_jobs(status="failed", order_by="-finished", page_size=1)
+
+    assert excinfo.value.kind == IntegrationErrorKind.TIMEOUT
+
+
+@respx.mock
+def test_read_timeout_classifies_as_timeout_kind(awx_client: AWXClient):
+    respx.get("https://awx.example.test/api/v2/jobs/").mock(side_effect=httpx.ReadTimeout("timed out"))
+
+    with pytest.raises(AWXError) as excinfo:
+        awx_client.list_jobs(status="failed", order_by="-finished", page_size=1)
+
+    assert excinfo.value.kind == IntegrationErrorKind.TIMEOUT
+
+
+@respx.mock
+def test_connection_error_classifies_as_connection_kind(awx_client: AWXClient):
+    respx.get("https://awx.example.test/api/v2/jobs/").mock(
+        side_effect=httpx.ConnectError("connection refused")
+    )
+
+    with pytest.raises(AWXError) as excinfo:
+        awx_client.list_jobs(status="failed", order_by="-finished", page_size=1)
+
+    assert excinfo.value.kind == IntegrationErrorKind.CONNECTION
+
+
+@respx.mock
+def test_transient_failure_then_success_consumes_two_attempts_one_logical_call(awx_client: AWXClient):
+    route = respx.get("https://awx.example.test/api/v2/jobs/")
+    route.side_effect = [
+        httpx.Response(503, text="unavailable"),
+        httpx.Response(200, json={"results": [], "count": 0}),
+    ]
+
+    page = awx_client.list_jobs(status="failed", order_by="-finished", page_size=5)
+
+    assert page.total_count == 0
+    assert route.call_count == 2
+
+
+@respx.mock
+def test_retry_exhaustion_raises_after_named_max_attempts(awx_client: AWXClient):
+    route = respx.get("https://awx.example.test/api/v2/jobs/")
+    route.side_effect = [httpx.Response(503)] * awx_client.reliability.retry_max_attempts
+
+    with pytest.raises(AWXError) as excinfo:
+        awx_client.list_jobs(status="failed", order_by="-finished", page_size=5)
+
+    assert route.call_count == awx_client.reliability.retry_max_attempts
+    assert excinfo.value.kind == IntegrationErrorKind.SERVER_ERROR
+
+
+@respx.mock
+def test_429_is_retried(awx_client: AWXClient):
+    route = respx.get("https://awx.example.test/api/v2/jobs/")
+    route.side_effect = [
+        httpx.Response(429, headers={"Retry-After": "0"}),
+        httpx.Response(200, json={"results": [], "count": 0}),
+    ]
+
+    awx_client.list_jobs(status="failed", order_by="-finished", page_size=5)
+
+    assert route.call_count == 2
+
+
+@pytest.mark.parametrize("status", [502, 503, 504])
+@respx.mock
+def test_representative_5xx_statuses_are_retried(awx_client: AWXClient, status):
+    route = respx.get("https://awx.example.test/api/v2/jobs/")
+    route.side_effect = [
+        httpx.Response(status),
+        httpx.Response(200, json={"results": [], "count": 0}),
+    ]
+
+    awx_client.list_jobs(status="failed", order_by="-finished", page_size=5)
+
+    assert route.call_count == 2
+
+
+@respx.mock
+def test_authentication_failure_is_not_retried(awx_client: AWXClient):
+    route = respx.get("https://awx.example.test/api/v2/jobs/").mock(return_value=httpx.Response(401))
+
+    with pytest.raises(AWXError) as excinfo:
+        awx_client.list_jobs(status="failed", order_by="-finished", page_size=5)
+
+    assert route.calls.call_count == 1
+    assert excinfo.value.kind == IntegrationErrorKind.AUTHENTICATION
+
+
+@respx.mock
+def test_authorization_failure_is_not_retried(awx_client: AWXClient):
+    route = respx.get("https://awx.example.test/api/v2/jobs/").mock(return_value=httpx.Response(403))
+
+    with pytest.raises(AWXError) as excinfo:
+        awx_client.list_jobs(status="failed", order_by="-finished", page_size=5)
+
+    assert route.calls.call_count == 1
+    assert excinfo.value.kind == IntegrationErrorKind.AUTHORIZATION
+
+
+@respx.mock
+def test_bad_request_is_not_retried(awx_client: AWXClient):
+    route = respx.get("https://awx.example.test/api/v2/jobs/").mock(return_value=httpx.Response(400))
+
+    with pytest.raises(AWXError) as excinfo:
+        awx_client.list_jobs(status="failed", order_by="-finished", page_size=5)
+
+    assert route.calls.call_count == 1
+    assert excinfo.value.kind == IntegrationErrorKind.BAD_REQUEST
+
+
+@respx.mock
+def test_not_found_is_not_retried_by_default(awx_client: AWXClient):
+    route = respx.get("https://awx.example.test/api/v2/jobs/999/").mock(return_value=httpx.Response(404))
+
+    with pytest.raises(AWXError) as excinfo:
+        awx_client.get_job(999)
+
+    assert route.calls.call_count == 1
+    assert excinfo.value.kind == IntegrationErrorKind.NOT_FOUND
+
+
+@respx.mock
+def test_retry_stops_respecting_remaining_tool_deadline(awx_client: AWXClient):
+    from mantis.reliability import Deadline
+
+    route = respx.get("https://awx.example.test/api/v2/jobs/").mock(return_value=httpx.Response(503))
+    # Expired before the call even starts -> zero HTTP requests, not a
+    # multi-attempt retry sequence.
+    deadline = Deadline.after(0.0)
+
+    with pytest.raises(Exception):
+        awx_client.list_jobs(status="failed", order_by="-finished", page_size=5, deadline=deadline)
+
+    assert route.calls.call_count == 0

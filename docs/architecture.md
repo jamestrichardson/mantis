@@ -86,6 +86,9 @@ mantis.tools.awx.awx_recent_failed_jobs(limit=5)
    │  uses AWXClient to:
    │    - list_jobs(status="failed", order_by="-finished")
    │    - get_job_stdout(job_id) for each   (txt -> txt_download fallback)
+   │  each read: explicit connect/read timeouts, retry_call() with the
+   │  shared retry policy, classified via mantis.reliability on failure
+   │  (see docs/reliability.md)
    │  preprocesses stdout -> failure_excerpt + stdout_tail
    ▼
 mantis.security.make_model_safe(result, contains_untrusted_text=True)

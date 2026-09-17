@@ -4,19 +4,40 @@ This module knows how to authenticate to and talk to the AWX HTTP API. It
 has no knowledge of agents, LLMs, or tool schemas — see
 ``mantis.tools.awx`` for the semantic, LLM-facing layer built on top of
 this client.
+
+Every outbound request uses explicit connect/read timeouts and the
+shared reliability contract (``mantis.reliability`` — see
+``docs/reliability.md`` for the full model, defaults, and rationale):
+GET requests are retried through :func:`~mantis.reliability.retry_call`
+for safe, bounded backoff on classified-transient failures only; a
+failed request never relies on httpx's implicit default timeout
+behavior.
 """
 
 from __future__ import annotations
 
 import logging
-from dataclasses import dataclass
-from typing import Any, NamedTuple
+import time
+from dataclasses import dataclass, field
+from typing import Any, Callable, NamedTuple
 
 import httpx
 
-from mantis.config import AWXConfig
+from mantis.config import AWXConfig, ReliabilityConfig
+from mantis.observability.logging import log_event
+from mantis.reliability import (
+    Deadline,
+    IntegrationError,
+    IntegrationErrorKind,
+    RetryPolicy,
+    classify_http_status,
+    classify_httpx_exception,
+    retry_call,
+)
 
 logger = logging.getLogger(__name__)
+
+SOURCE_SYSTEM = "awx"
 
 
 class JobListPage(NamedTuple):
@@ -36,17 +57,74 @@ class JobListPage(NamedTuple):
 _STDOUT_TOO_LARGE_MARKER = "download"
 
 
-class AWXError(RuntimeError):
-    """Raised when the AWX API returns an unexpected error response."""
+class AWXError(IntegrationError):
+    """Raised when the AWX API returns an unexpected error response.
+
+    Subclasses the shared :class:`~mantis.reliability.IntegrationError`
+    (``source_system`` is always ``"awx"``) so ``AgentRuntime`` can
+    classify, retry-budget-account, and short-circuit on it generically
+    — the runtime never needs to import this class. ``kind`` defaults to
+    ``UNKNOWN`` only for the (expected to be rare) case of a raise site
+    that genuinely can't classify further; every raise site in this
+    module supplies a real classification.
+    """
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        kind: IntegrationErrorKind = IntegrationErrorKind.UNKNOWN,
+        status_code: int | None = None,
+        retry_after: float | None = None,
+    ) -> None:
+        super().__init__(
+            message,
+            kind=kind,
+            source_system=SOURCE_SYSTEM,
+            status_code=status_code,
+            retry_after=retry_after,
+        )
 
 
-class AWXStdoutError(RuntimeError):
+class AWXStdoutError(IntegrationError):
     """Raised when job stdout specifically cannot be retrieved.
 
     This is intentionally a distinct exception type from :class:`AWXError`
     so callers (tools) can represent a failure to *fetch* stdout separately
-    from a failure *of the underlying AWX job itself*.
+    from a failure *of the underlying AWX job itself* — both are
+    :class:`~mantis.reliability.IntegrationError` subclasses underneath,
+    so the runtime's generic handling applies to either.
     """
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        kind: IntegrationErrorKind = IntegrationErrorKind.UNKNOWN,
+        status_code: int | None = None,
+        retry_after: float | None = None,
+    ) -> None:
+        super().__init__(
+            message,
+            kind=kind,
+            source_system=SOURCE_SYSTEM,
+            status_code=status_code,
+            retry_after=retry_after,
+        )
+
+
+def _parse_retry_after(response: httpx.Response) -> float | None:
+    """Best-effort parse of a ``Retry-After`` header's simple
+    integer-seconds form. AWX/most APIs use this form rather than the
+    HTTP-date form; if it's not a plain integer, we just don't have a
+    server-suggested wait and fall back to the policy's own backoff."""
+    raw = response.headers.get("Retry-After")
+    if raw is None:
+        return None
+    try:
+        return float(raw)
+    except ValueError:
+        return None
 
 
 @dataclass
@@ -56,12 +134,49 @@ class AWXClient:
     All methods return parsed JSON (``dict``/``list``) or raw text, and
     raise :class:`AWXError` / :class:`AWXStdoutError` on failure. This
     client performs no business logic beyond talking to the API.
+
+    Every request uses explicit connect/read timeouts
+    (``reliability.http_connect_timeout_seconds`` /
+    ``.http_read_timeout_seconds`` — never httpx's implicit default),
+    further capped at whatever remains of a caller-supplied
+    :class:`~mantis.reliability.Deadline` when one is given (see
+    :meth:`_client`), and goes through
+    :func:`~mantis.reliability.retry_call` with ``reliability``'s retry
+    policy — safe here because every method this client exposes is a
+    read. See ``docs/reliability.md``.
     """
 
     config: AWXConfig
-    timeout: float = 30.0
+    reliability: ReliabilityConfig = field(default_factory=ReliabilityConfig.from_env)
+    sleep: Callable[[float], None] = time.sleep
+    """Injectable backoff-sleep hook, matching this client's existing
+    test-injection convention (see ``_client``/eval's fixture-client
+    override) — tests pass a recording no-op so retry tests never
+    really wait. Defaults to real ``time.sleep`` for production use."""
 
-    def _client(self, accept: str) -> httpx.Client:
+    def _retry_policy(self) -> RetryPolicy:
+        return RetryPolicy(
+            max_attempts=self.reliability.retry_max_attempts,
+            backoff_base_seconds=self.reliability.retry_backoff_base_seconds,
+            backoff_cap_seconds=self.reliability.retry_backoff_cap_seconds,
+        )
+
+    def _client(self, accept: str, *, deadline: Deadline | None = None) -> httpx.Client:
+        # The configured connect/read timeouts are a ceiling, not a
+        # promise — when a Deadline is supplied, the *effective* timeout
+        # is additionally capped at whatever remains of it, so a request
+        # started with, say, 2s of tool budget left is never configured
+        # with the full 25s default read timeout. This narrows (but, per
+        # docs/reliability.md's "What this does and does not guarantee",
+        # can never fully close) the gap between the advertised tool/run
+        # budget and one in-flight synchronous request's actual worst-case
+        # duration.
+        connect = self.reliability.http_connect_timeout_seconds
+        read = self.reliability.http_read_timeout_seconds
+        if deadline is not None:
+            remaining = deadline.remaining()
+            connect = min(connect, remaining)
+            read = min(read, remaining)
         return httpx.Client(
             base_url=self.config.url,
             headers={
@@ -69,7 +184,71 @@ class AWXClient:
                 "Accept": accept,
             },
             verify=self.config.verify_ssl,
-            timeout=self.timeout,
+            timeout=httpx.Timeout(connect=connect, read=read, write=read, pool=connect),
+        )
+
+    def _get(
+        self,
+        path: str,
+        *,
+        accept: str,
+        params: dict[str, Any] | None,
+        error_cls: type,
+        action: str,
+        deadline: Deadline | None,
+    ) -> httpx.Response:
+        """Shared GET-with-retry path for every read this client makes.
+
+        ``action`` is a short human-readable description (e.g. "list AWX
+        jobs") used only in the bounded diagnostic message — never
+        authoritative, never containing a credential.
+        """
+
+        def attempt() -> httpx.Response:
+            try:
+                with self._client(accept=accept, deadline=deadline) as client:
+                    response = client.get(path, params=params)
+                    response.raise_for_status()
+                    return response
+            except httpx.HTTPStatusError as exc:
+                kind = classify_http_status(exc.response.status_code)
+                raise error_cls(
+                    f"Failed to {action}: HTTP {exc.response.status_code}",
+                    kind=kind,
+                    status_code=exc.response.status_code,
+                    retry_after=(
+                        _parse_retry_after(exc.response)
+                        if kind == IntegrationErrorKind.RATE_LIMIT
+                        else None
+                    ),
+                ) from exc
+            except httpx.HTTPError as exc:
+                kind = classify_httpx_exception(exc)
+                raise error_cls(f"Failed to {action}: {exc}", kind=kind) from exc
+
+        def on_attempt(attempt_number: int, error: IntegrationError | None) -> None:
+            if error is None:
+                return
+            will_retry = error.retryable and attempt_number < self.reliability.retry_max_attempts
+            log_event(
+                logger,
+                "mantis_integration_retry",
+                level=logging.INFO if will_retry else logging.WARNING,
+                source_system=SOURCE_SYSTEM,
+                action=action,
+                attempt=attempt_number,
+                max_attempts=self.reliability.retry_max_attempts,
+                error_kind=error.kind.value,
+                will_retry=will_retry,
+            )
+
+        return retry_call(
+            attempt,
+            policy=self._retry_policy(),
+            deadline=deadline,
+            source_system=SOURCE_SYSTEM,
+            sleep=self.sleep,
+            on_attempt=on_attempt,
         )
 
     def list_jobs(
@@ -78,6 +257,7 @@ class AWXClient:
         status: str | None = None,
         order_by: str | None = None,
         page_size: int = 10,
+        deadline: Deadline | None = None,
     ) -> JobListPage:
         """Return one page of job records from ``/api/v2/jobs/``.
 
@@ -85,6 +265,10 @@ class AWXClient:
             status: Filter by AWX job status (e.g. "failed").
             order_by: AWX ``order_by`` value (e.g. "-finished").
             page_size: Maximum number of jobs to request from AWX.
+            deadline: Remaining tool-call time budget, if any — threaded
+                into the retry policy so a retry never knowingly starts
+                (or sleeps for a backoff) past it. See
+                ``docs/reliability.md``.
 
         Returns:
             A :class:`JobListPage` with the returned jobs and AWX's
@@ -98,48 +282,60 @@ class AWXClient:
         if order_by is not None:
             params["order_by"] = order_by
 
-        try:
-            with self._client(accept="application/json") as client:
-                response = client.get("/api/v2/jobs/", params=params)
-                response.raise_for_status()
-        except httpx.HTTPError as exc:
-            raise AWXError(f"Failed to list AWX jobs: {exc}") from exc
+        response = self._get(
+            "/api/v2/jobs/",
+            accept="application/json",
+            params=params,
+            error_cls=AWXError,
+            action="list AWX jobs",
+            deadline=deadline,
+        )
 
         try:
             payload = response.json()
         except ValueError as exc:
-            raise AWXError(f"AWX returned non-JSON response listing jobs: {exc}") from exc
+            raise AWXError(
+                f"AWX returned non-JSON response listing jobs: {exc}",
+                kind=IntegrationErrorKind.UNKNOWN,
+            ) from exc
 
         jobs = payload.get("results", [])
         return JobListPage(jobs=jobs, total_count=payload.get("count", len(jobs)))
 
-    def get_job(self, job_id: int) -> dict[str, Any]:
+    def get_job(self, job_id: int, *, deadline: Deadline | None = None) -> dict[str, Any]:
         """Return the full job detail record for ``job_id``."""
-        try:
-            with self._client(accept="application/json") as client:
-                response = client.get(f"/api/v2/jobs/{job_id}/")
-                response.raise_for_status()
-        except httpx.HTTPError as exc:
-            raise AWXError(f"Failed to fetch AWX job {job_id}: {exc}") from exc
+        response = self._get(
+            f"/api/v2/jobs/{job_id}/",
+            accept="application/json",
+            params=None,
+            error_cls=AWXError,
+            action=f"fetch AWX job {job_id}",
+            deadline=deadline,
+        )
 
         try:
             return response.json()
         except ValueError as exc:
-            raise AWXError(f"AWX returned non-JSON response for job {job_id}: {exc}") from exc
+            raise AWXError(
+                f"AWX returned non-JSON response for job {job_id}: {exc}",
+                kind=IntegrationErrorKind.UNKNOWN,
+            ) from exc
 
-    def get_job_stdout(self, job_id: int) -> str:
+    def get_job_stdout(self, job_id: int, *, deadline: Deadline | None = None) -> str:
         """Return the plain-text stdout for ``job_id``.
 
         AWX may respond to a normal ``format=txt`` request with a short
         message saying the output is too large to display and that the
         download endpoint should be used instead. This method detects that
-        case and transparently retries with ``format=txt_download``.
+        case and transparently retries with ``format=txt_download`` — a
+        distinct concern from, and unrelated to, the transport-level
+        retry policy applied to each individual request.
 
         Raises :class:`AWXStdoutError` (never :class:`AWXError`) on
         failure, so callers can distinguish "we couldn't retrieve stdout"
         from "the AWX job itself failed."
         """
-        text = self._fetch_stdout(job_id, fmt="txt")
+        text = self._fetch_stdout(job_id, fmt="txt", deadline=deadline)
 
         if self._looks_truncated(text):
             logger.info(
@@ -147,23 +343,19 @@ class AWXClient:
                 "retrying with txt_download",
                 job_id,
             )
-            text = self._fetch_stdout(job_id, fmt="txt_download")
+            text = self._fetch_stdout(job_id, fmt="txt_download", deadline=deadline)
 
         return text
 
-    def _fetch_stdout(self, job_id: int, *, fmt: str) -> str:
-        try:
-            with self._client(accept="text/plain") as client:
-                response = client.get(
-                    f"/api/v2/jobs/{job_id}/stdout/",
-                    params={"format": fmt},
-                )
-                response.raise_for_status()
-        except httpx.HTTPError as exc:
-            raise AWXStdoutError(
-                f"Failed to retrieve stdout for AWX job {job_id} (format={fmt}): {exc}"
-            ) from exc
-
+    def _fetch_stdout(self, job_id: int, *, fmt: str, deadline: Deadline | None) -> str:
+        response = self._get(
+            f"/api/v2/jobs/{job_id}/stdout/",
+            accept="text/plain",
+            params={"format": fmt},
+            error_cls=AWXStdoutError,
+            action=f"retrieve stdout for AWX job {job_id} (format={fmt})",
+            deadline=deadline,
+        )
         return response.text
 
     @staticmethod

@@ -13,10 +13,11 @@ from typing import Any
 
 import pytest
 
-from mantis.config import LiteLLMConfig, Secret
+from mantis.config import LiteLLMConfig, ReliabilityConfig, Secret
 from mantis.observability import metrics
 from mantis.registry import Tool, ToolRegistry
-from mantis.runtime import AgentRuntime, MaxIterationsExceededError
+from mantis.reliability import DeadlineExceededError, IntegrationError, IntegrationErrorKind
+from mantis.runtime import AgentRuntime, MaxIterationsExceededError, RunDeadlineExceededError
 
 
 @dataclass
@@ -118,8 +119,10 @@ def _build_runtime(
     max_iterations: int = 8,
     tool_call_budget: int | None = None,
     temperature: float | None = None,
+    reliability: Any = None,
+    clock: Any = None,
 ) -> AgentRuntime:
-    runtime = AgentRuntime(
+    kwargs: dict[str, Any] = dict(
         name="test-agent",
         system_prompt="You are a test agent.",
         tools=tools or [],
@@ -129,8 +132,28 @@ def _build_runtime(
         tool_call_budget=tool_call_budget,
         temperature=temperature,
     )
+    if reliability is not None:
+        kwargs["reliability"] = reliability
+    if clock is not None:
+        kwargs["clock"] = clock
+    runtime = AgentRuntime(**kwargs)
     runtime._client = FakeOpenAIClient(responses)
     return runtime
+
+
+class FakeClock:
+    """A fully controllable monotonic clock for deterministic
+    run/tool-deadline tests (#15) — no real sleeps, no timing races.
+    """
+
+    def __init__(self, start: float = 0.0) -> None:
+        self.now = start
+
+    def __call__(self) -> float:
+        return self.now
+
+    def advance(self, seconds: float) -> None:
+        self.now += seconds
 
 
 def _echo_tool(name: str = "echo", handler=None, *, contains_untrusted_text: bool = True) -> Tool:
@@ -759,3 +782,393 @@ def test_tool_call_log_event_remains_redacted_for_the_same_call(caplog):
     tool_call_events = [r for r in caplog.records if getattr(r, "event", None) == "mantis_tool_call"]
     assert len(tool_call_events) == 1
     assert "sk-should-never-appear" not in json.dumps(tool_call_events[0].bound_result, default=str)
+
+
+# ---------------------------------------------------------------------------
+# Reliability (#15): run/tool budgets, run-local short circuit, and
+# regression checks against #14's safety pipeline and existing behavior.
+# All deterministic — FakeClock is advanced explicitly, never a real sleep.
+# ---------------------------------------------------------------------------
+
+
+def test_run_deadline_exceeded_stops_before_the_next_iteration():
+    clock = FakeClock()
+
+    def slow_tool(**kw):
+        clock.advance(10.0)  # simulates a tool call that ate the whole run budget
+        return {"ok": True}
+
+    registry = ToolRegistry()
+    registry.register(_echo_tool(handler=slow_tool))
+    responses = [
+        _tool_call_response(_tool_call("call_1", "echo", {})),
+        _final_message_response("done"),  # must never be reached
+    ]
+    runtime = _build_runtime(
+        responses,
+        tools=["echo"],
+        registry=registry,
+        reliability=ReliabilityConfig(run_timeout_seconds=5.0),
+        clock=clock,
+    )
+
+    with pytest.raises(RunDeadlineExceededError):
+        runtime.run("do the thing")
+
+    # Only the first iteration's model call happened.
+    assert len(runtime._client.chat.completions.calls) == 1
+
+
+def test_run_deadline_exceeded_is_recorded_as_a_distinct_run_metric_outcome():
+    clock = FakeClock()
+
+    def slow_tool(**kw):
+        clock.advance(10.0)
+        return {"ok": True}
+
+    registry = ToolRegistry()
+    registry.register(_echo_tool(handler=slow_tool))
+    responses = [
+        _tool_call_response(_tool_call("call_1", "echo", {})),
+        _final_message_response("done"),
+    ]
+    runtime = _build_runtime(
+        responses,
+        tools=["echo"],
+        registry=registry,
+        reliability=ReliabilityConfig(run_timeout_seconds=5.0),
+        clock=clock,
+    )
+
+    labels = dict(
+        agent="test-agent",
+        model_alias="m",
+        result="run_deadline_exceeded",
+        environment=metrics.environment(),
+    )
+    before = metrics.RUNS_TOTAL.labels(**labels)._value.get()
+
+    with pytest.raises(RunDeadlineExceededError):
+        runtime.run("do the thing")
+
+    after = metrics.RUNS_TOTAL.labels(**labels)._value.get()
+    assert after == before + 1
+
+
+def test_handler_raised_deadline_exceeded_is_reported_as_budget_exceeded_without_crashing_the_run():
+    # ReliabilityConfig now validates tool_timeout_seconds > 0 (see
+    # mantis.config.ReliabilityConfig.__post_init__), so the dispatch-level
+    # pre-check that used to construct a zero-budget scenario is gone —
+    # that branch was unreachable dead code once the invalid config it
+    # existed to guard against could no longer be constructed. The
+    # reachable path for a "tool_deadline_exceeded" classification is a
+    # handler that itself discovers, via the injected _deadline, that its
+    # remaining budget is already gone (exactly what AWXClient's
+    # retry_call does internally) and raises DeadlineExceededError.
+    def handler(*, _deadline=None, **kw):
+        raise DeadlineExceededError("no budget left for a retry attempt", scope="tool")
+
+    registry = ToolRegistry()
+    registry.register(_echo_tool(handler=handler))
+    responses = [
+        _tool_call_response(_tool_call("call_1", "echo", {})),
+        _final_message_response("done"),
+    ]
+    runtime = _build_runtime(responses, tools=["echo"], registry=registry)
+
+    result = runtime.run("do the thing")
+
+    assert result == "done"  # a budget failure doesn't crash the run
+    assert runtime.call_log[-1].outcome == "budget_exceeded"
+
+
+def test_run_deadline_exhausted_mid_iteration_produces_budget_exceeded_for_the_next_tool_call():
+    # Two tool calls requested in the same iteration; the first eats the
+    # whole run budget, so the second must fail fast as budget_exceeded
+    # without crashing the run — distinct from the top-of-loop check
+    # (see test_run_deadline_exceeded_stops_before_the_next_iteration).
+    clock = FakeClock()
+
+    def slow_tool(**kw):
+        clock.advance(10.0)
+        return {"first": True}
+
+    registry = ToolRegistry()
+    registry.register(_echo_tool(name="tool_a", handler=slow_tool))
+    registry.register(_echo_tool(name="tool_b", handler=lambda **kw: {"second": True}))
+    responses = [
+        _tool_call_response(
+            _tool_call("call_1", "tool_a", {}),
+            _tool_call("call_2", "tool_b", {}),
+        ),
+        _final_message_response("done"),
+    ]
+    runtime = _build_runtime(
+        responses,
+        tools=["tool_a", "tool_b"],
+        registry=registry,
+        reliability=ReliabilityConfig(run_timeout_seconds=5.0),
+        clock=clock,
+    )
+
+    # The run budget is genuinely gone after tool_a — the second tool
+    # call fails gracefully as budget_exceeded (checked below), but the
+    # run itself still correctly refuses to start a *third* iteration's
+    # model call once back at the top of the loop; it must not reach
+    # "done". This is the same run_deadline enforcement as
+    # test_run_deadline_exceeded_stops_before_the_next_iteration, just
+    # observed one call later.
+    with pytest.raises(RunDeadlineExceededError):
+        runtime.run("do the thing")
+
+    outcomes = [entry.outcome for entry in runtime.call_log]
+    assert outcomes == ["ok", "budget_exceeded"]
+
+
+def test_short_circuit_opens_after_threshold_and_fails_fast_without_calling_the_handler():
+    calls = {"n": 0}
+
+    def always_fails(**kw):
+        calls["n"] += 1
+        raise IntegrationError("down", kind=IntegrationErrorKind.SERVER_ERROR, source_system="stub")
+
+    registry = ToolRegistry()
+    registry.register(_echo_tool(handler=always_fails))
+    responses = [
+        _tool_call_response(_tool_call("call_1", "echo", {"n": 1})),
+        _tool_call_response(_tool_call("call_2", "echo", {"n": 2})),
+        _tool_call_response(_tool_call("call_3", "echo", {"n": 3})),
+        _final_message_response("done"),
+    ]
+    runtime = _build_runtime(
+        responses,
+        tools=["echo"],
+        registry=registry,
+        reliability=ReliabilityConfig(short_circuit_threshold=2),
+    )
+
+    result = runtime.run("do the thing")
+
+    assert result == "done"
+    assert calls["n"] == 2  # third call never reached the handler
+    outcomes = [entry.outcome for entry in runtime.call_log]
+    assert outcomes == ["integration_error", "integration_error", "short_circuited"]
+
+
+def test_short_circuit_state_resets_on_a_new_run():
+    calls = {"n": 0}
+
+    def always_fails(**kw):
+        calls["n"] += 1
+        raise IntegrationError("down", kind=IntegrationErrorKind.SERVER_ERROR, source_system="stub")
+
+    registry = ToolRegistry()
+    registry.register(_echo_tool(handler=always_fails))
+    first_run_responses = [
+        _tool_call_response(_tool_call("call_1", "echo", {"n": 1})),
+        _tool_call_response(_tool_call("call_2", "echo", {"n": 2})),
+        _final_message_response("done"),
+    ]
+    runtime = _build_runtime(
+        first_run_responses,
+        tools=["echo"],
+        registry=registry,
+        reliability=ReliabilityConfig(short_circuit_threshold=2),
+    )
+    runtime.run("first run")
+    assert calls["n"] == 2  # breaker now open for this instance's first run()
+
+    # A second run() call must start with fresh breaker state — the very
+    # next call to the same integration must reach the handler again, not
+    # be immediately short-circuited from the previous run's failures.
+    runtime._client = FakeOpenAIClient(
+        [
+            _tool_call_response(_tool_call("call_3", "echo", {"n": 3})),
+            _final_message_response("done"),
+        ]
+    )
+    runtime.run("second run")
+    assert calls["n"] == 3
+    assert runtime.call_log[-1].outcome == "integration_error"  # reached the handler, not short-circuited
+
+
+def test_not_found_failures_never_open_the_short_circuit():
+    calls = {"n": 0}
+
+    def not_found(**kw):
+        calls["n"] += 1
+        raise IntegrationError("missing", kind=IntegrationErrorKind.NOT_FOUND, source_system="stub")
+
+    registry = ToolRegistry()
+    registry.register(_echo_tool(handler=not_found))
+    responses = [
+        _tool_call_response(_tool_call("call_1", "echo", {"n": 1})),
+        _tool_call_response(_tool_call("call_2", "echo", {"n": 2})),
+        _tool_call_response(_tool_call("call_3", "echo", {"n": 3})),
+        _final_message_response("done"),
+    ]
+    runtime = _build_runtime(
+        responses,
+        tools=["echo"],
+        registry=registry,
+        reliability=ReliabilityConfig(short_circuit_threshold=2),
+    )
+
+    runtime.run("do the thing")
+
+    assert calls["n"] == 3  # every call reached the handler; never short-circuited
+    outcomes = [entry.outcome for entry in runtime.call_log]
+    assert outcomes == ["integration_error", "integration_error", "integration_error"]
+
+
+def test_degraded_failure_reported_via_reliability_report_still_opens_the_breaker():
+    # Regression test (PR #72 review): a tool handler that swallows a
+    # per-item integration failure into partial evidence instead of
+    # raising (see mantis.tools.awx._summarize_job) never triggers the
+    # `except IntegrationError` branch, so without an explicit report the
+    # breaker would stay blind to it — and the call's own unconditional
+    # success would then reset the breaker to zero anyway. A handler that
+    # declares _reliability_report can report the failure itself so the
+    # breaker still opens after enough of them, exactly as it would for a
+    # handler that raised outright.
+    def degrading_tool(*, _reliability_report=None, **kw):
+        if _reliability_report is not None:
+            _reliability_report(IntegrationErrorKind.SERVER_ERROR)
+        return {"partial": True}  # the call itself never raises
+
+    registry = ToolRegistry()
+    registry.register(_echo_tool(handler=degrading_tool))
+    responses = [
+        _tool_call_response(_tool_call("call_1", "echo", {"n": 1})),
+        _tool_call_response(_tool_call("call_2", "echo", {"n": 2})),
+        _tool_call_response(_tool_call("call_3", "echo", {"n": 3})),
+        _final_message_response("done"),
+    ]
+    runtime = _build_runtime(
+        responses,
+        tools=["echo"],
+        registry=registry,
+        reliability=ReliabilityConfig(short_circuit_threshold=2),
+    )
+
+    result = runtime.run("do the thing")
+
+    assert result == "done"
+    outcomes = [entry.outcome for entry in runtime.call_log]
+    # Every call "succeeds" (the handler never raises) but the breaker
+    # still saw two reported degraded failures and opened — the third
+    # call must short-circuit instead of reaching the handler again.
+    assert outcomes == ["ok", "ok", "short_circuited"]
+
+
+def test_reliability_report_failure_is_not_wiped_by_the_same_calls_own_success():
+    # The narrower version of the above: even a single call that both
+    # reports a degraded failure AND returns successfully must not call
+    # breaker.record_success() and erase the failure it just recorded —
+    # that would make the report a no-op in practice.
+    def degrading_once_then_healthy(*, _reliability_report=None, **kw):
+        if _reliability_report is not None:
+            _reliability_report(IntegrationErrorKind.SERVER_ERROR)
+        return {"partial": True}
+
+    registry = ToolRegistry()
+    registry.register(_echo_tool(handler=degrading_once_then_healthy))
+    responses = [
+        _tool_call_response(_tool_call("call_1", "echo", {"n": 1})),
+        _tool_call_response(_tool_call("call_2", "echo", {"n": 2})),
+        _final_message_response("done"),
+    ]
+    runtime = _build_runtime(
+        responses,
+        tools=["echo"],
+        registry=registry,
+        reliability=ReliabilityConfig(short_circuit_threshold=1),
+    )
+
+    runtime.run("do the thing")
+
+    outcomes = [entry.outcome for entry in runtime.call_log]
+    assert outcomes == ["ok", "short_circuited"]
+
+
+def test_integration_error_result_goes_through_the_14_safety_pipeline():
+    # #14's model-input safety pipeline must apply to reliability/error
+    # results too, not just successful ones — including marking the
+    # result untrusted evidence and redacting a credential embedded in
+    # the diagnostic message (using a pattern mantis.security actually
+    # supports — Bearer-style text; #14 is deliberately conservative and
+    # is not a general secret scanner, see docs/security.md).
+    def leaky_failure(**kw):
+        raise IntegrationError(
+            "upstream rejected request: Authorization: Bearer sk-should-never-appear",
+            kind=IntegrationErrorKind.SERVER_ERROR,
+            source_system="stub",
+        )
+
+    registry = ToolRegistry()
+    registry.register(_echo_tool(handler=leaky_failure))
+    responses = [
+        _tool_call_response(_tool_call("call_1", "echo", {})),
+        _final_message_response("done"),
+    ]
+    runtime = _build_runtime(responses, tools=["echo"], registry=registry)
+
+    runtime.run("do the thing")
+
+    sent = _tool_message_sent_after(runtime, call_index=0)
+    assert sent["untrusted_evidence"] is True
+    assert "sk-should-never-appear" not in json.dumps(sent)
+    assert "Bearer ***" in sent["error"]["message"]
+    assert sent["error"]["kind"] == "upstream_error"
+
+
+def test_integration_error_credential_is_redacted_in_the_log_line_too(caplog):
+    # Regression test: the plain logger.warning(detail) call in
+    # _dispatch_tool_call is a *separate* surface from the model-facing
+    # message above — #14's make_model_safe() only protects the latter.
+    # A credential embedded in an IntegrationError's diagnostic message
+    # must not leak into the log line either.
+    caplog.set_level(logging.WARNING, logger="mantis.runtime")
+
+    def leaky_failure(**kw):
+        raise IntegrationError(
+            "upstream rejected request: Authorization: Bearer sk-should-never-appear",
+            kind=IntegrationErrorKind.SERVER_ERROR,
+            source_system="stub",
+        )
+
+    registry = ToolRegistry()
+    registry.register(_echo_tool(handler=leaky_failure))
+    responses = [
+        _tool_call_response(_tool_call("call_1", "echo", {})),
+        _final_message_response("done"),
+    ]
+    runtime = _build_runtime(responses, tools=["echo"], registry=registry)
+
+    runtime.run("do the thing")
+
+    logged_text = "\n".join(r.getMessage() for r in caplog.records)
+    assert "sk-should-never-appear" not in logged_text
+    assert "Bearer ***" in logged_text
+
+
+def test_integration_error_note_distinguishes_retrieval_failure_from_evidence():
+    # See docs/security.md / #15's "tool/result behavior" requirement:
+    # "Mantis could not retrieve evidence" must never be phrased as if it
+    # were a fact about the target system's own state.
+    def fails(**kw):
+        raise IntegrationError("boom", kind=IntegrationErrorKind.TIMEOUT, source_system="stub")
+
+    registry = ToolRegistry()
+    registry.register(_echo_tool(handler=fails))
+    responses = [
+        _tool_call_response(_tool_call("call_1", "echo", {})),
+        _final_message_response("done"),
+    ]
+    runtime = _build_runtime(responses, tools=["echo"], registry=registry)
+
+    runtime.run("do the thing")
+
+    sent = _tool_message_sent_after(runtime, call_index=0)
+    assert "could not retrieve evidence" in sent["note"].lower()
+    assert "does not establish" in sent["note"].lower()

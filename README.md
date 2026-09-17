@@ -204,6 +204,7 @@ as (for example) a proven firewall misconfiguration.
 - [docs/agents.md](docs/agents.md) — what an agent is, how to add one
 - [docs/configuration.md](docs/configuration.md) — the `.env.*` convention and all environment variables
 - [docs/security.md](docs/security.md) — least privilege, credentials, future mutation gates
+- [docs/reliability.md](docs/reliability.md) — timeouts, retries, failure taxonomy, run/tool deadlines, run-local short circuit
 - [docs/development.md](docs/development.md) — contributor workflow: tests, adding integrations/tools/agents, style
 - [docs/evaluation.md](docs/evaluation.md) — model qualification/evaluation harness: running scenarios, adding a new one
 - [docs/observability.md](docs/observability.md) — structured JSON log event schema, Prometheus metrics catalog, LogQL/PromQL examples

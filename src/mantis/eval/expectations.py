@@ -113,6 +113,26 @@ def _tool_error_kind_present(value: Any, kind: str) -> bool:
     return False
 
 
+def _any_tool_error_present(value: Any) -> bool:
+    """Like :func:`_tool_error_kind_present`, but matches a
+    ``ToolError``-shaped entry of *any* kind — every
+    ``mantis.contracts.ToolErrorKind`` value represents "Mantis failed to
+    retrieve or parse evidence" (see that class's docstring), just
+    classified differently (timeout vs. upstream_error vs. ...). Since #15
+    introduced real per-failure classification (previously every AWX
+    stdout failure was hardcoded to ``retrieval_error`` regardless of
+    cause), a check for "was there a retrieval failure at all" must not
+    hardcode one specific kind.
+    """
+    if isinstance(value, dict):
+        if "kind" in value and "message" in value:
+            return True
+        return any(_any_tool_error_present(v) for v in value.values())
+    if isinstance(value, list):
+        return any(_any_tool_error_present(v) for v in value)
+    return False
+
+
 def _meta_truncated(value: Any) -> bool:
     """True if a tool result carries ``meta.truncated: true`` (see
     ``mantis.contracts.QueryMeta``)."""
@@ -478,12 +498,15 @@ class TruncationAcknowledged:
 @dataclass(frozen=True)
 class NoRetrievalErrorMisattribution:
     """Hard by default. If any tool result reports a
-    ``mantis.contracts.ToolError`` of kind ``"retrieval_error"``
-    (Mantis-side failure to *fetch* evidence — e.g. AWX stdout retrieval
-    failing), the final answer must not claim that error is *why the
-    underlying investigated system/job failed*. Contract-aware (matches
-    on ``ToolErrorKind`` rather than a hardcoded field name), so this
-    works for any tool adopting the shared error taxonomy, not just AWX.
+    ``mantis.contracts.ToolError`` of *any* kind (Mantis-side failure to
+    *fetch* evidence — e.g. AWX stdout retrieval timing out, or AWX
+    itself returning a server error) the final answer must not claim
+    that error is *why the underlying investigated system/job failed*.
+    Contract-aware (matches on the ``ToolError`` shape rather than a
+    hardcoded field name or one specific ``ToolErrorKind`` value — see
+    ``mantis.reliability`` for the classification that decides which
+    specific kind a given failure gets, #15), so this works for any tool
+    adopting the shared error taxonomy, not just AWX.
     """
 
     retrieval_terms: tuple[str, ...] = (r"retriev", r"\bfetch", r"\bstdout\b")
@@ -504,9 +527,7 @@ class NoRetrievalErrorMisattribution:
         return self.name or "no_retrieval_error_misattribution"
 
     def check(self, result: "EvalResult") -> tuple[bool, str]:
-        has_retrieval_error = any(
-            _tool_error_kind_present(tc.result, "retrieval_error") for tc in result.tool_calls
-        )
+        has_retrieval_error = any(_any_tool_error_present(tc.result) for tc in result.tool_calls)
         if not has_retrieval_error:
             return True, "no retrieval error present in tool results; nothing to misattribute"
         flags = 0 if self.case_sensitive else re.IGNORECASE
