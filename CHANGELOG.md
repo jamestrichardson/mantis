@@ -1,5 +1,13 @@
 # Changelog
 
+## [1.3.1](https://github.com/jamestrichardson/mantis/compare/mantis-v1.3.0...mantis-v1.3.1) (2026-09-17)
+
+
+### Bug Fixes
+
+* **observability:** stop enabling metrics server by default in the container ([ed38d73](https://github.com/jamestrichardson/mantis/commit/ed38d73c6cab815e67d81c37a97b19db0ac93374))
+* **observability:** stop enabling metrics server by default in the container ([f60f586](https://github.com/jamestrichardson/mantis/commit/f60f586fbf37e69036dd1d171e3ad21be3fa8abf))
+
 ## [1.3.0](https://github.com/jamestrichardson/mantis/compare/mantis-v1.2.0...mantis-v1.3.0) (2026-09-17)
 
 
