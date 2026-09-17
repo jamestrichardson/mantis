@@ -19,9 +19,10 @@ import logging
 from typing import Any
 
 from mantis.config import AWXConfig
-from mantis.contracts import QueryMeta, ToolError, ToolErrorKind
+from mantis.contracts import QueryMeta, ToolError
 from mantis.integrations.awx import AWXClient, AWXError, AWXStdoutError
 from mantis.registry import Tool, default_registry
+from mantis.reliability import Deadline
 from mantis.tools._text import extract_excerpt, tail
 
 logger = logging.getLogger(__name__)
@@ -76,7 +77,9 @@ def _summary_name(job: dict[str, Any], key: str) -> Any:
     return related.get("name", job.get(key))
 
 
-def _summarize_job(client: AWXClient, job: dict[str, Any]) -> dict[str, Any]:
+def _summarize_job(
+    client: AWXClient, job: dict[str, Any], *, deadline: Deadline | None
+) -> dict[str, Any]:
     result: dict[str, Any] = {field: job.get(field) for field in _JOB_FIELDS}
     result["inventory"] = _summary_name(job, "inventory")
     result["project"] = _summary_name(job, "project")
@@ -84,16 +87,18 @@ def _summarize_job(client: AWXClient, job: dict[str, Any]) -> dict[str, Any]:
 
     job_id = job.get("id")
     try:
-        stdout = client.get_job_stdout(job_id)
+        stdout = client.get_job_stdout(job_id, deadline=deadline)
     except AWXStdoutError as exc:
         # Deliberately separate from the AWX job's own failure reason
         # (job_explanation / failed above): this represents our failure to
         # *retrieve* evidence, not evidence of an infrastructure failure.
-        # Tagged with the shared ToolErrorKind vocabulary (mantis.contracts)
-        # rather than left as a bare string.
+        # kind comes from the real classification the integration layer
+        # assigned (mantis.reliability) — never hardcoded — so, e.g., a
+        # timeout is reported as ToolErrorKind.TIMEOUT, not a generic
+        # retrieval_error indistinguishable from a connection failure.
         logger.warning("Could not retrieve stdout for AWX job %s: %s", job_id, exc)
         result["stdout_retrieval_error"] = ToolError(
-            kind=ToolErrorKind.RETRIEVAL_ERROR, message=str(exc)
+            kind=exc.to_tool_error_kind(), message=str(exc)
         ).to_dict()
         result["failure_excerpt"] = ""
         result["stdout_tail"] = ""
@@ -105,7 +110,9 @@ def _summarize_job(client: AWXClient, job: dict[str, Any]) -> dict[str, Any]:
     return result
 
 
-def awx_recent_failed_jobs(limit: int = 5, *, _client: AWXClient | None = None) -> dict[str, Any]:
+def awx_recent_failed_jobs(
+    limit: int = 5, *, _client: AWXClient | None = None, _deadline: Deadline | None = None
+) -> dict[str, Any]:
     """Fetch the most recently finished failed AWX jobs, with preprocessed
     stdout evidence for each.
 
@@ -120,6 +127,22 @@ def awx_recent_failed_jobs(limit: int = 5, *, _client: AWXClient | None = None) 
             ``AWXConfig.from_env()``. Used by ``mantis.eval`` to run this
             exact production code path against fixture data instead of
             live AWX — see ``mantis/eval/fixtures/awx.py``.
+        _deadline: Remaining tool-call time budget, set by
+            ``AgentRuntime`` — see ``mantis.reliability.Deadline`` and
+            ``docs/reliability.md``. Same keyword-only/underscore
+            convention as ``_client``, for the same reason. ``None``
+            (the default for direct/manual calls) means no deadline is
+            enforced beyond each individual request's own connect/read
+            timeout.
+
+    Raises:
+        mantis.integrations.awx.AWXError: if the job list itself
+            couldn't be retrieved (as opposed to one job's stdout, which
+            degrades gracefully into that job's own
+            ``stdout_retrieval_error`` instead of raising) — this is a
+            ``mantis.reliability.IntegrationError`` subclass, which is
+            what lets ``AgentRuntime`` classify, retry-account, and
+            run-local-short-circuit on it generically.
 
     Returns:
         A dict with ``meta`` (provenance — see ``mantis.contracts.QueryMeta``),
@@ -147,11 +170,20 @@ def awx_recent_failed_jobs(limit: int = 5, *, _client: AWXClient | None = None) 
             status="failed",
             order_by="-finished",
             page_size=clamped_limit,
+            deadline=_deadline,
         )
     except AWXError as exc:
-        raise AWXError(f"Could not list recent failed AWX jobs: {exc}") from exc
+        # Preserve the original classification/status/retry_after — a
+        # wrap-and-reraise that dropped them would leave AgentRuntime
+        # unable to tell a timeout from an auth failure here.
+        raise AWXError(
+            f"Could not list recent failed AWX jobs: {exc}",
+            kind=exc.kind,
+            status_code=exc.status_code,
+            retry_after=exc.retry_after,
+        ) from exc
 
-    summarized = [_summarize_job(client, job) for job in page.jobs]
+    summarized = [_summarize_job(client, job, deadline=_deadline) for job in page.jobs]
     meta = QueryMeta(
         source_system="awx",
         truncated=page.total_count > len(summarized),

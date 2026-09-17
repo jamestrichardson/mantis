@@ -71,6 +71,26 @@ def _getenv_bool(name: str, default: bool) -> bool:
     return raw.strip().lower() in ("1", "true", "yes", "on")
 
 
+def _getenv_float(name: str, default: float) -> float:
+    raw = os.environ.get(name)
+    if raw is None:
+        return default
+    try:
+        return float(raw)
+    except ValueError as exc:
+        raise ConfigurationError(f"{name} must be a number, got {raw!r}") from exc
+
+
+def _getenv_int(name: str, default: int) -> int:
+    raw = os.environ.get(name)
+    if raw is None:
+        return default
+    try:
+        return int(raw)
+    except ValueError as exc:
+        raise ConfigurationError(f"{name} must be an integer, got {raw!r}") from exc
+
+
 def _require(name: str) -> str:
     value = os.environ.get(name)
     if not value:
@@ -154,4 +174,51 @@ class AWXConfig:
             url=_require("AWX_URL").rstrip("/"),
             token=_require_secret("AWX_TOKEN"),
             verify_ssl=_getenv_bool("AWX_VERIFY_SSL", True),
+        )
+
+
+@dataclass(frozen=True)
+class ReliabilityConfig:
+    """The shared reliability contract's configurable knobs (see
+    ``mantis.reliability`` and ``docs/reliability.md``) — one shared
+    config for every integration/tool, not one set of magic numbers per
+    integration. Every value has a named default; nothing here needs to
+    be set to get sensible, documented behavior.
+    """
+
+    http_connect_timeout_seconds: float = 5.0
+    http_read_timeout_seconds: float = 25.0
+    retry_max_attempts: int = 3
+    retry_backoff_base_seconds: float = 0.5
+    retry_backoff_cap_seconds: float = 8.0
+    tool_timeout_seconds: float = 45.0
+    run_timeout_seconds: float = 300.0
+    short_circuit_threshold: int = 3
+
+    @classmethod
+    def from_env(cls) -> "ReliabilityConfig":
+        defaults = cls()
+        return cls(
+            http_connect_timeout_seconds=_getenv_float(
+                "MANTIS_HTTP_CONNECT_TIMEOUT_SECONDS", defaults.http_connect_timeout_seconds
+            ),
+            http_read_timeout_seconds=_getenv_float(
+                "MANTIS_HTTP_READ_TIMEOUT_SECONDS", defaults.http_read_timeout_seconds
+            ),
+            retry_max_attempts=_getenv_int("MANTIS_RETRY_MAX_ATTEMPTS", defaults.retry_max_attempts),
+            retry_backoff_base_seconds=_getenv_float(
+                "MANTIS_RETRY_BACKOFF_BASE_SECONDS", defaults.retry_backoff_base_seconds
+            ),
+            retry_backoff_cap_seconds=_getenv_float(
+                "MANTIS_RETRY_BACKOFF_CAP_SECONDS", defaults.retry_backoff_cap_seconds
+            ),
+            tool_timeout_seconds=_getenv_float(
+                "MANTIS_TOOL_TIMEOUT_SECONDS", defaults.tool_timeout_seconds
+            ),
+            run_timeout_seconds=_getenv_float(
+                "MANTIS_RUN_TIMEOUT_SECONDS", defaults.run_timeout_seconds
+            ),
+            short_circuit_threshold=_getenv_int(
+                "MANTIS_SHORT_CIRCUIT_THRESHOLD", defaults.short_circuit_threshold
+            ),
         )

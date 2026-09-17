@@ -70,6 +70,25 @@ as the basis for a differently-named environment (e.g. `cp .env.example
 | `AWX_TOKEN`      | yes      | —       | AWX API token. Use a read-only service-account token where possible — see [docs/security.md](security.md). |
 | `AWX_VERIFY_SSL` | no       | `true`  | Whether to verify TLS certificates when talking to AWX. Accepts `true`/`false`/`1`/`0`/`yes`/`no`/`on`/`off` (case-insensitive). Only disable for local/dev testing against a self-signed endpoint. |
 
+## Reliability
+
+See [docs/reliability.md](reliability.md) for the full contract:
+timeouts, retries, the failure taxonomy, run/tool deadlines, and the
+run-local short circuit. All eight are `mantis.config.ReliabilityConfig`
+fields — one shared config object every integration (AWX today) and
+`AgentRuntime` reads from, not one set of knobs per integration.
+
+| Variable | Required | Default | Description |
+|---|---|---|---|
+| `MANTIS_HTTP_CONNECT_TIMEOUT_SECONDS` | no | `5.0` | HTTP connect timeout for every outbound integration request. |
+| `MANTIS_HTTP_READ_TIMEOUT_SECONDS` | no | `25.0` | HTTP read timeout for every outbound integration request. |
+| `MANTIS_RETRY_MAX_ATTEMPTS` | no | `3` | Retry/attempt budget: max transport attempts per logical integration read. |
+| `MANTIS_RETRY_BACKOFF_BASE_SECONDS` | no | `0.5` | Base for exponential-with-full-jitter backoff between retry attempts. |
+| `MANTIS_RETRY_BACKOFF_CAP_SECONDS` | no | `8.0` | Ceiling on any single backoff wait. |
+| `MANTIS_TOOL_TIMEOUT_SECONDS` | no | `45.0` | Per-tool-call wall-clock deadline — distinct from `tool_call_budget`; see [docs/reliability.md](reliability.md#retry-budget-vs-tool-call-budget). |
+| `MANTIS_RUN_TIMEOUT_SECONDS` | no | `300.0` | Overall `AgentRuntime.run()` wall-clock deadline. |
+| `MANTIS_SHORT_CIRCUIT_THRESHOLD` | no | `3` | Consecutive classified-transient failures against one integration, within one run, before that integration fails fast for the rest of the run. |
+
 ## Observability
 
 See [docs/observability.md](observability.md) for the full event schema

@@ -162,6 +162,17 @@ def _redact_text(text: str, secret_values: Sequence[str]) -> str:
     return text
 
 
+def redact_text(text: str) -> str:
+    """Public entry point for :func:`_redact_text`, for callers outside
+    this module that need to redact a bare string before it reaches a
+    log line or any other surface — e.g. ``AgentRuntime`` logging a tool
+    failure's diagnostic ``detail`` (an ``IntegrationError`` message can
+    legitimately contain something Bearer-shaped if it's built from a
+    raw HTTP error response). Looks up currently configured secret
+    values itself, same as :func:`make_model_safe` does internally."""
+    return _redact_text(text, _configured_secret_values())
+
+
 def _normalize(
     value: Any,
     *,

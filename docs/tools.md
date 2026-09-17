@@ -103,8 +103,11 @@ services, changes DNS, applies infrastructure changes, etc.
 
 1. If needed, add/extend an integration in `mantis/integrations/` that
    knows how to talk to the external system. Integrations should raise
-   integration-specific exceptions (see `AWXError`/`AWXStdoutError` for
-   the pattern of distinguishing different failure classes).
+   integration-specific exceptions subclassing
+   `mantis.reliability.IntegrationError` (see `AWXError`/`AWXStdoutError`
+   for the pattern of distinguishing different failure classes) and use
+   the shared timeout/retry contract rather than inventing one — see
+   [docs/reliability.md](reliability.md).
 2. Add a function in `mantis/tools/<system>.py` that calls the
    integration, applies any necessary preprocessing (see
    `mantis/tools/_text.py` for reusable helpers), and returns
@@ -170,12 +173,16 @@ every previously existing field (`id`, `failure_excerpt`, `stdout_tail`,
 Prometheus/Loki/network tools: add `meta`, type errors as `ToolError`,
 keep everything else tool-specific.
 
-Classifying *every* possible integration failure into a `ToolErrorKind`
-(auth vs. timeout vs. rate-limit vs. server error) is out of scope for
-the contract itself — that requires timeout/retry-aware integration code
-(tracked separately as reliability work). The contract only defines the
-shared vocabulary those classifications will eventually be expressed in;
-today, AWX only distinguishes `RETRIEVAL_ERROR`.
+Classifying *every* integration failure into the right `ToolErrorKind`
+(auth vs. timeout vs. rate-limit vs. server error) is handled by the
+shared reliability contract, not by this module or by each integration
+guessing independently — see [docs/reliability.md](reliability.md).
+`mantis.reliability.IntegrationError.to_tool_error_kind()` is the one
+place that maps the richer internal classification
+(`mantis.reliability.IntegrationErrorKind`) onto this stable
+`ToolErrorKind` contract, so AWX (and any future integration) reports a
+real, specific kind — a stdout timeout is `TIMEOUT`, a 500 from AWX
+itself is `UPSTREAM_ERROR` — never a single generic catch-all.
 
 `CONTRACT_VERSION` bumps on a breaking change to this shape (a field
 removed or renamed); adding a new optional field does not require a bump

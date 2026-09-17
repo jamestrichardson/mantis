@@ -15,6 +15,7 @@ from mantis.config import (
     AWXConfig,
     ConfigurationError,
     LiteLLMConfig,
+    ReliabilityConfig,
     Secret,
 )
 
@@ -159,3 +160,50 @@ def test_awx_config_repr_never_exposes_token(monkeypatch):
     assert "super-secret-awx-token" not in repr(cfg)
     assert "super-secret-awx-token" not in str(cfg)
     assert cfg.token.get_secret_value() == "super-secret-awx-token"
+
+
+# ---------------------------------------------------------------------------
+# ReliabilityConfig (#15) — docs/reliability.md documents these defaults
+# and env var names explicitly; this test is a regression guard against
+# either silently drifting from the other.
+# ---------------------------------------------------------------------------
+
+
+def test_reliability_config_documented_defaults():
+    cfg = ReliabilityConfig()
+    assert cfg.http_connect_timeout_seconds == 5.0
+    assert cfg.http_read_timeout_seconds == 25.0
+    assert cfg.retry_max_attempts == 3
+    assert cfg.retry_backoff_base_seconds == 0.5
+    assert cfg.retry_backoff_cap_seconds == 8.0
+    assert cfg.tool_timeout_seconds == 45.0
+    assert cfg.run_timeout_seconds == 300.0
+    assert cfg.short_circuit_threshold == 3
+
+
+@pytest.mark.parametrize(
+    "env_var,field,value",
+    [
+        ("MANTIS_HTTP_CONNECT_TIMEOUT_SECONDS", "http_connect_timeout_seconds", "1.5"),
+        ("MANTIS_HTTP_READ_TIMEOUT_SECONDS", "http_read_timeout_seconds", "10.0"),
+        ("MANTIS_RETRY_MAX_ATTEMPTS", "retry_max_attempts", "5"),
+        ("MANTIS_RETRY_BACKOFF_BASE_SECONDS", "retry_backoff_base_seconds", "1.0"),
+        ("MANTIS_RETRY_BACKOFF_CAP_SECONDS", "retry_backoff_cap_seconds", "20.0"),
+        ("MANTIS_TOOL_TIMEOUT_SECONDS", "tool_timeout_seconds", "90.0"),
+        ("MANTIS_RUN_TIMEOUT_SECONDS", "run_timeout_seconds", "600.0"),
+        ("MANTIS_SHORT_CIRCUIT_THRESHOLD", "short_circuit_threshold", "5"),
+    ],
+)
+def test_reliability_config_every_field_is_configurable_via_its_documented_env_var(
+    monkeypatch, env_var, field, value
+):
+    monkeypatch.setenv(env_var, value)
+    cfg = ReliabilityConfig.from_env()
+    actual = getattr(cfg, field)
+    assert actual == (float(value) if isinstance(actual, float) else int(value))
+
+
+def test_reliability_config_rejects_a_non_numeric_env_var(monkeypatch):
+    monkeypatch.setenv("MANTIS_RETRY_MAX_ATTEMPTS", "not-a-number")
+    with pytest.raises(ConfigurationError):
+        ReliabilityConfig.from_env()

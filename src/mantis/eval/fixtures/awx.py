@@ -80,11 +80,19 @@ class FixtureAWXClient:
         self._total_count = total_count if total_count is not None else len(jobs)
 
     def list_jobs(
-        self, *, status: str | None = None, order_by: str | None = None, page_size: int = 10
+        self,
+        *,
+        status: str | None = None,
+        order_by: str | None = None,
+        page_size: int = 10,
+        deadline: Any = None,
     ) -> JobListPage:
+        # deadline accepted (not used) purely to duck-type AWXClient's
+        # real signature (see mantis.reliability.Deadline) — fixture
+        # data has no real request to bound.
         return JobListPage(jobs=list(self._jobs[:page_size]), total_count=self._total_count)
 
-    def get_job_stdout(self, job_id: int) -> str:
+    def get_job_stdout(self, job_id: int, *, deadline: Any = None) -> str:
         value = self._stdout_by_job_id[job_id]
         if isinstance(value, Exception):
             raise value

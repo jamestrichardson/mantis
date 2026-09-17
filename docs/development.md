@@ -87,6 +87,7 @@ src/mantis/
 ├── registry.py                # ToolRegistry, Tool, default_registry
 ├── runtime.py                 # AgentRuntime: shared model/tool loop
 ├── security.py                # untrusted tool-output trust boundary — see docs/security.md
+├── reliability.py             # timeouts, retries, failure taxonomy, deadlines — see docs/reliability.md
 ├── cli.py                     # `mantis <agent-name> [prompt]` dispatcher
 ├── integrations/
 │   └── awx.py                 # AWXClient: raw AWX API access
@@ -127,7 +128,15 @@ Put raw API client code in `mantis/integrations/<system>.py`. It should:
   raw value is needed (building a header, constructing a client), never
   earlier.
 - Know how to authenticate and make requests, and raise a
-  system-specific exception (e.g. `AWXError`) on failure.
+  system-specific exception (e.g. `AWXError`) on failure — subclassing
+  `mantis.reliability.IntegrationError`, not a bare `RuntimeError`. Use
+  explicit `httpx.Timeout(connect=..., read=...)` from
+  `mantis.config.ReliabilityConfig`, wrap requests in
+  `mantis.reliability.retry_call()`, and classify failures with
+  `classify_http_status()`/`classify_httpx_exception()`. **Do not invent
+  your own timeout/retry/error-taxonomy logic** — see
+  [docs/reliability.md](reliability.md), which every integration adopts
+  the same way `mantis/integrations/awx.py` does.
 - Have zero knowledge of agents, prompts, or LLM schemas.
 - If a single logical operation can fail in distinguishable ways that
   matter downstream (like AWX stdout retrieval vs. the job's own
