@@ -138,16 +138,18 @@ Agent's toolset is expected to be:
 
 ```python
 ALLOWED_TOOLS = [
-    "awx_recent_failed_jobs",  # already implemented, reused as-is
-    "awx_get_job",             # new
-    "check_tcp_connectivity",  # new
-    "prometheus_query",        # new
-    "loki_query",              # new
+    "awx_recent_failed_jobs",     # already implemented, reused as-is
+    "awx_get_job_failure",        # already implemented, reused as-is
+    "check_tcp_connectivity",     # already implemented, reused as-is
+    "prometheus_query",           # already implemented, reused as-is
+    "prometheus_query_range",     # already implemented, reused as-is
+    "loki_query",                 # already implemented, reused as-is
 ]
 ```
 
-`awx_recent_failed_jobs` requires zero changes to support this — it is
-simply named in a second agent's `ALLOWED_TOOLS` list.
+Every one of these tools requires zero changes to support this — each
+is simply named in a second agent's `ALLOWED_TOOLS` list. See
+[docs/agents.md](agents.md) for the full envisioned agent list.
 
 ## Why AWX stdout and failure detection are handled the way they are
 

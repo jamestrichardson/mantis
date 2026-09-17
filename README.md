@@ -19,9 +19,9 @@ investigate real infrastructure, not a generic chatbot wrapper. Concretely:
   evidence-based summary, so a human's time goes to judgment calls, not
   log spelunking.
 - **Build a reusable operational toolset, not one-off scripts.** Every
-  tool (AWX today; Prometheus, Loki, Kubernetes, TCP checks planned) is
-  written once and shared across every agent that needs it — see
-  [Philosophy](#philosophy) below.
+  tool (AWX, TCP connectivity, Prometheus, and Loki today; Kubernetes
+  planned) is written once and shared across every agent that needs it —
+  see [Philosophy](#philosophy) below.
 - **Stay evidence-based and honest about uncertainty.** Agents are
   instructed to distinguish what a tool actually returned from what they
   are hypothesizing, and to say so explicitly when root cause is
@@ -184,9 +184,9 @@ as (for example) a proven firewall misconfiguration.
 
 ## Roadmap
 
-- **System Troubleshooting Agent** — reuses `awx_recent_failed_jobs` plus
-  new tools: TCP connectivity checks, host reachability, Prometheus/Loki
-  queries.
+- **System Troubleshooting Agent** — reuses `awx_recent_failed_jobs`,
+  `check_tcp_connectivity`, `prometheus_query`/`_range`, and `loki_query`
+  (all already implemented) in one broader-scope agent.
 - **Incident Triage Agent** — AWX + Prometheus + Loki + Kubernetes +
   git/change history, correlating across systems.
 - **Daily Operations Digest Agent** — scheduled summary across the same
@@ -204,6 +204,7 @@ as (for example) a proven firewall misconfiguration.
 - [docs/awx-job-failure.md](docs/awx-job-failure.md) — structured AWX job-event failure evidence: selection rules, bounding/pagination, provenance, stdout fallback
 - [docs/network-tcp-connectivity.md](docs/network-tcp-connectivity.md) — current-state TCP connectivity tool: status vocabulary, IPv4/IPv6 multi-address behavior, deadline handling, SSRF posture
 - [docs/prometheus.md](docs/prometheus.md) — time-series evidence tool: instant/range PromQL, result bounding/truncation, query errors vs. retrieval failures, `up` semantics
+- [docs/loki.md](docs/loki.md) — log evidence tool: bounded LogQL range queries, stream/line bounding, truncation semantics, why Loki is treated as the highest-risk untrusted-text source
 - [docs/agents.md](docs/agents.md) — what an agent is, how to add one
 - [docs/configuration.md](docs/configuration.md) — the `.env.*` convention and all environment variables
 - [docs/security.md](docs/security.md) — least privilege, credentials, future mutation gates

@@ -291,3 +291,19 @@ bounding, truncation correctness, deterministic ordering, query errors
 vs. retrieval failures, and `up` metric semantics). HTTP/auth/reliability
 mechanics live in `mantis/integrations/prometheus.py`; semantic
 shaping in `mantis/tools/prometheus.py`.
+
+## Loki tool behavior
+
+### `loki_query` (#10): log evidence, the highest-risk untrusted-text source
+
+`loki_query(query, start, end, direction=None)` is Mantis's first
+log-evidence tool — a bounded LogQL range query answering "what did a
+system actually log over this window?", distinct from #28's historical
+AWX evidence, #8's current-state TCP evidence, and #9's time-series
+Prometheus evidence. See [docs/loki.md](loki.md) for the full design
+(LogQL/time/direction validation, stream/line/total-output bounding,
+truncation correctness, deterministic ordering, nanosecond timestamp
+precision, query errors vs. retrieval failures, and why raw log text is
+treated as Mantis's highest-risk untrusted evidence source).
+HTTP/auth/reliability mechanics live in `mantis/integrations/loki.py`;
+semantic shaping in `mantis/tools/loki.py`.

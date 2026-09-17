@@ -88,12 +88,31 @@ An unauthenticated Prometheus endpoint works with none of the auth
 variables set. If both a bearer token and basic auth are configured,
 the bearer token takes priority.
 
+## Loki
+
+See [docs/loki.md](loki.md) for the full contract: bounded LogQL range
+queries, stream/line bounding, truncation semantics, and query errors
+vs. retrieval failures.
+
+| Variable | Required | Default | Description |
+|---|---|---|---|
+| `MANTIS_LOKI_URL` | yes | — | Base URL of your Loki server, no trailing slash required (stripped). |
+| `MANTIS_LOKI_BEARER_TOKEN` | no | — | Bearer token for `Authorization: Bearer <token>`. |
+| `MANTIS_LOKI_BASIC_AUTH_USERNAME` | no | — | HTTP Basic auth username. |
+| `MANTIS_LOKI_BASIC_AUTH_PASSWORD` | no | — | HTTP Basic auth password. |
+| `MANTIS_LOKI_TENANT_ID` | no | — | Sent as a static `X-Scope-OrgID` header on every request (Loki's multi-tenancy convention) — deployment configuration, never model-supplied. |
+| `MANTIS_LOKI_VERIFY_SSL` | no | `true` | Whether to verify TLS certificates when talking to Loki. Only disable for local/dev testing against a self-signed endpoint. |
+
+An unauthenticated Loki endpoint works with none of the auth variables
+set. If both a bearer token and basic auth are configured, the bearer
+token takes priority.
+
 ## Reliability
 
 See [docs/reliability.md](reliability.md) for the full contract:
 timeouts, retries, the failure taxonomy, run/tool deadlines, and the
 run-local short circuit. All eight are `mantis.config.ReliabilityConfig`
-fields — every HTTP integration (AWX and Prometheus today) and
+fields — every HTTP integration (AWX, Prometheus, and Loki today) and
 `AgentRuntime` use the same schema and environment-variable defaults, not one set of knobs per
 integration, even though each constructs its own
 `ReliabilityConfig.from_env()` instance rather than sharing one object.
