@@ -13,14 +13,30 @@ directly (see `src/mantis/observability/`), so a production agent run and
 an evaluation run share the exact same event schema, metric names, and
 metrics registry — evaluation is not a parallel implementation.
 
-## Production contract
+## Production contract — current state
 
-Mantis runs as a container on `degobah.cosprings.teknofile.net`:
+Mantis runs as a container on `degobah.cosprings.teknofile.net`, kept
+resident via `sleep infinity`; operators run commands into it with
+`docker compose exec mantis mantis ...` (see
+[docs/deployment.md](deployment.md)). That shapes what's actually true
+today for each surface:
 
-- Container stdout/stderr is collected by Grafana Alloy and shipped to
-  Loki.
-- Prometheus scrapes `degobah.cosprings.teknofile.net:9108`.
-- Grafana queries both for dashboards.
+- **Structured JSON logs are fully active in production.** Container
+  stdout/stderr is collected by Grafana Alloy and shipped to Loki
+  regardless of how short-lived a `mantis` invocation is — every
+  invocation emits its complete event sequence before exiting. Nothing
+  below in this section changes that.
+- **Prometheus metrics are *not* continuously scraped today.** The
+  metrics code is real, tested, and instrumented throughout the
+  runtime/eval path (see below) — but each `docker compose exec mantis
+  mantis ...` command is its own short-lived process with its own
+  in-memory `CollectorRegistry`, so there is no resident process
+  holding `:9108` open for Prometheus to scrape between invocations.
+  **Do not build a dashboard or alert that assumes `up{job="mantis"}`
+  stays `1`** — nothing currently keeps it that way. This is
+  intentional, not a bug: see [Current status of `/metrics`](#current-status-of-metrics)
+  below, and the follow-up issue tracking the actual fix (a persistent
+  service process).
 
 ## Structured JSON logs
 
@@ -93,10 +109,11 @@ Loki with a single `run_id` filter.
 ## Prometheus metrics
 
 `/metrics` is served by `mantis.observability.metrics.start_metrics_server()`,
-started by `mantis.cli.main()` when `MANTIS_METRICS_ENABLED` is set
-(the Dockerfile sets it `true` by default for container/service mode —
-see [docs/configuration.md](configuration.md) for
-`MANTIS_METRICS_PORT`/`MANTIS_METRICS_ADDR`, default `:9108`).
+started by `mantis.cli.main()` only when `MANTIS_METRICS_ENABLED` is
+explicitly set — **not** on by default, in the Docker image or anywhere
+else (see [Current status of `/metrics`](#current-status-of-metrics)
+for why). See [docs/configuration.md](configuration.md) for
+`MANTIS_METRICS_PORT`/`MANTIS_METRICS_ADDR`, default `:9108`.
 
 All metrics share one `CollectorRegistry`
 (`mantis.observability.metrics.REGISTRY`) — production agent runs and
@@ -155,13 +172,41 @@ sum by (scenario, model_alias) (rate(mantis_eval_runs_total{result="pass"}[1h]))
 sum by (tool, error_kind) (rate(mantis_tool_errors_total[5m]))
 ```
 
-## A known limitation, honestly
+## Current status of `/metrics`
 
-Mantis today runs as a one-shot CLI process per invocation (`mantis
-<agent> "prompt"` runs once and exits) — the metrics server is real and
-correctly implemented, but a scrape only has a meaningful window while
-that one process is alive. It becomes fully useful once Mantis runs as a
-long-lived service (tracked separately — repeatable
-deployment/service packaging). Structured logging doesn't have this
-limitation: every invocation, however short, emits its full event
-sequence to stdout/stderr for the collector to ship regardless.
+Mantis today runs as a short-lived CLI process per invocation — `mantis
+<agent> "prompt"` (or `docker compose exec mantis mantis ...` on
+degobah) runs once and exits. The metrics instrumentation and endpoint
+are real, correctly implemented, and unit/integration-tested (including
+a real HTTP scrape of a live-started server), but three consequences
+follow directly from the one-shot process model, not from a code defect:
+
+- A scrape only has a meaningful window while that one process happens
+  to be alive — for a `mantis --help` or a single agent invocation,
+  that's a few seconds at most.
+- Each invocation gets its own fresh, in-memory `CollectorRegistry` —
+  metrics recorded by one invocation are gone the moment it exits, never
+  accumulated across invocations.
+- Two invocations running concurrently would each try to bind `:9108`,
+  and only one would succeed.
+
+That's why `MANTIS_METRICS_ENABLED` is opt-in rather than on by default
+in the Docker image: turning it on unconditionally would silently create
+port contention and a metrics endpoint that's "up" for a few seconds per
+command and otherwise absent, which is worse than clearly absent.
+
+**This becomes fully solved, not worked around, once Mantis has a
+persistent service process** — that process would own the shared
+registry and hold `:9108` open continuously, exactly like the structured
+logs already work regardless of process lifetime. That's tracked as its
+own follow-up, [#66](https://github.com/jamestrichardson/mantis/issues/66)
+("Serve Prometheus metrics from a persistent Mantis service process"),
+linked from #39 and #21 — deliberately **not** solved here by
+multiprocess Prometheus mode, a Pushgateway, or a sidecar metrics
+daemon; those are alternatives worth considering only if Mantis
+intentionally stays a multi-process CLI execution model, which hasn't
+been decided.
+
+In the meantime, `MANTIS_METRICS_ENABLED=true` still works for local or
+manual testing of the endpoint itself — see
+[docs/configuration.md](configuration.md).

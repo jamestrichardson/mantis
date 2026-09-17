@@ -106,7 +106,14 @@ When Mantis gains a long-running service command, set `MANTIS_CONTAINER_COMMAND`
 
 ## Health/readiness
 
-Today the Compose health check verifies process liveness. When the Mantis service endpoint from #39 is available, configure:
+Today the Compose health check verifies process liveness. The `/metrics`
+endpoint itself exists (#39) but isn't continuously served in this
+CLI-exec deployment model — see
+[docs/observability.md](observability.md#current-status-of-metrics) —
+so it isn't wired up as the readiness probe yet either. Once
+[#66](https://github.com/jamestrichardson/mantis/issues/66) gives
+Mantis a persistent service process holding `/metrics` open
+continuously, configure:
 
 ```text
 MANTIS_HEALTH_URL=http://127.0.0.1:9108/metrics
