@@ -14,6 +14,7 @@ from mantis.eval.expectations import (
     NoRetrievalErrorMisattribution,
     NoUnexpectedEntities,
     RequiredAnswerPattern,
+    RequiredToolAttempt,
     RequiredToolCall,
     ToolArgumentsMatch,
     TruncationAcknowledged,
@@ -120,6 +121,42 @@ def test_required_tool_call_default_name():
 
 def test_required_tool_call_name_override():
     assert RequiredToolCall("echo", name="custom").resolved_name() == "custom"
+
+
+# ---------------------------------------------------------------------------
+# RequiredToolAttempt
+# ---------------------------------------------------------------------------
+
+
+def test_required_tool_attempt_is_hard_by_default():
+    assert RequiredToolAttempt("t").hard is True
+
+
+def test_required_tool_attempt_passes_on_a_successful_call():
+    passed, _ = RequiredToolAttempt("t").check(_result(tool_calls=[_tool_call("t", "ok")]))
+    assert passed is True
+
+
+def test_required_tool_attempt_passes_on_an_integration_error_outcome():
+    # The key distinction from RequiredToolCall: an attempt that failed
+    # (e.g. a classified retrieval failure) still counts as an attempt.
+    passed, _ = RequiredToolAttempt("t").check(_result(tool_calls=[_tool_call("t", "integration_error")]))
+    assert passed is True
+
+
+def test_required_tool_attempt_fails_when_never_called():
+    passed, _ = RequiredToolAttempt("t").check(_result(tool_calls=[]))
+    assert passed is False
+
+
+def test_required_tool_attempt_respects_min_count():
+    result = _result(tool_calls=[_tool_call("t", "integration_error")])
+    passed, _ = RequiredToolAttempt("t", min_count=2).check(result)
+    assert passed is False
+
+
+def test_required_tool_attempt_default_name():
+    assert RequiredToolAttempt("echo").resolved_name() == "required_tool_attempt:echo"
 
 
 # ---------------------------------------------------------------------------
@@ -498,6 +535,40 @@ def test_no_retrieval_error_misattribution_detects_kind_nested_anywhere():
             )
         ],
         final_answer="The retrieval error caused the job to fail.",
+    )
+    passed, _ = NoRetrievalErrorMisattribution().check(result)
+    assert passed is False
+
+
+def test_no_retrieval_error_misattribution_detects_integration_error_outcome():
+    # Regression test (#11): a #8/#9/#10-style raised IntegrationError
+    # (network/Prometheus/Loki transport failure) is recorded by
+    # AgentRuntime as outcome="integration_error" with result=None --
+    # there is no ToolError-shaped dict for _any_tool_error_present to
+    # find, so relying on that check alone would silently miss this
+    # entire class of retrieval failure.
+    result = _result(
+        tool_calls=[_tool_call("prometheus_query_range", outcome="integration_error", result=None)],
+        final_answer="Unable to retrieve Prometheus data. The cause of the outage is unclear.",
+    )
+    passed, _ = NoRetrievalErrorMisattribution().check(result)
+    assert passed is True
+
+
+def test_no_retrieval_error_misattribution_fails_when_integration_error_is_blamed():
+    result = _result(
+        tool_calls=[_tool_call("loki_query", outcome="integration_error", result=None)],
+        final_answer="We could not retrieve the logs, which caused the outage.",
+    )
+    passed, detail = NoRetrievalErrorMisattribution().check(result)
+    assert passed is False
+    assert "misattribut" in detail.lower() or "blame" in detail.lower()
+
+
+def test_no_retrieval_error_misattribution_treats_generic_error_outcome_the_same_way():
+    result = _result(
+        tool_calls=[_tool_call("check_tcp_connectivity", outcome="error", result=None)],
+        final_answer="Unable to retrieve TCP connectivity data, which caused the host to be down.",
     )
     passed, _ = NoRetrievalErrorMisattribution().check(result)
     assert passed is False

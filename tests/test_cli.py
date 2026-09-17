@@ -69,3 +69,17 @@ def test_main_always_configures_logging_regardless_of_metrics_setting(
 def test_getenv_bool_defaults_to_false_when_unset(monkeypatch):
     monkeypatch.delenv("MANTIS_METRICS_ENABLED", raising=False)
     assert cli_module._getenv_bool("MANTIS_METRICS_ENABLED", False) is False
+
+
+def test_system_troubleshooter_is_registered_as_an_agent():
+    # Regression test (#11): "mantis system-troubleshooter ..." must
+    # dispatch to the real agent module, following the exact same
+    # existing-CLI-pattern convention as "mantis awx-troubleshooter ...".
+    assert cli_module.AGENTS["system-troubleshooter"] == "mantis.agents.system_troubleshooter"
+
+
+def test_system_troubleshooter_module_resolves_and_exposes_main(monkeypatch):
+    import importlib
+
+    module = importlib.import_module(cli_module.AGENTS["system-troubleshooter"])
+    assert hasattr(module, "main")

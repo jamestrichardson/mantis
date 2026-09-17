@@ -15,3 +15,4 @@ from mantis.eval.fixtures import awx as _awx  # noqa: F401  (registers scenarios
 from mantis.eval.fixtures import loki as _loki  # noqa: F401  (registers scenarios)
 from mantis.eval.fixtures import network as _network  # noqa: F401  (registers scenarios)
 from mantis.eval.fixtures import prometheus as _prometheus  # noqa: F401  (registers scenarios)
+from mantis.eval.fixtures import system_troubleshooter as _system_troubleshooter  # noqa: F401  (registers scenarios)

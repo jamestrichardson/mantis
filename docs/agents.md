@@ -138,28 +138,47 @@ directly in the agent module.
 Run it with `mantis awx-troubleshooter` or
 `python -m mantis.agents.awx_troubleshooter`.
 
+## System Troubleshooter example
+
+`mantis/agents/system_troubleshooter.py` (#11) is Mantis's first real
+multi-source investigation agent — see
+[docs/system-troubleshooter.md](system-troubleshooter.md) for the full
+design and a worked `ferros-c01` example:
+
+- **Goal**: investigate a system-level troubleshooting question by
+  correlating historical AWX evidence, current-state TCP evidence,
+  time-series Prometheus evidence, and Loki log evidence in one
+  investigation.
+- **Tools**: `["awx_recent_failed_jobs", "awx_get_job_failure",
+  "check_tcp_connectivity", "prometheus_query", "prometheus_query_range",
+  "loki_query"]` — all six already implemented (#28/#8/#9/#10), all
+  read-only. No integration or tool logic lives in this agent module.
+- **Prompt discipline**: does not hard-code a fixed investigation
+  sequence; distinguishes historical/current-state/time-series/log
+  evidence explicitly; never treats a failed or unavailable tool call as
+  evidence about the target system; separates facts from hypotheses;
+  ties confidence to evidence strength; preserves disagreement between
+  sources rather than forcing one narrative; discourages repeated
+  identical calls; requires acknowledgment of `meta.truncated` results.
+- **Runtime tuning**: `tool_call_budget=8` and `max_iterations=12` —
+  both far higher than the AWX Troubleshooter's `1`/default 8, since
+  this agent is expected to chain multiple distinct evidence sources
+  (potentially all six tools plus a follow-up query or two) in one
+  investigation rather than answer from a single tool's data. See
+  [docs/system-troubleshooter.md](system-troubleshooter.md#budgets) for
+  the full rationale.
+
+Run it with `mantis system-troubleshooter` or
+`python -m mantis.agents.system_troubleshooter`.
+
 ## Envisioned future agents
 
 These reuse the same runtime and largely the same tools — see
 [docs/architecture.md](architecture.md) for why this composition is
 cheap:
 
-- **System Troubleshooting Agent** — `awx_recent_failed_jobs` +
-  `awx_get_job_failure` (already implemented, see
-  [docs/awx-job-failure.md](awx-job-failure.md)) + `check_tcp_connectivity`
-  (already implemented, #8, see
-  [docs/network-tcp-connectivity.md](network-tcp-connectivity.md)) +
-  `prometheus_query`/`prometheus_query_range` (already implemented, #9,
-  see [docs/prometheus.md](prometheus.md)) + `loki_query` (already
-  implemented, #10, see [docs/loki.md](loki.md)), with a higher
-  `tool_call_budget` than the AWX Troubleshooter's `1` to actually chain
-  a list-then-deep-dive investigation correlating historical AWX
-  evidence, monitored time-series state, current network state, and log
-  evidence. Broader operational diagnosis than AWX alone. See
-  `mantis.eval.fixtures.loki`'s `incident-correlation-all-signals`
-  scenario for a worked example combining all four sources.
-- **Incident Triage Agent** — adds Kubernetes and git/change-history
-  tools to correlate a live incident against recent changes.
+- **Incident Triage Agent** — adds Kubernetes (#18) and git/change-history
+  (#17) tools to correlate a live incident against recent changes.
 - **Daily Operations Digest Agent** — a scheduled, read-only agent that
   summarizes the prior day's AWX activity, alerts, and log anomalies
   using the same shared tools with a digest-oriented prompt.
