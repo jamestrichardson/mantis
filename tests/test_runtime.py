@@ -16,7 +16,7 @@ import pytest
 from mantis.config import LiteLLMConfig, ReliabilityConfig, Secret
 from mantis.observability import metrics
 from mantis.registry import Tool, ToolRegistry
-from mantis.reliability import IntegrationError, IntegrationErrorKind
+from mantis.reliability import DeadlineExceededError, IntegrationError, IntegrationErrorKind
 from mantis.runtime import AgentRuntime, MaxIterationsExceededError, RunDeadlineExceededError
 
 
@@ -855,30 +855,30 @@ def test_run_deadline_exceeded_is_recorded_as_a_distinct_run_metric_outcome():
     assert after == before + 1
 
 
-def test_tool_budget_exhaustion_skips_the_handler_and_continues_the_run():
-    calls = {"n": 0}
-
-    def counting_tool(**kw):
-        calls["n"] += 1
-        return {"ok": True}
+def test_handler_raised_deadline_exceeded_is_reported_as_budget_exceeded_without_crashing_the_run():
+    # ReliabilityConfig now validates tool_timeout_seconds > 0 (see
+    # mantis.config.ReliabilityConfig.__post_init__), so the dispatch-level
+    # pre-check that used to construct a zero-budget scenario is gone —
+    # that branch was unreachable dead code once the invalid config it
+    # existed to guard against could no longer be constructed. The
+    # reachable path for a "tool_deadline_exceeded" classification is a
+    # handler that itself discovers, via the injected _deadline, that its
+    # remaining budget is already gone (exactly what AWXClient's
+    # retry_call does internally) and raises DeadlineExceededError.
+    def handler(*, _deadline=None, **kw):
+        raise DeadlineExceededError("no budget left for a retry attempt", scope="tool")
 
     registry = ToolRegistry()
-    registry.register(_echo_tool(handler=counting_tool))
+    registry.register(_echo_tool(handler=handler))
     responses = [
         _tool_call_response(_tool_call("call_1", "echo", {})),
         _final_message_response("done"),
     ]
-    runtime = _build_runtime(
-        responses,
-        tools=["echo"],
-        registry=registry,
-        reliability=ReliabilityConfig(tool_timeout_seconds=0.0),
-    )
+    runtime = _build_runtime(responses, tools=["echo"], registry=registry)
 
     result = runtime.run("do the thing")
 
     assert result == "done"  # a budget failure doesn't crash the run
-    assert calls["n"] == 0  # handler never invoked
     assert runtime.call_log[-1].outcome == "budget_exceeded"
 
 
@@ -1019,6 +1019,76 @@ def test_not_found_failures_never_open_the_short_circuit():
     assert calls["n"] == 3  # every call reached the handler; never short-circuited
     outcomes = [entry.outcome for entry in runtime.call_log]
     assert outcomes == ["integration_error", "integration_error", "integration_error"]
+
+
+def test_degraded_failure_reported_via_reliability_report_still_opens_the_breaker():
+    # Regression test (PR #72 review): a tool handler that swallows a
+    # per-item integration failure into partial evidence instead of
+    # raising (see mantis.tools.awx._summarize_job) never triggers the
+    # `except IntegrationError` branch, so without an explicit report the
+    # breaker would stay blind to it — and the call's own unconditional
+    # success would then reset the breaker to zero anyway. A handler that
+    # declares _reliability_report can report the failure itself so the
+    # breaker still opens after enough of them, exactly as it would for a
+    # handler that raised outright.
+    def degrading_tool(*, _reliability_report=None, **kw):
+        if _reliability_report is not None:
+            _reliability_report(IntegrationErrorKind.SERVER_ERROR)
+        return {"partial": True}  # the call itself never raises
+
+    registry = ToolRegistry()
+    registry.register(_echo_tool(handler=degrading_tool))
+    responses = [
+        _tool_call_response(_tool_call("call_1", "echo", {"n": 1})),
+        _tool_call_response(_tool_call("call_2", "echo", {"n": 2})),
+        _tool_call_response(_tool_call("call_3", "echo", {"n": 3})),
+        _final_message_response("done"),
+    ]
+    runtime = _build_runtime(
+        responses,
+        tools=["echo"],
+        registry=registry,
+        reliability=ReliabilityConfig(short_circuit_threshold=2),
+    )
+
+    result = runtime.run("do the thing")
+
+    assert result == "done"
+    outcomes = [entry.outcome for entry in runtime.call_log]
+    # Every call "succeeds" (the handler never raises) but the breaker
+    # still saw two reported degraded failures and opened — the third
+    # call must short-circuit instead of reaching the handler again.
+    assert outcomes == ["ok", "ok", "short_circuited"]
+
+
+def test_reliability_report_failure_is_not_wiped_by_the_same_calls_own_success():
+    # The narrower version of the above: even a single call that both
+    # reports a degraded failure AND returns successfully must not call
+    # breaker.record_success() and erase the failure it just recorded —
+    # that would make the report a no-op in practice.
+    def degrading_once_then_healthy(*, _reliability_report=None, **kw):
+        if _reliability_report is not None:
+            _reliability_report(IntegrationErrorKind.SERVER_ERROR)
+        return {"partial": True}
+
+    registry = ToolRegistry()
+    registry.register(_echo_tool(handler=degrading_once_then_healthy))
+    responses = [
+        _tool_call_response(_tool_call("call_1", "echo", {"n": 1})),
+        _tool_call_response(_tool_call("call_2", "echo", {"n": 2})),
+        _final_message_response("done"),
+    ]
+    runtime = _build_runtime(
+        responses,
+        tools=["echo"],
+        registry=registry,
+        reliability=ReliabilityConfig(short_circuit_threshold=1),
+    )
+
+    runtime.run("do the thing")
+
+    outcomes = [entry.outcome for entry in runtime.call_log]
+    assert outcomes == ["ok", "short_circuited"]
 
 
 def test_integration_error_result_goes_through_the_14_safety_pipeline():

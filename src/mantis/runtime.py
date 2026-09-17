@@ -75,7 +75,13 @@ from mantis.contracts import ToolError
 from mantis.observability import metrics
 from mantis.observability.logging import bound_for_log, log_event, new_run_id
 from mantis.registry import Tool, ToolRegistry, default_registry
-from mantis.reliability import Deadline, DeadlineExceededError, IntegrationError, RunLocalBreaker
+from mantis.reliability import (
+    Deadline,
+    DeadlineExceededError,
+    IntegrationError,
+    IntegrationErrorKind,
+    RunLocalBreaker,
+)
 from mantis.security import UNTRUSTED_TOOL_OUTPUT_POLICY, make_model_safe, redact_text
 
 logger = logging.getLogger(__name__)
@@ -547,7 +553,13 @@ class AgentRuntime:
         :class:`~mantis.reliability.IntegrationError` from the handler is
         turned into a well-formed tool-facing result instead of the
         generic catch-all below, which remains as the last-resort safety
-        net for a genuinely unexpected bug.
+        net for a genuinely unexpected bug. A handler that instead
+        degrades a per-item integration failure into partial evidence
+        (never raising) can still report it into the breaker via an
+        injected ``_reliability_report`` callback, using the same
+        keyword-only/underscore convention — see
+        ``mantis.tools.awx.awx_recent_failed_jobs`` for the pattern, and
+        this method's ``degraded_within_call`` handling of it.
         """
         tool_name = tool_call.function.name
         raw_arguments = tool_call.function.arguments or "{}"
@@ -698,33 +710,41 @@ class AgentRuntime:
         # remains of the run budget — a tool call late in a long run
         # never gets a full fresh tool_timeout_seconds when the run
         # itself is nearly out of time. See docs/reliability.md.
+        #
+        # Always strictly positive here: reliability.tool_timeout_seconds
+        # is validated to be > 0 at ReliabilityConfig construction (see
+        # mantis.config.ReliabilityConfig.__post_init__), and
+        # run_deadline.remaining() is strictly positive too — a zero (or
+        # negative) remaining budget was already handled above by the
+        # run_deadline.expired() check, which returns before reaching
+        # here. There is deliberately no further "insufficient tool
+        # budget" branch below: it would be unreachable dead code.
         tool_budget_seconds = min(self.reliability.tool_timeout_seconds, run_deadline.remaining())
-
-        if tool_budget_seconds <= 0:
-            # Never start a handler with zero time budget — even one
-            # that doesn't declare _deadline and so can't check for
-            # itself. Distinct classification from the run_deadline
-            # check above: this is the per-tool-call budget specifically
-            # (ReliabilityConfig.tool_timeout_seconds), not the run's.
-            detail = (
-                f"tool_timeout_seconds={self.reliability.tool_timeout_seconds} left no "
-                f"remaining budget; not starting '{tool_name}'."
-            )
-            logger.warning("[%s] %s", self.name, redact_text(detail))
-            self.call_log.append(
-                ToolCallLogEntry(iteration, tool_name, arguments, "budget_exceeded", detail)
-            )
-            emit("budget_exceeded", arguments=arguments, error_kind="tool_deadline_exceeded")
-            safe_result = make_model_safe(
-                {"error": detail}, contains_untrusted_text=tool.contains_untrusted_text
-            )
-            return json.dumps(safe_result, default=str), False
-
         tool_deadline = Deadline.after(tool_budget_seconds, clock=self.clock)
 
+        # A tool handler that degrades a per-item integration failure into
+        # partial evidence (e.g. one AWX job's stdout retrieval, see
+        # mantis.tools.awx._summarize_job) never raises IntegrationError,
+        # so the except-branch below never sees it and the breaker would
+        # otherwise stay blind to it — then get reset to zero anyway by
+        # the unconditional record_success below once the handler returns
+        # "successfully". _reliability_report is the handler's escape
+        # hatch to still report that failure into this run's breaker
+        # state; degraded_within_call tracks whether that happened so the
+        # success path (below) knows not to wipe it back out.
+        degraded_within_call = False
+
+        def _reliability_report(kind: IntegrationErrorKind) -> None:
+            nonlocal degraded_within_call
+            degraded_within_call = True
+            breaker.record_failure(tool.category, kind)
+
         handler_kwargs = dict(arguments)
-        if "_deadline" in inspect.signature(tool.handler).parameters:
+        handler_params = inspect.signature(tool.handler).parameters
+        if "_deadline" in handler_params:
             handler_kwargs["_deadline"] = tool_deadline
+        if "_reliability_report" in handler_params:
+            handler_kwargs["_reliability_report"] = _reliability_report
 
         handler_start = time.perf_counter()
         try:
@@ -804,7 +824,14 @@ class AgentRuntime:
             return json.dumps({"error": detail}), False
 
         handler_duration = time.perf_counter() - handler_start
-        breaker.record_success(tool.category)
+        # Only reset the breaker on a call that had no degraded-partial
+        # failures reported via _reliability_report — a tool call that
+        # swallowed one or more per-item integration failures into
+        # partial evidence already recorded those against the breaker
+        # above, and an unconditional reset here would silently wipe
+        # that out on every single logical success, defeating the guard.
+        if not degraded_within_call:
+            breaker.record_success(tool.category)
         # The cache and call_log keep the tool's raw result — internal
         # diagnostics/eval-log fidelity — but the value actually
         # serialized into the model-facing tool message must go through

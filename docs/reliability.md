@@ -78,6 +78,16 @@ All eight are `mantis.config.ReliabilityConfig` fields, loaded once via
 `AWXClient` and `AgentRuntime` (and any future integration), so there's
 one place to tune reliability behavior, not one per integration.
 
+`ReliabilityConfig` validates ranges at construction (`__post_init__`),
+not just types — a value that parses fine but is nonsensical (a zero or
+negative timeout, `retry_max_attempts=0`, a `retry_backoff_cap_seconds`
+below `retry_backoff_base_seconds`, ...) raises `ConfigurationError`
+immediately rather than surfacing later as a confusing internal failure
+(e.g. `retry_max_attempts=0` used to skip `retry_call()`'s loop entirely
+with no attempt ever made). This applies to every construction path,
+including a test or caller building one directly, not only
+`.from_env()`.
+
 ### Rationale
 
 - **Connect (5s) shorter than read (25s):** a healthy service should
@@ -182,6 +192,15 @@ remaining tool-call budget declares a keyword-only `_deadline` parameter
 see `mantis.tools.awx.awx_recent_failed_jobs`); `AgentRuntime` passes the
 computed `Deadline` automatically to any handler that declares it.
 
+`AWXClient` threads that `Deadline` one step further: the effective
+per-request connect/read timeout it configures on `httpx.Client` is
+capped at whatever remains of the deadline (`min(configured_timeout,
+deadline.remaining())`), recomputed on every retry attempt. A request
+starting with only 2s of tool budget left is never still configured with
+the full 25s default read timeout — this narrows (though, per the
+guarantee below, can never fully close) the gap between the advertised
+budget and one blocking call's actual worst-case duration.
+
 ### What this does and does not guarantee
 
 Be precise about this, because it's easy to overstate: **Python cannot
@@ -226,6 +245,31 @@ exist) or `bad_request` (a malformed query) never indicates the
 integration itself is unavailable, so neither ever trips it, no matter
 how many times it happens in a run. A success resets the count for that
 `source_system` to zero.
+
+### Partial-success tools and the breaker
+
+A tool handler is not required to raise `IntegrationError` on every
+failure. `awx_recent_failed_jobs`, for instance, deliberately swallows a
+single job's stdout-retrieval failure into that job's own
+`stdout_retrieval_error` rather than failing the whole call — losing one
+job's evidence shouldn't discard the other jobs' evidence too. Left
+alone, this would make the breaker structurally blind to a degrading
+integration: the swallowed failure never reaches the `except
+IntegrationError` branch in `_dispatch_tool_call`, and the call's own
+unconditional "it returned, so it succeeded" would then reset the
+breaker's count to zero on top of that — meaning a run could make many
+retried, failing stdout requests against an unhealthy AWX across several
+jobs and several tool calls while the breaker never once opens.
+
+A handler that degrades failures this way declares a keyword-only
+`_reliability_report` parameter (same leading-underscore,
+never-model-settable convention as `_client`/`_deadline`); `AgentRuntime`
+passes a callback bound to the current call's tool category and calls
+into `RunLocalBreaker.record_failure()` on the handler's behalf. Calling
+it also marks the call as having had a degraded failure, so the
+success path at the end of `_dispatch_tool_call` skips
+`record_success()` for that call instead of wiping the just-recorded
+failure back out. See `mantis.tools.awx._summarize_job` for the pattern.
 
 ## Tool-facing result behavior
 
@@ -289,11 +333,17 @@ hostname, job ID, or raw exception message in a label.
    `exc.to_tool_error_kind()`, or let it propagate where the whole
    result can't be produced without it (see `awx_recent_failed_jobs`'s
    `list_jobs` call) — `AgentRuntime` handles the propagating case
-   generically via the shared `IntegrationError` base class.
+   generically via the shared `IntegrationError` base class. **If you
+   take the degrade-gracefully path, also accept a keyword-only
+   `_reliability_report: Callable[[IntegrationErrorKind], None] | None =
+   None` parameter and call it with the exception's `kind`** — otherwise
+   the run-local breaker never learns about that failure (see "Run-local
+   short circuit" above).
 4. If you want your retries to respect the caller's remaining tool-call
    budget, add a keyword-only `_deadline: Deadline | None = None`
    parameter to your tool function and thread it into your client calls.
 5. You do not need to implement your own retry loop, timeout
    configuration, error taxonomy, run deadline, or short-circuit logic —
    all of it is inherited automatically once you're raising
-   `IntegrationError` subclasses and (optionally) accepting `_deadline`.
+   `IntegrationError` subclasses and (optionally) accepting `_deadline`
+   / `_reliability_report`.

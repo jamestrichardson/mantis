@@ -137,10 +137,13 @@ class AWXClient:
 
     Every request uses explicit connect/read timeouts
     (``reliability.http_connect_timeout_seconds`` /
-    ``.http_read_timeout_seconds`` — never httpx's implicit default) and
-    goes through :func:`~mantis.reliability.retry_call` with
-    ``reliability``'s retry policy — safe here because every method this
-    client exposes is a read. See ``docs/reliability.md``.
+    ``.http_read_timeout_seconds`` — never httpx's implicit default),
+    further capped at whatever remains of a caller-supplied
+    :class:`~mantis.reliability.Deadline` when one is given (see
+    :meth:`_client`), and goes through
+    :func:`~mantis.reliability.retry_call` with ``reliability``'s retry
+    policy — safe here because every method this client exposes is a
+    read. See ``docs/reliability.md``.
     """
 
     config: AWXConfig
@@ -158,7 +161,22 @@ class AWXClient:
             backoff_cap_seconds=self.reliability.retry_backoff_cap_seconds,
         )
 
-    def _client(self, accept: str) -> httpx.Client:
+    def _client(self, accept: str, *, deadline: Deadline | None = None) -> httpx.Client:
+        # The configured connect/read timeouts are a ceiling, not a
+        # promise — when a Deadline is supplied, the *effective* timeout
+        # is additionally capped at whatever remains of it, so a request
+        # started with, say, 2s of tool budget left is never configured
+        # with the full 25s default read timeout. This narrows (but, per
+        # docs/reliability.md's "What this does and does not guarantee",
+        # can never fully close) the gap between the advertised tool/run
+        # budget and one in-flight synchronous request's actual worst-case
+        # duration.
+        connect = self.reliability.http_connect_timeout_seconds
+        read = self.reliability.http_read_timeout_seconds
+        if deadline is not None:
+            remaining = deadline.remaining()
+            connect = min(connect, remaining)
+            read = min(read, remaining)
         return httpx.Client(
             base_url=self.config.url,
             headers={
@@ -166,12 +184,7 @@ class AWXClient:
                 "Accept": accept,
             },
             verify=self.config.verify_ssl,
-            timeout=httpx.Timeout(
-                connect=self.reliability.http_connect_timeout_seconds,
-                read=self.reliability.http_read_timeout_seconds,
-                write=self.reliability.http_read_timeout_seconds,
-                pool=self.reliability.http_connect_timeout_seconds,
-            ),
+            timeout=httpx.Timeout(connect=connect, read=read, write=read, pool=connect),
         )
 
     def _get(
@@ -193,7 +206,7 @@ class AWXClient:
 
         def attempt() -> httpx.Response:
             try:
-                with self._client(accept=accept) as client:
+                with self._client(accept=accept, deadline=deadline) as client:
                     response = client.get(path, params=params)
                     response.raise_for_status()
                     return response

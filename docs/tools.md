@@ -114,7 +114,12 @@ services, changes DNS, applies infrastructure changes, etc.
    JSON-serializable data. Attach a `meta` key built from
    `mantis.contracts.QueryMeta` — see "Result contracts" below — and
    represent any tool-level retrieval failure as a
-   `mantis.contracts.ToolError` instead of a bare string.
+   `mantis.contracts.ToolError` instead of a bare string. If a failure is
+   swallowed into partial evidence rather than raised (see
+   `mantis.tools.awx._summarize_job`'s per-job stdout handling), also
+   accept a `_reliability_report` callback and call it with the failure's
+   classification — otherwise the run-local short circuit never learns
+   about it. See [docs/reliability.md](reliability.md#run-local-short-circuit).
 3. Write the OpenAI-compatible schema next to it, with a clear
    `description` — this is the model's *only* information about when and
    how to call the tool.

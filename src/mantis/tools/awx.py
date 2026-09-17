@@ -16,13 +16,13 @@ where it was.
 from __future__ import annotations
 
 import logging
-from typing import Any
+from typing import Any, Callable
 
 from mantis.config import AWXConfig
 from mantis.contracts import QueryMeta, ToolError
 from mantis.integrations.awx import AWXClient, AWXError, AWXStdoutError
 from mantis.registry import Tool, default_registry
-from mantis.reliability import Deadline
+from mantis.reliability import Deadline, IntegrationErrorKind
 from mantis.tools._text import extract_excerpt, tail
 
 logger = logging.getLogger(__name__)
@@ -78,7 +78,11 @@ def _summary_name(job: dict[str, Any], key: str) -> Any:
 
 
 def _summarize_job(
-    client: AWXClient, job: dict[str, Any], *, deadline: Deadline | None
+    client: AWXClient,
+    job: dict[str, Any],
+    *,
+    deadline: Deadline | None,
+    reliability_report: Callable[[IntegrationErrorKind], None] | None,
 ) -> dict[str, Any]:
     result: dict[str, Any] = {field: job.get(field) for field in _JOB_FIELDS}
     result["inventory"] = _summary_name(job, "inventory")
@@ -96,7 +100,18 @@ def _summarize_job(
         # assigned (mantis.reliability) — never hardcoded — so, e.g., a
         # timeout is reported as ToolErrorKind.TIMEOUT, not a generic
         # retrieval_error indistinguishable from a connection failure.
+        #
+        # This is swallowed here, not raised — awx_recent_failed_jobs
+        # still returns a successful result with the other jobs' evidence
+        # intact. But an AgentRuntime tool call that "succeeds" resets its
+        # run-local breaker (mantis.reliability.RunLocalBreaker), so a
+        # degraded-but-swallowed failure like this one must still be
+        # reported into that breaker explicitly, or a run could make many
+        # failing stdout requests against an unhealthy AWX while the
+        # breaker stays blind to it (see docs/reliability.md).
         logger.warning("Could not retrieve stdout for AWX job %s: %s", job_id, exc)
+        if reliability_report is not None:
+            reliability_report(exc.kind)
         result["stdout_retrieval_error"] = ToolError(
             kind=exc.to_tool_error_kind(), message=str(exc)
         ).to_dict()
@@ -111,7 +126,11 @@ def _summarize_job(
 
 
 def awx_recent_failed_jobs(
-    limit: int = 5, *, _client: AWXClient | None = None, _deadline: Deadline | None = None
+    limit: int = 5,
+    *,
+    _client: AWXClient | None = None,
+    _deadline: Deadline | None = None,
+    _reliability_report: Callable[[IntegrationErrorKind], None] | None = None,
 ) -> dict[str, Any]:
     """Fetch the most recently finished failed AWX jobs, with preprocessed
     stdout evidence for each.
@@ -134,6 +153,17 @@ def awx_recent_failed_jobs(
             (the default for direct/manual calls) means no deadline is
             enforced beyond each individual request's own connect/read
             timeout.
+        _reliability_report: Callback into the run-local breaker
+            (``mantis.reliability.RunLocalBreaker``), set by
+            ``AgentRuntime``. Same keyword-only/underscore convention as
+            ``_client``/``_deadline``. Called once per job whose stdout
+            retrieval fails, so a stdout failure that's swallowed into
+            that job's own ``stdout_retrieval_error`` (rather than
+            raised — see "Raises" below) still counts toward the breaker
+            instead of being invisible to it, since a logically
+            successful call like this one would otherwise reset it. See
+            ``docs/reliability.md``. ``None`` (the default for
+            direct/manual calls) means no reporting happens.
 
     Raises:
         mantis.integrations.awx.AWXError: if the job list itself
@@ -183,7 +213,12 @@ def awx_recent_failed_jobs(
             retry_after=exc.retry_after,
         ) from exc
 
-    summarized = [_summarize_job(client, job, deadline=_deadline) for job in page.jobs]
+    summarized = [
+        _summarize_job(
+            client, job, deadline=_deadline, reliability_report=_reliability_report
+        )
+        for job in page.jobs
+    ]
     meta = QueryMeta(
         source_system="awx",
         truncated=page.total_count > len(summarized),

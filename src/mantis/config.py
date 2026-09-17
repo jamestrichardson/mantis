@@ -91,6 +91,21 @@ def _getenv_int(name: str, default: int) -> int:
         raise ConfigurationError(f"{name} must be an integer, got {raw!r}") from exc
 
 
+def _check_positive(name: str, value: float) -> None:
+    if not value > 0:
+        raise ConfigurationError(f"{name} must be > 0, got {value!r}")
+
+
+def _check_non_negative(name: str, value: float) -> None:
+    if value < 0:
+        raise ConfigurationError(f"{name} must be >= 0, got {value!r}")
+
+
+def _check_at_least(name: str, value: int, minimum: int) -> None:
+    if value < minimum:
+        raise ConfigurationError(f"{name} must be >= {minimum}, got {value!r}")
+
+
 def _require(name: str) -> str:
     value = os.environ.get(name)
     if not value:
@@ -194,6 +209,29 @@ class ReliabilityConfig:
     tool_timeout_seconds: float = 45.0
     run_timeout_seconds: float = 300.0
     short_circuit_threshold: int = 3
+
+    def __post_init__(self) -> None:
+        # Range validation, not just type validation — a value that
+        # parses fine (0, -5, ...) but is nonsensical must still fail
+        # loudly at startup/construction rather than surface later as an
+        # internal assertion failure deep in mantis.reliability.retry_call
+        # (e.g. retry_max_attempts=0 skips its loop entirely with no
+        # error ever raised). Applies to direct construction too, not
+        # only .from_env(), since __post_init__ runs either way.
+        _check_positive("http_connect_timeout_seconds", self.http_connect_timeout_seconds)
+        _check_positive("http_read_timeout_seconds", self.http_read_timeout_seconds)
+        _check_at_least("retry_max_attempts", self.retry_max_attempts, 1)
+        _check_non_negative("retry_backoff_base_seconds", self.retry_backoff_base_seconds)
+        _check_non_negative("retry_backoff_cap_seconds", self.retry_backoff_cap_seconds)
+        if self.retry_backoff_cap_seconds < self.retry_backoff_base_seconds:
+            raise ConfigurationError(
+                "retry_backoff_cap_seconds must be >= retry_backoff_base_seconds "
+                f"(got cap={self.retry_backoff_cap_seconds!r}, "
+                f"base={self.retry_backoff_base_seconds!r})"
+            )
+        _check_positive("tool_timeout_seconds", self.tool_timeout_seconds)
+        _check_positive("run_timeout_seconds", self.run_timeout_seconds)
+        _check_at_least("short_circuit_threshold", self.short_circuit_threshold, 1)
 
     @classmethod
     def from_env(cls) -> "ReliabilityConfig":

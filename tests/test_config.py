@@ -207,3 +207,61 @@ def test_reliability_config_rejects_a_non_numeric_env_var(monkeypatch):
     monkeypatch.setenv("MANTIS_RETRY_MAX_ATTEMPTS", "not-a-number")
     with pytest.raises(ConfigurationError):
         ReliabilityConfig.from_env()
+
+
+# ---------------------------------------------------------------------------
+# ReliabilityConfig range validation — a value can parse fine (0, -5, ...)
+# but still be nonsensical. Type-checking alone let these through; without
+# range validation, e.g. retry_max_attempts=0 doesn't fail at startup, it
+# fails later as an internal AssertionError deep in
+# mantis.reliability.retry_call. See PR #72 review discussion.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "field,value",
+    [
+        ("http_connect_timeout_seconds", 0.0),
+        ("http_connect_timeout_seconds", -5.0),
+        ("http_read_timeout_seconds", 0.0),
+        ("http_read_timeout_seconds", -1.0),
+        ("retry_max_attempts", 0),
+        ("retry_max_attempts", -1),
+        ("retry_backoff_base_seconds", -1.0),
+        ("retry_backoff_cap_seconds", -1.0),
+        ("tool_timeout_seconds", 0.0),
+        ("tool_timeout_seconds", -5.0),
+        ("run_timeout_seconds", 0.0),
+        ("run_timeout_seconds", -5.0),
+        ("short_circuit_threshold", 0),
+        ("short_circuit_threshold", -1),
+    ],
+)
+def test_reliability_config_rejects_invalid_field_values(field, value):
+    with pytest.raises(ConfigurationError, match=field):
+        ReliabilityConfig(**{field: value})
+
+
+def test_reliability_config_rejects_backoff_cap_below_base():
+    with pytest.raises(ConfigurationError, match="retry_backoff_cap_seconds"):
+        ReliabilityConfig(retry_backoff_base_seconds=5.0, retry_backoff_cap_seconds=1.0)
+
+
+def test_reliability_config_allows_backoff_cap_equal_to_base():
+    cfg = ReliabilityConfig(retry_backoff_base_seconds=2.0, retry_backoff_cap_seconds=2.0)
+    assert cfg.retry_backoff_cap_seconds == 2.0
+
+
+@pytest.mark.parametrize(
+    "env_var,value",
+    [
+        ("MANTIS_RETRY_MAX_ATTEMPTS", "0"),
+        ("MANTIS_SHORT_CIRCUIT_THRESHOLD", "0"),
+        ("MANTIS_HTTP_CONNECT_TIMEOUT_SECONDS", "-5"),
+        ("MANTIS_RETRY_BACKOFF_BASE_SECONDS", "-1"),
+    ],
+)
+def test_reliability_config_from_env_rejects_invalid_values(monkeypatch, env_var, value):
+    monkeypatch.setenv(env_var, value)
+    with pytest.raises(ConfigurationError):
+        ReliabilityConfig.from_env()

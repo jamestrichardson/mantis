@@ -384,6 +384,48 @@ def test_awx_recent_failed_jobs_separates_stdout_error_from_job_failure():
 
 
 @respx.mock
+def test_awx_recent_failed_jobs_reports_swallowed_stdout_failures_via_reliability_report():
+    # Regression test (PR #72 review): a per-job stdout failure never
+    # raises out of awx_recent_failed_jobs — it degrades into that job's
+    # own stdout_retrieval_error so the other jobs' evidence still comes
+    # back. But AgentRuntime's run-local breaker (RunLocalBreaker) resets
+    # on every "successful" tool call, so a swallowed failure like this
+    # one must still be reported into the breaker via _reliability_report,
+    # or an unhealthy AWX could be hit repeatedly across many jobs/calls
+    # without the breaker ever noticing. See docs/reliability.md.
+    jobs_payload = {
+        "results": [
+            {"id": 301, "name": "job-a", "status": "failed", "failed": True},
+            {"id": 302, "name": "job-b", "status": "failed", "failed": True},
+        ]
+    }
+    respx.get("https://awx.example.test/api/v2/jobs/").mock(
+        return_value=httpx.Response(200, json=jobs_payload)
+    )
+    respx.get(
+        "https://awx.example.test/api/v2/jobs/301/stdout/", params={"format": "txt"}
+    ).mock(return_value=httpx.Response(500, text="server error"))
+    respx.get(
+        "https://awx.example.test/api/v2/jobs/302/stdout/", params={"format": "txt"}
+    ).mock(return_value=httpx.Response(200, text="ok stdout"))
+
+    client = AWXClient(
+        config=AWXConfig(url="https://awx.example.test", token=Secret("tok"), verify_ssl=True),
+        sleep=lambda *_: None,
+    )
+    reported: list[IntegrationErrorKind] = []
+    result = awx_recent_failed_jobs(
+        limit=2, _client=client, _reliability_report=reported.append
+    )
+
+    # Only the job whose stdout retrieval actually failed is reported —
+    # once, matching the single AWXStdoutError it swallowed.
+    assert reported == [IntegrationErrorKind.SERVER_ERROR]
+    assert result["jobs"][0]["stdout_retrieval_error"] is not None
+    assert result["jobs"][1]["stdout_retrieval_error"] is None
+
+
+@respx.mock
 def test_awx_recent_failed_jobs_contract_adoption_keeps_every_prior_field():
     # Regression test for issue #23's acceptance criterion: adopting the
     # shared result contract must not drop any AWX-specific field that
@@ -457,7 +499,7 @@ def test_awx_recent_failed_jobs_tool_is_registered_as_containing_untrusted_text(
 # Reliability (#15): explicit timeouts, classification, retry behavior
 # ---------------------------------------------------------------------------
 
-from mantis.reliability import IntegrationErrorKind  # noqa: E402
+from mantis.reliability import Deadline, IntegrationErrorKind  # noqa: E402
 
 
 def test_awx_client_uses_explicit_connect_and_read_timeouts(awx_client: AWXClient):
@@ -469,6 +511,46 @@ def test_awx_client_uses_explicit_connect_and_read_timeouts(awx_client: AWXClien
     assert timeout.read == awx_client.reliability.http_read_timeout_seconds
     assert timeout.connect is not None
     assert timeout.read is not None
+
+
+def test_awx_client_caps_effective_timeout_at_the_remaining_deadline(awx_client: AWXClient):
+    # Regression test (PR #72 review): the configured connect/read
+    # timeouts are a ceiling, not a promise. With only 2s left of tool
+    # budget, a request must not still be configured with the full
+    # (much larger) default read timeout — that would leave the
+    # advertised per-tool-call budget far looser than what's documented.
+    deadline = Deadline.after(2.0)
+
+    with awx_client._client(accept="application/json", deadline=deadline) as client:
+        timeout = client.timeout
+
+    assert timeout.connect <= 2.0
+    assert timeout.read <= 2.0
+    assert timeout.connect < awx_client.reliability.http_connect_timeout_seconds
+    assert timeout.read < awx_client.reliability.http_read_timeout_seconds
+
+
+def test_awx_client_does_not_shrink_timeout_below_configured_value_when_deadline_is_generous(
+    awx_client: AWXClient,
+):
+    # The cap only ever narrows the effective timeout — a deadline with
+    # more time remaining than the configured timeout must not stretch
+    # it beyond what was actually configured.
+    deadline = Deadline.after(10_000.0)
+
+    with awx_client._client(accept="application/json", deadline=deadline) as client:
+        timeout = client.timeout
+
+    assert timeout.connect == awx_client.reliability.http_connect_timeout_seconds
+    assert timeout.read == awx_client.reliability.http_read_timeout_seconds
+
+
+def test_awx_client_uses_full_configured_timeout_when_no_deadline_given(awx_client: AWXClient):
+    with awx_client._client(accept="application/json", deadline=None) as client:
+        timeout = client.timeout
+
+    assert timeout.connect == awx_client.reliability.http_connect_timeout_seconds
+    assert timeout.read == awx_client.reliability.http_read_timeout_seconds
 
 
 def test_reliability_config_defaults_are_conservative_but_bounded():
