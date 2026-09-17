@@ -462,6 +462,15 @@ build a huge intermediate Python list straight from unbounded response
 data before `MAX_WARNINGS_RETURNED`/`MAX_WARNING_CHARS` ever get a
 chance to apply.
 
+That doesn't mean the malformed value disappears without a trace,
+though: `LokiAPIResponse.warnings_malformed` records that this happened
+(distinct from `"warnings"` being absent entirely, the normal case for a
+Loki version that doesn't report warnings at all), and
+`mantis.tools.loki._shape_result` folds it into `meta.truncated` — some
+response content genuinely was discarded, so completeness can't be
+claimed, the same standard applied to every other kind of dropped or
+shortened evidence in this module.
+
 ## Security (#14): Loki is the highest-risk untrusted-text source
 
 Every returned log message, label, warning, and API error string is

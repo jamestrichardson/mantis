@@ -586,8 +586,17 @@ def _shape_result(response: LokiAPIResponse, *, query_section: dict[str, Any]) -
     ``"vector"`` response (out of scope, see #10's non-goals) or an
     unrecognized value is reported as ``query_error.type ==
     "malformed_result"``, never silently treated as empty evidence.
+
+    A malformed (present but non-list) ``"warnings"`` field on the raw
+    response -- see :attr:`LokiAPIResponse.warnings_malformed` -- also
+    forces ``meta.truncated=true`` here, even though ``response.warnings``
+    itself is empty in that case: some response content was discarded
+    by the integration layer rather than parsed, so completeness cannot
+    be claimed, the same reasoning applied to every other kind of
+    discarded/shortened evidence in this module.
     """
     warnings, warnings_truncated = _bound_warnings(response.warnings)
+    warnings_truncated = warnings_truncated or response.warnings_malformed
 
     if response.status == "error":
         error_message, message_truncated = _bounded_str_with_flag(response.error or "", MAX_WARNING_CHARS)

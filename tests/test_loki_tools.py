@@ -908,6 +908,49 @@ def test_warning_count_is_bounded_on_a_query_error_response(loki_client):
     assert result["meta"]["truncated"] is True
 
 
+@respx.mock
+def test_malformed_warnings_marks_meta_truncated_at_the_tool_layer(loki_client):
+    # Regression test (PR #80 review): a malformed (present but
+    # non-list) "warnings" field means some response content was
+    # discarded by the integration layer -- that must be reflected in
+    # meta.truncated even though the resulting warnings list itself is
+    # empty and the streams data is otherwise complete.
+    payload = _success("streams", [_stream({"job": "sshd"}, [(0, "hi")])])
+    payload["warnings"] = "not-a-list"
+    respx.get("https://loki.example.test/loki/api/v1/query_range").mock(
+        return_value=httpx.Response(200, json=payload)
+    )
+
+    result = loki_query('{job="sshd"}', 0, 3600, _client=loki_client)
+
+    assert result["warnings"] == []
+    assert result["meta"]["truncated"] is True
+
+
+@respx.mock
+def test_malformed_warnings_marks_meta_truncated_on_a_query_error_response(loki_client):
+    payload = {"status": "error", "error": "bad query", "warnings": {"not": "a list"}}
+    respx.get("https://loki.example.test/loki/api/v1/query_range").mock(
+        return_value=httpx.Response(400, json=payload)
+    )
+
+    result = loki_query("{job=", 0, 3600, _client=loki_client)
+
+    assert result["warnings"] == []
+    assert result["meta"]["truncated"] is True
+
+
+@respx.mock
+def test_absent_warnings_field_does_not_mark_truncated(loki_client):
+    respx.get("https://loki.example.test/loki/api/v1/query_range").mock(
+        return_value=httpx.Response(200, json=_success("streams", [_stream({"job": "sshd"}, [(0, "hi")])]))
+    )
+
+    result = loki_query('{job="sshd"}', 0, 3600, _client=loki_client)
+
+    assert result["meta"]["truncated"] is False
+
+
 # ---------------------------------------------------------------------------
 # Direction / query section
 # ---------------------------------------------------------------------------

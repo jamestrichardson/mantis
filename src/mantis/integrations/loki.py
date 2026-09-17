@@ -115,7 +115,16 @@ class LokiAPIResponse:
     does not include a separate machine-readable error-type field).
     ``warnings`` is always a plain list of strings (possibly empty),
     present on either outcome, mirroring Prometheus's convention for
-    the Loki versions that report LogQL warnings.
+    the Loki versions that report LogQL warnings. ``warnings_malformed``
+    is ``True`` when the envelope *had* a ``"warnings"`` field but it
+    wasn't a list (e.g. a bare string or an object) -- distinct from the
+    field being absent entirely, which is a normal, common case for a
+    Loki version/deployment that doesn't report warnings at all. A
+    malformed (but present) ``"warnings"`` value means some response
+    content was discarded rather than parsed, so
+    ``mantis.tools.loki._shape_result`` folds this into
+    ``meta.truncated`` rather than silently treating the query as fully
+    complete.
     """
 
     status: str
@@ -123,6 +132,7 @@ class LokiAPIResponse:
     result: Any
     error: str | None
     warnings: list[str] = field(default_factory=list)
+    warnings_malformed: bool = False
 
 
 def _parse_retry_after(response: httpx.Response) -> float | None:
@@ -167,14 +177,18 @@ def _parse_envelope(response: httpx.Response, *, action: str) -> LokiAPIResponse
 
     status = payload.get("status")
     # A malformed "warnings" field (e.g. a bare string instead of a
-    # list) is ignored conservatively rather than iterated -- iterating
-    # a string yields one list entry per character, which would build a
-    # potentially enormous intermediate list from arbitrary response
-    # data before mantis.tools.loki's warning-count/length bounds ever
-    # get a chance to apply. Warnings are supplementary context, not
-    # core evidence, so silently dropping a malformed set of them (as
-    # opposed to raising) is the right level of severity here.
+    # list) is never iterated -- iterating a string yields one list
+    # entry per character, which would build a potentially enormous
+    # intermediate list from arbitrary response data before
+    # mantis.tools.loki's warning-count/length bounds ever get a chance
+    # to apply. It's still recorded as "malformed" (as opposed to simply
+    # "absent", the normal case for a Loki version that doesn't report
+    # warnings at all) so mantis.tools.loki can fold that into
+    # meta.truncated -- discarding response content silently, without
+    # ever reflecting it in completeness, would violate #10's truncation
+    # contract just as much as dropping a log line would.
     raw_warnings = payload.get("warnings")
+    warnings_malformed = raw_warnings is not None and not isinstance(raw_warnings, list)
     warnings = [str(w) for w in raw_warnings] if isinstance(raw_warnings, list) else []
 
     if status == "success":
@@ -194,6 +208,7 @@ def _parse_envelope(response: httpx.Response, *, action: str) -> LokiAPIResponse
             result=data.get("result"),
             error=None,
             warnings=warnings,
+            warnings_malformed=warnings_malformed,
         )
     if status == "error":
         error = payload.get("error")
@@ -208,6 +223,7 @@ def _parse_envelope(response: httpx.Response, *, action: str) -> LokiAPIResponse
             result=None,
             error=error,
             warnings=warnings,
+            warnings_malformed=warnings_malformed,
         )
 
     raise LokiError(

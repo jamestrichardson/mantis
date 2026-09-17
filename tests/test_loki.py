@@ -94,7 +94,10 @@ def test_malformed_warnings_field_is_ignored_not_iterated_char_by_char(loki_clie
     # (instead of a list) must not be iterated -- that would silently
     # explode into one list entry per character, building a potentially
     # enormous intermediate list straight from an unbounded response
-    # field before any semantic-layer bound applies.
+    # field before any semantic-layer bound applies. The malformed shape
+    # is still recorded via warnings_malformed (see
+    # test_malformed_warnings_marks_meta_truncated_at_the_tool_layer in
+    # tests/test_loki_tools.py) rather than disappearing without a trace.
     payload = _success("streams", [])
     payload["warnings"] = "x" * 100_000
     respx.get("https://loki.example.test/loki/api/v1/query_range").mock(
@@ -106,6 +109,7 @@ def test_malformed_warnings_field_is_ignored_not_iterated_char_by_char(loki_clie
     )
 
     assert response.warnings == []
+    assert response.warnings_malformed is True
 
 
 @respx.mock
@@ -120,6 +124,24 @@ def test_malformed_warnings_field_on_error_response_is_also_ignored(loki_client)
     )
 
     assert response.warnings == []
+    assert response.warnings_malformed is True
+
+
+@respx.mock
+def test_absent_warnings_field_is_not_malformed(loki_client):
+    # A missing "warnings" key entirely is the normal case for a Loki
+    # version/deployment that doesn't report warnings at all -- distinct
+    # from a present-but-wrong-shaped value.
+    respx.get("https://loki.example.test/loki/api/v1/query_range").mock(
+        return_value=httpx.Response(200, json=_success("streams", []))
+    )
+
+    response = loki_client.query_range(
+        '{job="sshd"}', start_ns="0", end_ns="60000000000", direction="backward", limit=100
+    )
+
+    assert response.warnings == []
+    assert response.warnings_malformed is False
 
 
 # ---------------------------------------------------------------------------
