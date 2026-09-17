@@ -175,14 +175,21 @@ def _normalize(
         return "<circular reference>"
     if isinstance(value, dict):
         seen = _seen | {id(value)}
-        return {
-            k: (
-                "***"
-                if isinstance(k, str) and is_sensitive_key(k)
-                else _normalize(v, secret_values=secret_values, _seen=seen, _depth=_depth + 1)
-            )
-            for k, v in value.items()
-        }
+        # Keys are coerced to str unconditionally, not just checked with
+        # isinstance for the sensitive-key test: a dict key doesn't have
+        # to be a string (int/tuple/etc. are all valid Python dict keys),
+        # and json.dumps(..., default=str) only ever rescues an
+        # unserializable *value* — an unserializable *key* still raises.
+        # Stringifying every key here is what makes the eventual
+        # json.dumps() call in make_model_safe() actually unconditional.
+        result: dict[str, Any] = {}
+        for k, v in value.items():
+            key = k if isinstance(k, str) else str(k)
+            if is_sensitive_key(key):
+                result[key] = "***"  # never recurse into a redacted value
+            else:
+                result[key] = _normalize(v, secret_values=secret_values, _seen=seen, _depth=_depth + 1)
+        return result
     if isinstance(value, list):
         seen = _seen | {id(value)}
         return [
@@ -223,12 +230,18 @@ def make_model_safe(
       ``max_chars``, it's replaced with an explicit, clearly-labeled
       truncation record (``truncated``, ``original_size_chars``,
       ``returned_size_chars``, ``excerpt``) instead of a silently
-      cut-off structure — see :data:`MODEL_TOOL_RESULT_MAX_CHARS`.
+      cut-off structure — see :data:`MODEL_TOOL_RESULT_MAX_CHARS`. The
+      *entire* returned record, wrapper included, is what's measured
+      against ``max_chars`` — the excerpt itself is sized to leave room
+      for the wrapper's own fields, so the ceiling is a true ceiling on
+      what reaches the model, not just on the excerpt.
 
+    Guarantees the return value is JSON-serializable — never raises on
+    cyclic/deeply-nested/non-serializable input (degrades gracefully
+    instead, all the way down to a guaranteed-safe fallback record if
+    even that fails) — and never logs a secret value while redacting it.
     Never removes text merely because it looks like a prompt or
-    instruction, never raises on cyclic/deeply-nested/non-serializable
-    input (degrades gracefully instead), and never logs a secret value
-    while redacting it.
+    instruction.
     """
     secret_values = _configured_secret_values()
     normalized = _normalize(value, secret_values=secret_values)
@@ -246,19 +259,54 @@ def make_model_safe(
     try:
         serialized = json.dumps(normalized, default=str)
     except (TypeError, ValueError):
-        # _normalize's cycle-guard should prevent this, but a safety
-        # pipeline must never itself crash a run over a serialization
-        # edge case it didn't anticipate.
-        serialized = repr(normalized)
+        # _normalize guarantees string keys and JSON-native/redacted-str
+        # leaf values, so this should be unreachable in practice — but
+        # the safety pipeline must guarantee its return value is
+        # actually serializable, not just attempt it, since the caller
+        # (AgentRuntime) serializes it again unconditionally. Falling
+        # back to `normalized` here (the pre-#14-review-fix behavior)
+        # could hand the caller right back the same unserializable
+        # object; this fallback record is always serializable.
+        normalized = {
+            _UNTRUSTED_EVIDENCE_KEY: contains_untrusted_text,
+            "error": "tool result was not JSON-serializable",
+            "repr": repr(value),
+        }
+        serialized = json.dumps(normalized, default=str)
 
     if len(serialized) <= max_chars:
         return normalized
 
-    excerpt = serialized[:max_chars]
-    return {
-        "truncated": True,
-        "original_size_chars": len(serialized),
-        "returned_size_chars": len(excerpt),
-        "excerpt": excerpt,
-        _UNTRUSTED_EVIDENCE_KEY: contains_untrusted_text,
-    }
+    return _truncate(serialized, contains_untrusted_text=contains_untrusted_text, max_chars=max_chars)
+
+
+def _truncate(serialized: str, *, contains_untrusted_text: bool, max_chars: int) -> dict[str, Any]:
+    """Build the truncation wrapper such that its own serialized size —
+    not just the excerpt inside it — stays within ``max_chars``.
+
+    Measures the wrapper's overhead with an empty excerpt to size the
+    excerpt budget, then verifies (and, in the rare case JSON-escaping
+    inside the excerpt inflates it further, shrinks) the final result
+    against the real ceiling — so the ceiling holds regardless of what
+    characters happen to be inside the excerpt.
+    """
+    original_size = len(serialized)
+
+    def build(excerpt: str) -> dict[str, Any]:
+        return {
+            "truncated": True,
+            "original_size_chars": original_size,
+            "returned_size_chars": len(excerpt),
+            "excerpt": excerpt,
+            _UNTRUSTED_EVIDENCE_KEY: contains_untrusted_text,
+        }
+
+    overhead = len(json.dumps(build(""), default=str))
+    excerpt = serialized[: max(0, max_chars - overhead)]
+    result = build(excerpt)
+
+    while excerpt and len(json.dumps(result, default=str)) > max_chars:
+        excerpt = excerpt[:-16]
+        result = build(excerpt)
+
+    return result

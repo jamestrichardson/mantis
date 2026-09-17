@@ -83,7 +83,12 @@ not just a fresh execution. It:
   exceeds this ceiling after redaction, it's replaced with an explicit
   `{"truncated": true, "original_size_chars": ..., "returned_size_chars":
   ..., "excerpt": ...}` record — truncation is always visible, never
-  silent.
+  silent. The ceiling applies to that entire record, wrapper fields
+  included, not just the excerpt inside it — the excerpt is sized to
+  leave room for the rest of the wrapper (and re-checked after JSON
+  escaping, in case the excerpt itself contains characters that expand
+  when encoded), so `max_chars` is a true ceiling on what reaches the
+  model.
 - **Marks** the result as untrusted evidence (an additive
   `"untrusted_evidence": true` key) when the tool that produced it has
   `Tool.contains_untrusted_text=True` — the default for every tool
@@ -91,7 +96,12 @@ not just a fresh execution. It:
 - **Fails safely** on cyclic or pathologically deep structures (a
   circular reference becomes `"<circular reference>"`, excess nesting
   becomes `"<max nesting depth exceeded>"`) rather than recursing
-  indefinitely or crashing the run.
+  indefinitely or crashing the run. Non-string dict keys (unusual, but
+  legal in Python) are coerced to strings so the result is always
+  actually JSON-serializable, not just usually — `make_model_safe()`'s
+  return value is guaranteed serializable even in the case where the
+  input itself wasn't, all the way down to a guaranteed-safe fallback
+  record if redaction/normalization somehow still couldn't produce one.
 
 ### Why prompt-like text is preserved as evidence
 

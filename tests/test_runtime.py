@@ -711,6 +711,13 @@ def test_oversized_tool_result_is_truncated_in_the_model_message():
     sent = _tool_message_sent_after(runtime, call_index=0)
     assert sent["truncated"] is True
     assert sent["original_size_chars"] > sent["returned_size_chars"]
+    # The ceiling applies to the actual tool-message content sent to the
+    # model — wrapper metadata included, not just the excerpt inside it.
+    second_call_messages = runtime._client.chat.completions.calls[1]["messages"]
+    tool_message_content = next(m for m in second_call_messages if m["role"] == "tool")["content"]
+    from mantis.security import MODEL_TOOL_RESULT_MAX_CHARS
+
+    assert len(tool_message_content) <= MODEL_TOOL_RESULT_MAX_CHARS
 
 
 def test_cyclic_tool_result_does_not_crash_the_run():

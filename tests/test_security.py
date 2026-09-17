@@ -196,6 +196,78 @@ def test_truncation_respects_a_custom_max_chars():
     assert safe["returned_size_chars"] <= 200
 
 
+def test_truncated_result_including_wrapper_metadata_stays_within_max_chars():
+    # Regression test: the ceiling must hold for the *entire* returned
+    # record (wrapper fields + excerpt), not just the excerpt slice —
+    # an earlier version sliced the excerpt to exactly max_chars and
+    # then added wrapper keys on top, silently exceeding the advertised
+    # ceiling.
+    huge = {"stdout_tail": "x" * (MODEL_TOOL_RESULT_MAX_CHARS * 3)}
+
+    safe = make_model_safe(huge)
+
+    assert safe["truncated"] is True
+    assert len(json.dumps(safe)) <= MODEL_TOOL_RESULT_MAX_CHARS
+
+
+@pytest.mark.parametrize("max_chars", [64_000, 5_000, 500, 200])
+def test_truncated_result_stays_within_max_chars_at_several_ceilings(max_chars):
+    huge = {"stdout_tail": "x" * (max_chars * 5)}
+
+    safe = make_model_safe(huge, max_chars=max_chars)
+
+    assert len(json.dumps(safe)) <= max_chars
+
+
+def test_truncation_excerpt_survives_heavy_json_escaping_without_exceeding_the_ceiling():
+    # Characters that expand when JSON-escaped (quotes, backslashes) must
+    # not push the final serialized size over max_chars even though the
+    # excerpt was sliced by raw character count, not encoded length.
+    huge = {"stdout_tail": '\\"' * (MODEL_TOOL_RESULT_MAX_CHARS * 2)}
+
+    safe = make_model_safe(huge)
+
+    assert safe["truncated"] is True
+    assert len(json.dumps(safe)) <= MODEL_TOOL_RESULT_MAX_CHARS
+
+
+# ---------------------------------------------------------------------------
+# Non-string / unusual dict keys never crash the pipeline
+# ---------------------------------------------------------------------------
+
+
+def test_non_string_dict_key_is_coerced_and_still_serializable():
+    safe = make_model_safe({1: "one", ("tuple", "key"): "value", "normal": "field"})
+
+    serialized = json.dumps(safe)  # must not raise
+    assert '"1": "one"' in serialized
+    assert safe["normal"] == "field"
+
+
+def test_non_string_credential_shaped_key_is_still_redacted():
+    # A tool returning e.g. {b"token": ...} (unusual, but not impossible
+    # from a poorly-behaved handler) must still be caught once the key
+    # is stringified, not bypass redaction by virtue of not being a str.
+    class TokenKey:
+        def __str__(self) -> str:
+            return "token"
+
+    safe = make_model_safe({TokenKey(): "sk-should-not-appear"})
+    assert safe["token"] == "***"
+
+
+def test_result_actually_returned_by_make_model_safe_is_always_json_serializable():
+    # The caller (AgentRuntime) always does json.dumps(safe_result,
+    # default=str) unconditionally — make_model_safe's return value must
+    # never be able to fail that call, even in a contrived worst case.
+    weird_key_and_cycle: dict = {("a", "b"): {}}
+    weird_key_and_cycle[("a", "b")]["self"] = weird_key_and_cycle
+
+    safe = make_model_safe(weird_key_and_cycle)
+
+    json.dumps(safe, default=str)  # must not raise
+
+
 # ---------------------------------------------------------------------------
 # Cyclic / unusual structures never crash or recurse indefinitely
 # ---------------------------------------------------------------------------
