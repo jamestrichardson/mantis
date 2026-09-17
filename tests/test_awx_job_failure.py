@@ -184,6 +184,25 @@ def test_truncation_metadata_correct_when_returned_failures_are_capped(awx_clien
     assert result["event_inspection"]["inspection_capped"] is False
 
 
+@respx.mock
+def test_truncation_is_false_when_relevant_failure_count_exactly_matches_the_cap(awx_client):
+    # Regression test: exactly MAX_RETURNED_FAILURE_EVENTS relevant
+    # failures and nothing more must not be reported as truncated --
+    # nothing was actually omitted.
+    exact = [
+        _unreachable_event(id=i, counter=i) for i in range(MAX_RETURNED_FAILURE_EVENTS)
+    ]
+    _mock_job()
+    _mock_events(events=exact)
+    _mock_stdout()
+
+    result = awx_get_job_failure(42, _client=awx_client)
+
+    assert len(result["structured_failures"]) == MAX_RETURNED_FAILURE_EVENTS
+    assert result["meta"]["truncated"] is False
+    assert result["event_inspection"]["inspection_capped"] is False
+
+
 # ---------------------------------------------------------------------------
 # Fallback / partial-success semantics (issue item 9)
 # ---------------------------------------------------------------------------

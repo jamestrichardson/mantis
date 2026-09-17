@@ -114,16 +114,23 @@ directly in the agent module.
 
 - **Goal**: investigate recent failed AWX jobs and produce an
   evidence-based summary.
-- **Tools**: `["awx_recent_failed_jobs"]` — deliberately just one, and
-  read-only.
+- **Tools**: `["awx_recent_failed_jobs", "awx_get_job_failure"]` — both
+  read-only. `awx_recent_failed_jobs` lists recent failures;
+  `awx_get_job_failure` (#28) fetches structured, deterministically
+  selected job-event evidence for one already-known job id — see
+  [docs/awx-job-failure.md](awx-job-failure.md). The system prompt tells
+  the model which one actually answers a given request.
 - **Prompt discipline**: never invent details; treat
-  `stdout_retrieval_error` as separate from AWX's own reported failure;
-  prefer `failure_excerpt` over `stdout_tail` for root-cause evidence;
-  only call something a "recurring pattern" with at least two
-  corroborating jobs; state explicitly when fewer failed jobs exist than
-  requested or when root cause is uncertain.
-- **Runtime tuning**: `tool_call_budget=1` (one successful call is all
-  this agent ever needs — see
+  `stdout_retrieval_error` (either tool) as separate from AWX's own
+  reported failure; prefer `failure_excerpt`/`structured_failures` over
+  `stdout_tail`/`stdout_context` for root-cause evidence; only call
+  something a "recurring pattern" with at least two corroborating jobs;
+  state explicitly when fewer failed jobs exist than requested or when
+  root cause is uncertain.
+- **Runtime tuning**: `tool_call_budget=1` (one successful call — to
+  whichever of the two tools the request calls for — is all this agent
+  ever needs per turn; chaining both is left to a future, more capable
+  agent, see [docs/awx-job-failure.md](awx-job-failure.md) — and see
   [docs/architecture.md](architecture.md#withholding-tools-once-an-agent-has-what-it-needs))
   and `temperature=0.1` for focused, consistently formatted output from
   smaller local models.
@@ -138,8 +145,11 @@ These reuse the same runtime and largely the same tools — see
 cheap:
 
 - **System Troubleshooting Agent** — `awx_recent_failed_jobs` +
-  `awx_get_job` + `check_tcp_connectivity` + `prometheus_query` +
-  `loki_query`. Broader operational diagnosis than AWX alone.
+  `awx_get_job_failure` (already implemented, see
+  [docs/awx-job-failure.md](awx-job-failure.md)) + `check_tcp_connectivity`
+  + `prometheus_query` + `loki_query`, with a higher `tool_call_budget`
+  than the AWX Troubleshooter's `1` to actually chain a list-then-deep-dive
+  investigation. Broader operational diagnosis than AWX alone.
 - **Incident Triage Agent** — adds Kubernetes and git/change-history
   tools to correlate a live incident against recent changes.
 - **Daily Operations Digest Agent** — a scheduled, read-only agent that

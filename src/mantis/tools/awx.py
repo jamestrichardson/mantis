@@ -31,7 +31,7 @@ from mantis.contracts import QueryMeta, ToolError, ToolErrorKind
 from mantis.integrations.awx import AWXClient, AWXError, AWXStdoutError
 from mantis.registry import Tool, default_registry
 from mantis.reliability import Deadline, DeadlineExceededError, IntegrationError, IntegrationErrorKind
-from mantis.tools._awx_events import MAX_RETURNED_FAILURE_EVENTS, collect_failure_events
+from mantis.tools._awx_events import collect_failure_events
 from mantis.tools._text import extract_excerpt, tail
 
 logger = logging.getLogger(__name__)
@@ -531,7 +531,12 @@ def awx_get_job_failure(
             reliability_report=_reliability_report,
         )
 
-    truncated = inspection["inspection_capped"] or len(selected_events) >= MAX_RETURNED_FAILURE_EVENTS
+    # Both signals are tracked precisely in collect_failure_events, not
+    # inferred here from counts/lengths alone -- a job with exactly
+    # MAX_RETURNED_FAILURE_EVENTS relevant failures and nothing more
+    # must not be reported as truncated just because the count matches
+    # the cap. See mantis.tools._awx_events.collect_failure_events.
+    truncated = inspection["inspection_capped"] or inspection["more_failures_than_returned"]
 
     meta = QueryMeta(
         source_system="awx",

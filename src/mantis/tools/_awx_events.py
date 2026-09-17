@@ -144,13 +144,24 @@ def collect_failure_events(
           :func:`_normalize_event`), capped at
           :data:`MAX_RETURNED_FAILURE_EVENTS`.
         - ``inspection``: ``{"events_inspected", "pages_inspected",
-          "inspection_capped"}`` — ``inspection_capped`` is True only
-          when a hard cap (pages or events) stopped inspection before
-          AWX's own event stream was exhausted; distinct from whether
-          the *returned* failure list itself was capped (callers check
-          ``len(selected_events) >= MAX_RETURNED_FAILURE_EVENTS`` for
-          that — see ``mantis.tools.awx.awx_get_job_failure``, which
-          combines both into the result's ``meta.truncated``).
+          "inspection_capped", "more_failures_than_returned"}``.
+          ``inspection_capped`` is True only when a hard cap (pages or
+          events) actually prevented following a real further page —
+          never inferred from the inspected counts alone, since those
+          can legitimately equal a cap by coincidence on the exact page
+          where AWX's own stream also ends (e.g. a job with exactly
+          :data:`MAX_EVENT_PAGES_INSPECTED` pages). Tracked instead by
+          whether the loop exited because AWX reported no further page
+          (``next_page is None``) versus because a cap stopped it before
+          that could be checked. ``more_failures_than_returned`` is True
+          only if a failure event was actually observed and dropped
+          after :data:`MAX_RETURNED_FAILURE_EVENTS` was already reached
+          — not inferred from ``len(selected_events)`` alone, since a
+          job with *exactly* that many relevant failures and nothing
+          more would otherwise be misreported as truncated. Callers
+          (see ``mantis.tools.awx.awx_get_job_failure``) OR these two
+          fields together into the result's ``meta.truncated`` — see
+          ``docs/awx-job-failure.md``.
         - ``retrieval_error``: set only if a page fetch itself failed
           (classified AWX failure, or the tool-call deadline was
           already exhausted) — distinct from "we inspected everything
@@ -165,8 +176,16 @@ def collect_failure_events(
     events_inspected = 0
     pages_inspected = 0
     page = 1
+    stream_exhausted = False
+    more_failures_than_returned = False
 
-    while pages_inspected < MAX_EVENT_PAGES_INSPECTED and events_inspected < MAX_EVENTS_INSPECTED:
+    while True:
+        if pages_inspected >= MAX_EVENT_PAGES_INSPECTED or events_inspected >= MAX_EVENTS_INSPECTED:
+            # A cap stopped us from even checking whether a further page
+            # exists -- genuinely unknown, so the stream is not
+            # considered exhausted.
+            break
+
         try:
             page_result = client.list_job_events(
                 job_id,
@@ -191,6 +210,7 @@ def collect_failure_events(
                 # Retrieval itself failed -- not a bound we hit, so this
                 # is not "capped" in the sense the other branch means.
                 "inspection_capped": False,
+                "more_failures_than_returned": more_failures_than_returned,
             }
             return selected, inspection, tool_error, breaker_now_open
 
@@ -201,19 +221,19 @@ def collect_failure_events(
             if not _is_failure_event(event):
                 continue
             if len(selected) >= MAX_RETURNED_FAILURE_EVENTS:
+                more_failures_than_returned = True
                 continue
             selected.append(_normalize_event(event))
 
         if page_result.next_page is None:
+            stream_exhausted = True
             break
         page = page_result.next_page
 
-    inspection_capped = (
-        pages_inspected >= MAX_EVENT_PAGES_INSPECTED or events_inspected >= MAX_EVENTS_INSPECTED
-    )
     inspection = {
         "events_inspected": events_inspected,
         "pages_inspected": pages_inspected,
-        "inspection_capped": inspection_capped,
+        "inspection_capped": not stream_exhausted,
+        "more_failures_than_returned": more_failures_than_returned,
     }
     return selected, inspection, None, False

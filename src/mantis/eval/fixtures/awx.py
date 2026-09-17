@@ -113,6 +113,19 @@ class FixtureAWXClient:
             raise value
         return value
 
+    @property
+    def jobs(self) -> list[dict[str, Any]]:
+        """Read-only access to this scenario's job records — used by
+        :func:`_registry_for` to also build a fixture-backed
+        ``awx_get_job_failure`` tool from the exact same underlying
+        data, without a second, parallel fixture-data definition per
+        scenario."""
+        return list(self._jobs)
+
+    @property
+    def stdout_by_job_id(self) -> dict[int, "str | Exception"]:
+        return dict(self._stdout_by_job_id)
+
 
 def build_awx_recent_failed_jobs_tool(client: FixtureAWXClient) -> Tool:
     """Build a ``Tool`` for ``awx_recent_failed_jobs`` bound to fixture data.
@@ -137,6 +150,14 @@ def build_awx_recent_failed_jobs_tool(client: FixtureAWXClient) -> Tool:
 def _registry_for(client: FixtureAWXClient) -> ToolRegistry:
     registry = ToolRegistry()
     registry.register(build_awx_recent_failed_jobs_tool(client))
+    # Also register a fixture-backed awx_get_job_failure, derived from
+    # the same job/stdout data (see _job_failure_client_from) -- the AWX
+    # Troubleshooter's real ALLOWED_TOOLS includes both tools, and every
+    # scenario's agent_tools mirrors that (see _RUNTIME_TUNING below), so
+    # a live eval run must be able to resolve both tool names against
+    # this registry regardless of whether the model actually calls the
+    # second one.
+    registry.register(build_awx_get_job_failure_tool(_job_failure_client_from(client)))
     return registry
 
 
@@ -598,27 +619,34 @@ default_scenarios.register(
 
 
 class FixtureAWXJobFailureClient:
-    """A canned stand-in for ``AWXClient``, scoped to one job's data —
-    duck-types the subset of ``AWXClient`` that ``awx_get_job_failure``
+    """A canned stand-in for ``AWXClient``, scoped to one scenario's data
+    — duck-types the subset of ``AWXClient`` that ``awx_get_job_failure``
     uses (``get_job``, ``list_job_events``, ``get_job_stdout``). Passed
     via that function's ``_client`` override so scenarios exercise the
     exact production selection/normalization/contract logic against
     fixture data, the same pattern :class:`FixtureAWXClient` established
     for ``awx_recent_failed_jobs``.
+
+    Keyed by job id (not scoped to a single job) so one client can back
+    every job a scenario's ``awx_recent_failed_jobs`` fixture defines —
+    see :func:`_job_failure_client_from`, which builds one of these
+    directly from an existing :class:`FixtureAWXClient`'s data so the
+    two tools' fixtures for the same scenario never drift apart.
     """
 
     def __init__(
         self,
-        job: dict[str, Any],
-        events: list[dict[str, Any]],
-        stdout: "str | Exception",
+        jobs_by_id: dict[int, dict[str, Any]],
+        *,
+        events_by_id: dict[int, list[dict[str, Any]]] | None = None,
+        stdout_by_job_id: dict[int, "str | Exception"] | None = None,
     ) -> None:
-        self._job = job
-        self._events = events
-        self._stdout = stdout
+        self._jobs_by_id = jobs_by_id
+        self._events_by_id = events_by_id or {}
+        self._stdout_by_job_id = stdout_by_job_id or {}
 
     def get_job(self, job_id: int, *, deadline: Any = None) -> dict[str, Any]:
-        return dict(self._job)
+        return dict(self._jobs_by_id[job_id])
 
     def list_job_events(
         self,
@@ -632,12 +660,31 @@ class FixtureAWXJobFailureClient:
         # A single-page fixture is sufficient for a golden scenario —
         # pagination/inspection-cap behavior is covered by deterministic
         # unit tests (tests/test_awx_events.py), not by model evaluation.
-        return JobEventPage(events=list(self._events), total_count=len(self._events), next_page=None)
+        events = self._events_by_id.get(job_id, [])
+        return JobEventPage(events=list(events), total_count=len(events), next_page=None)
 
     def get_job_stdout(self, job_id: int, *, deadline: Any = None) -> str:
-        if isinstance(self._stdout, Exception):
-            raise self._stdout
-        return self._stdout
+        value = self._stdout_by_job_id.get(job_id, "")
+        if isinstance(value, Exception):
+            raise value
+        return value
+
+
+def _job_failure_client_from(client: FixtureAWXClient) -> FixtureAWXJobFailureClient:
+    """Build a :class:`FixtureAWXJobFailureClient` reusing an existing
+    scenario's ``FixtureAWXClient`` job/stdout data, so
+    ``awx_get_job_failure`` is exercisable against every existing
+    ``awx_recent_failed_jobs`` scenario without a second, parallel
+    fixture-data definition. None of these scenarios define job-event
+    fixtures, so a call always falls back to the same stdout fixture
+    data already used by ``awx_recent_failed_jobs`` — a realistic
+    degenerate case (a job with no relevant structured failure events
+    recorded), not a special-cased shortcut.
+    """
+    jobs_by_id = {job["id"]: job for job in client.jobs}
+    return FixtureAWXJobFailureClient(
+        jobs_by_id=jobs_by_id, stdout_by_job_id=client.stdout_by_job_id
+    )
 
 
 def build_awx_get_job_failure_tool(client: FixtureAWXJobFailureClient) -> Tool:
@@ -769,9 +816,9 @@ default_scenarios.register(
         prompt=f"AWX job {_UNREACHABLE_JOB_ID} failed. Investigate why and summarize it.",
         build_registry=lambda: _job_failure_registry_for(
             FixtureAWXJobFailureClient(
-                job=_UNREACHABLE_JOB,
-                events=[_UNREACHABLE_EVENT],
-                stdout=_UNREACHABLE_STDOUT,
+                jobs_by_id={_UNREACHABLE_JOB_ID: _UNREACHABLE_JOB},
+                events_by_id={_UNREACHABLE_JOB_ID: [_UNREACHABLE_EVENT]},
+                stdout_by_job_id={_UNREACHABLE_JOB_ID: _UNREACHABLE_STDOUT},
             )
         ),
         expectations=[

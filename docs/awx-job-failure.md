@@ -103,24 +103,36 @@ Correctness never depends on server-side filtering working.
 ### Two distinct truncation signals
 
 A single ambiguous `truncated: true` flag can't answer two different
-questions, so this tool reports both:
+questions, so this tool reports both — and both are tracked precisely
+during collection, never inferred after the fact from counts that could
+coincidentally equal a cap:
 
 - **`meta.truncated`** (the existing `mantis.contracts.QueryMeta`
-  field): true when more *relevant* failure events likely exist than
-  were returned — either `MAX_RETURNED_FAILURE_EVENTS` was reached, or
-  inspection itself was capped before the full stream was scanned (see
-  next point), so completeness can't be claimed either way.
+  field): true when `event_inspection.inspection_capped` is true, or
+  `event_inspection.more_failures_than_returned` is true.
 - **`event_inspection.inspection_capped`**: true only when a hard
   inspection cap (`MAX_EVENT_PAGES_INSPECTED` or `MAX_EVENTS_INSPECTED`)
-  stopped scanning the *raw* event stream before AWX reported no further
-  page — independent of how many failures were actually found. A job
-  could have its full stream scanned (`inspection_capped: false`) while
-  still returning a capped set of failures (`meta.truncated: true`), or
-  have inspection stop early with zero failures found so far
-  (`inspection_capped: true`, `meta.truncated: true`, `structured_failures: []`).
+  actually prevented following a real further page — tracked by whether
+  AWX itself reported no further page (`next_page is None`) before a cap
+  was hit, not inferred from the inspected page/event counts alone. A
+  job with *exactly* `MAX_EVENT_PAGES_INSPECTED` pages whose last page
+  naturally ends the stream is `inspection_capped: false`, even though
+  `pages_inspected` equals the cap.
+- **`event_inspection.more_failures_than_returned`**: true only if a
+  relevant failure event was actually seen and dropped after
+  `MAX_RETURNED_FAILURE_EVENTS` was already reached — not inferred from
+  `len(structured_failures) >= MAX_RETURNED_FAILURE_EVENTS` alone, since
+  a job with *exactly* that many relevant failures and nothing more
+  would otherwise be misreported as truncated.
 
-`event_inspection` also reports `events_inspected` and `pages_inspected`
-so the actual scale of what was looked at is never a mystery.
+A job could have its full stream scanned (`inspection_capped: false`)
+while still returning a capped set of failures
+(`more_failures_than_returned: true`), or have inspection stop early
+with zero failures found so far (`inspection_capped: true`,
+`more_failures_than_returned: false`, `structured_failures: []`) — both
+of those correctly produce `meta.truncated: true`. `event_inspection`
+also reports `events_inspected` and `pages_inspected` so the actual
+scale of what was looked at is never a mystery.
 
 ## Result shape
 
@@ -164,7 +176,8 @@ so the actual scale of what was looked at is never a mystery.
   "event_inspection": {
     "events_inspected": 1,
     "pages_inspected": 1,
-    "inspection_capped": false
+    "inspection_capped": false,
+    "more_failures_than_returned": false
   },
   "stdout_context": {
     "role": "supporting",
@@ -277,13 +290,25 @@ circuit-breaker abstraction was added. See
 
 `awx_get_job_failure` does not replace `awx_recent_failed_jobs` — the
 two are complementary (list recent failures vs. deep-dive on one job's
-structured evidence). It's registered in the shared tool registry
-(`category="awx"`) but is **not** currently in the AWX Troubleshooter
-agent's `ALLOWED_TOOLS`: wiring a second, job-id-scoped AWX tool into a
-live agent's tool sequencing/system prompt is a separate design decision
-better made alongside a multi-tool investigation agent (see #11, out of
-scope here). It's available today for the evaluation harness (see
-below) and for a future agent to adopt.
+structured evidence), and both are in the AWX Troubleshooter agent's
+`ALLOWED_TOOLS`. The agent's system prompt tells the model which to
+reach for: `awx_recent_failed_jobs` for a general "show me recent
+failures" request, `awx_get_job_failure` when a specific job id is
+already known or implied.
+
+`tool_call_budget` stays at `1` — this agent gets exactly one tool call
+per turn, so it picks whichever single tool actually answers the
+request rather than chaining both in one investigation (list, then
+deep-dive on one result). Enabling that kind of multi-tool
+investigation sequencing is a larger, separate design decision better
+made alongside a more capable investigation agent (see #11, out of
+scope here); this agent stays a thin, single-call one. Every existing
+`awx_recent_failed_jobs` evaluation scenario's fixture registry also
+registers a fixture-backed `awx_get_job_failure` (see
+`mantis.eval.fixtures.awx._job_failure_client_from`), reusing the same
+job/stdout data with no job-event fixtures — so those scenarios remain
+resolvable end to end even though none of them exercise the tool
+directly.
 
 ## Evaluation scenario
 

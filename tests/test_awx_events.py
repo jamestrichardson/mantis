@@ -207,7 +207,12 @@ def test_collect_failure_events_normal_single_page(awx_client):
 
     assert len(selected) == 1
     assert selected[0]["host"] == "host03"
-    assert inspection == {"events_inspected": 2, "pages_inspected": 1, "inspection_capped": False}
+    assert inspection == {
+        "events_inspected": 2,
+        "pages_inspected": 1,
+        "inspection_capped": False,
+        "more_failures_than_returned": False,
+    }
     assert error is None
     assert breaker_open is False
 
@@ -323,6 +328,56 @@ def test_collect_failure_events_caps_returned_failures_but_keeps_inspecting_with
     # The stream itself was fully inspected (no "next"); only the
     # *returned* failure list was capped -- these are different signals.
     assert inspection["inspection_capped"] is False
+    assert inspection["more_failures_than_returned"] is True
+
+
+@respx.mock
+def test_collect_failure_events_exact_page_count_matching_cap_is_not_marked_inspection_capped(awx_client):
+    # Regression test: a job with *exactly* MAX_EVENT_PAGES_INSPECTED
+    # pages, whose last page naturally reports no further page, must not
+    # be misreported as capped just because the inspected-page count
+    # happens to equal the cap by coincidence.
+    route = respx.get("https://awx.example.test/api/v2/jobs/42/job_events/")
+    route.side_effect = [
+        httpx.Response(
+            200,
+            json={
+                "count": MAX_EVENT_PAGES_INSPECTED,
+                "next": "x" if i < MAX_EVENT_PAGES_INSPECTED - 1 else None,
+                "results": [_event("runner_on_ok", id=i)],
+            },
+        )
+        for i in range(MAX_EVENT_PAGES_INSPECTED)
+    ]
+
+    selected, inspection, error, breaker_open = collect_failure_events(
+        awx_client, 42, deadline=None, reliability_report=None
+    )
+
+    assert route.call_count == MAX_EVENT_PAGES_INSPECTED
+    assert inspection["pages_inspected"] == MAX_EVENT_PAGES_INSPECTED
+    assert inspection["inspection_capped"] is False
+
+
+@respx.mock
+def test_collect_failure_events_exact_relevant_failure_count_matching_cap_is_not_truncated(awx_client):
+    # Regression test: a job with *exactly* MAX_RETURNED_FAILURE_EVENTS
+    # relevant failures and nothing more must not report
+    # more_failures_than_returned=True -- nothing was actually omitted.
+    exact = [
+        _event("runner_on_failed", id=i, counter=i) for i in range(MAX_RETURNED_FAILURE_EVENTS)
+    ]
+    respx.get("https://awx.example.test/api/v2/jobs/42/job_events/").mock(
+        return_value=httpx.Response(200, json={"count": len(exact), "next": None, "results": exact})
+    )
+
+    selected, inspection, error, breaker_open = collect_failure_events(
+        awx_client, 42, deadline=None, reliability_report=None
+    )
+
+    assert len(selected) == MAX_RETURNED_FAILURE_EVENTS
+    assert inspection["inspection_capped"] is False
+    assert inspection["more_failures_than_returned"] is False
 
 
 @respx.mock
