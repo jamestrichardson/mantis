@@ -75,8 +75,10 @@ as the basis for a differently-named environment (e.g. `cp .env.example
 See [docs/reliability.md](reliability.md) for the full contract:
 timeouts, retries, the failure taxonomy, run/tool deadlines, and the
 run-local short circuit. All eight are `mantis.config.ReliabilityConfig`
-fields — one shared config object every integration (AWX today) and
-`AgentRuntime` reads from, not one set of knobs per integration.
+fields — every integration (AWX today) and `AgentRuntime` use the same
+schema and environment-variable defaults, not one set of knobs per
+integration, even though each constructs its own
+`ReliabilityConfig.from_env()` instance rather than sharing one object.
 
 | Variable | Required | Default | Description |
 |---|---|---|---|

@@ -426,6 +426,59 @@ def test_awx_recent_failed_jobs_reports_swallowed_stdout_failures_via_reliabilit
 
 
 @respx.mock
+def test_awx_recent_failed_jobs_stops_requesting_stdout_once_the_breaker_opens_mid_call():
+    # Regression test (PR #72 review, round 2): reporting a degraded
+    # failure into the breaker fixes visibility for the *next* tool call,
+    # but awx_recent_failed_jobs would still keep requesting stdout for
+    # every remaining job in the SAME call after the breaker opens unless
+    # it actually checks _reliability_report's return value and stops.
+    # With short_circuit_threshold=3 and five jobs all failing stdout,
+    # only the first three should ever be requested at all.
+    jobs_payload = {
+        "results": [
+            {"id": 500 + i, "name": f"job-{i}", "status": "failed", "failed": True}
+            for i in range(5)
+        ]
+    }
+    respx.get("https://awx.example.test/api/v2/jobs/").mock(
+        return_value=httpx.Response(200, json=jobs_payload)
+    )
+    stdout_route = respx.route(
+        method="GET", url__regex=r"https://awx\.example\.test/api/v2/jobs/\d+/stdout/"
+    ).mock(return_value=httpx.Response(500, text="server error"))
+
+    client = AWXClient(
+        config=AWXConfig(url="https://awx.example.test", token=Secret("tok"), verify_ssl=True),
+        sleep=lambda *_: None,
+    )
+    breaker = RunLocalBreaker(threshold=3)
+
+    def reliability_report(kind: IntegrationErrorKind) -> bool:
+        breaker.record_failure("awx", kind)
+        return breaker.is_open("awx")
+
+    result = awx_recent_failed_jobs(
+        limit=5, _client=client, _reliability_report=reliability_report
+    )
+
+    # Three logical stdout retrievals, each exhausting the default
+    # 3-attempt retry budget -> 9 real HTTP requests total. Jobs 4 and 5
+    # must never reach the network at all.
+    assert stdout_route.call_count == 3 * client.reliability.retry_max_attempts
+
+    jobs = result["jobs"]
+    assert len(jobs) == 5
+    for job in jobs[:3]:
+        # Attempted and failed -- a real AWXStdoutError-derived message.
+        assert job["stdout_retrieval_error"] is not None
+        assert "skip" not in job["stdout_retrieval_error"]["message"].lower()
+    for job in jobs[3:]:
+        # Never attempted at all -- distinct wording from an actual failure.
+        assert job["stdout_retrieval_error"] is not None
+        assert "skip" in job["stdout_retrieval_error"]["message"].lower()
+
+
+@respx.mock
 def test_awx_recent_failed_jobs_contract_adoption_keeps_every_prior_field():
     # Regression test for issue #23's acceptance criterion: adopting the
     # shared result contract must not drop any AWX-specific field that
@@ -499,7 +552,7 @@ def test_awx_recent_failed_jobs_tool_is_registered_as_containing_untrusted_text(
 # Reliability (#15): explicit timeouts, classification, retry behavior
 # ---------------------------------------------------------------------------
 
-from mantis.reliability import Deadline, IntegrationErrorKind  # noqa: E402
+from mantis.reliability import Deadline, IntegrationErrorKind, RunLocalBreaker  # noqa: E402
 
 
 def test_awx_client_uses_explicit_connect_and_read_timeouts(awx_client: AWXClient):

@@ -265,3 +265,42 @@ def test_reliability_config_from_env_rejects_invalid_values(monkeypatch, env_var
     monkeypatch.setenv(env_var, value)
     with pytest.raises(ConfigurationError):
         ReliabilityConfig.from_env()
+
+
+# ---------------------------------------------------------------------------
+# Non-finite float values (nan/inf) — float("nan")/float("inf") both parse
+# successfully, so the zero/negative range checks above don't catch them on
+# their own (NaN comparisons are always False; +inf > 0 is True). Left
+# unvalidated, a NaN backoff produces confusing downstream behavior in
+# random.uniform()/time.sleep()/httpx.Timeout rather than a clear error at
+# config construction. See PR #72 review discussion.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "field",
+    [
+        "http_connect_timeout_seconds",
+        "http_read_timeout_seconds",
+        "retry_backoff_base_seconds",
+        "retry_backoff_cap_seconds",
+        "tool_timeout_seconds",
+        "run_timeout_seconds",
+    ],
+)
+@pytest.mark.parametrize("value", [float("nan"), float("inf"), float("-inf")])
+def test_reliability_config_rejects_non_finite_float_fields(field, value):
+    with pytest.raises(ConfigurationError, match=field):
+        ReliabilityConfig(**{field: value})
+
+
+def test_reliability_config_from_env_rejects_nan(monkeypatch):
+    monkeypatch.setenv("MANTIS_RETRY_BACKOFF_BASE_SECONDS", "nan")
+    with pytest.raises(ConfigurationError):
+        ReliabilityConfig.from_env()
+
+
+def test_reliability_config_from_env_rejects_inf(monkeypatch):
+    monkeypatch.setenv("MANTIS_RUN_TIMEOUT_SECONDS", "inf")
+    with pytest.raises(ConfigurationError):
+        ReliabilityConfig.from_env()

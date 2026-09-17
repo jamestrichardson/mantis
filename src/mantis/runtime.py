@@ -732,12 +732,20 @@ class AgentRuntime:
         # hatch to still report that failure into this run's breaker
         # state; degraded_within_call tracks whether that happened so the
         # success path (below) knows not to wipe it back out.
+        #
+        # It returns whether the breaker is now open *for this call's
+        # category* so a handler iterating over several items (e.g. one
+        # job per stdout fetch) can stop issuing further requests within
+        # the same logical tool call once the threshold is crossed,
+        # instead of only affecting the *next* tool call — see
+        # mantis.tools.awx.awx_recent_failed_jobs.
         degraded_within_call = False
 
-        def _reliability_report(kind: IntegrationErrorKind) -> None:
+        def _reliability_report(kind: IntegrationErrorKind) -> bool:
             nonlocal degraded_within_call
             degraded_within_call = True
             breaker.record_failure(tool.category, kind)
+            return breaker.is_open(tool.category)
 
         handler_kwargs = dict(arguments)
         handler_params = inspect.signature(tool.handler).parameters

@@ -31,6 +31,7 @@ git-ignored and must never contain checked-in credentials.
 
 from __future__ import annotations
 
+import math
 import os
 from dataclasses import dataclass
 from pathlib import Path
@@ -92,13 +93,18 @@ def _getenv_int(name: str, default: int) -> int:
 
 
 def _check_positive(name: str, value: float) -> None:
-    if not value > 0:
-        raise ConfigurationError(f"{name} must be > 0, got {value!r}")
+    # math.isfinite() rejects both NaN and +/-inf explicitly — without it,
+    # float("inf") silently passes a bare "value > 0" check (inf > 0 is
+    # True), and float("nan") produces confusing downstream behavior in
+    # random.uniform(), time.sleep(), and httpx.Timeout construction
+    # rather than a clear startup error.
+    if not math.isfinite(value) or not value > 0:
+        raise ConfigurationError(f"{name} must be a finite number > 0, got {value!r}")
 
 
 def _check_non_negative(name: str, value: float) -> None:
-    if value < 0:
-        raise ConfigurationError(f"{name} must be >= 0, got {value!r}")
+    if not math.isfinite(value) or value < 0:
+        raise ConfigurationError(f"{name} must be a finite number >= 0, got {value!r}")
 
 
 def _check_at_least(name: str, value: int, minimum: int) -> None:

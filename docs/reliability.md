@@ -73,10 +73,13 @@ and `::test_retry_exhaustion_raises_after_named_max_attempts`.
 | Overall run deadline | 300.0s | `MANTIS_RUN_TIMEOUT_SECONDS` |
 | Run-local short-circuit threshold | 3 | `MANTIS_SHORT_CIRCUIT_THRESHOLD` |
 
-All eight are `mantis.config.ReliabilityConfig` fields, loaded once via
-`ReliabilityConfig.from_env()` — the same config object is shared by
-`AWXClient` and `AgentRuntime` (and any future integration), so there's
-one place to tune reliability behavior, not one per integration.
+All eight are `mantis.config.ReliabilityConfig` fields. `AgentRuntime`
+and each integration client (e.g. `AWXClient`) each construct their own
+`ReliabilityConfig.from_env()` instance rather than sharing one object,
+but all of them use the same schema and the same environment-variable
+defaults, so reliability behavior is configured consistently across the
+runtime and every integration rather than each one inventing its own
+knobs.
 
 `ReliabilityConfig` validates ranges at construction (`__post_init__`),
 not just types — a value that parses fine but is nonsensical (a zero or
@@ -271,6 +274,19 @@ success path at the end of `_dispatch_tool_call` skips
 `record_success()` for that call instead of wiping the just-recorded
 failure back out. See `mantis.tools.awx._summarize_job` for the pattern.
 
+That closes the gap *between* tool calls, but a handler iterating over
+several items in one call (one stdout fetch per job, in
+`awx_recent_failed_jobs`) could still keep hammering an integration
+*within* that same call after the threshold is crossed — the breaker
+wouldn't affect anything until the *next* tool call. `_reliability_report`
+returns whether the breaker is now open for the call's category, so a
+handler can stop issuing further requests as soon as it opens instead of
+finishing out every remaining item first. `awx_recent_failed_jobs` uses
+this to stop requesting stdout for any jobs after the one whose failure
+tripped the breaker — those jobs get a `stdout_retrieval_error` that says
+retrieval was skipped, distinct from one that was attempted and failed
+(see `mantis.tools.awx._skipped_job_summary`).
+
 ## Tool-facing result behavior
 
 A retrieval/integration failure is never phrased as if it were a fact
@@ -335,10 +351,14 @@ hostname, job ID, or raw exception message in a label.
    `list_jobs` call) — `AgentRuntime` handles the propagating case
    generically via the shared `IntegrationError` base class. **If you
    take the degrade-gracefully path, also accept a keyword-only
-   `_reliability_report: Callable[[IntegrationErrorKind], None] | None =
+   `_reliability_report: Callable[[IntegrationErrorKind], bool] | None =
    None` parameter and call it with the exception's `kind`** — otherwise
    the run-local breaker never learns about that failure (see "Run-local
-   short circuit" above).
+   short circuit" above). If your tool degrades failures across several
+   items in a loop (one request per item), check the callback's return
+   value (`True` once the breaker opens) and stop issuing further
+   requests for that same call instead of finishing out every item —
+   see "Partial-success tools and the breaker" above.
 4. If you want your retries to respect the caller's remaining tool-call
    budget, add a keyword-only `_deadline: Deadline | None = None`
    parameter to your tool function and thread it into your client calls.
