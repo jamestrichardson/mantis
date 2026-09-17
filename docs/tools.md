@@ -260,3 +260,18 @@ as supporting/fallback context rather than the primary source — see
 (selection rules, pagination/inspection caps, provenance, partial-success
 behavior, and a concrete sample result). Selection logic lives in
 `mantis/tools/_awx_events.py`, independently testable without a model.
+
+## Network tool behavior
+
+### `check_tcp_connectivity` (#8): current-state TCP connectivity
+
+`check_tcp_connectivity(host: str, port: int)` is Mantis's first
+current-state (not historical) evidence tool: a bounded, deadline-aware
+TCP connect check answering "can Mantis reach this host/port right
+now?" — see [docs/network-tcp-connectivity.md](network-tcp-connectivity.md)
+for the full design (status vocabulary, IPv4/IPv6 multi-address
+semantics, failure precedence, deadline handling, private-network/SSRF
+posture, and how it correlates with #28's historical AWX evidence in an
+evaluation scenario). DNS/socket mechanics live in
+`mantis/integrations/network.py`; semantic shaping in
+`mantis/tools/network.py`.

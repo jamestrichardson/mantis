@@ -90,11 +90,13 @@ src/mantis/
 ├── reliability.py             # timeouts, retries, failure taxonomy, deadlines — see docs/reliability.md
 ├── cli.py                     # `mantis <agent-name> [prompt]` dispatcher
 ├── integrations/
-│   └── awx.py                 # AWXClient: raw AWX API access
+│   ├── awx.py                  # AWXClient: raw AWX API access
+│   └── network.py              # DNS + socket TCP-connect mechanics — see docs/network-tcp-connectivity.md
 ├── tools/
-│   ├── _text.py               # excerpt/tail preprocessing helpers
-│   ├── _awx_events.py         # AWX job-event selection/bounding — see docs/awx-job-failure.md
-│   └── awx.py                 # awx_recent_failed_jobs, awx_get_job_failure (semantic tools)
+│   ├── _text.py                # excerpt/tail preprocessing helpers
+│   ├── _awx_events.py          # AWX job-event selection/bounding — see docs/awx-job-failure.md
+│   ├── awx.py                  # awx_recent_failed_jobs, awx_get_job_failure (semantic tools)
+│   └── network.py              # check_tcp_connectivity (semantic tool)
 ├── agents/
 │   └── awx_troubleshooter.py  # AWX Troubleshooting Agent
 ├── observability/              # structured logs + Prometheus metrics — see docs/observability.md
