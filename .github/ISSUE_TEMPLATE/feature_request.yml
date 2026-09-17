@@ -1,0 +1,62 @@
+name: Feature request
+description: Propose a new capability or improvement for Mantis
+title: "[FEATURE] "
+labels: []
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for proposing an improvement. For large architectural changes, explain the problem first so the project can evaluate the smallest useful design before implementation.
+
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem or use case
+      description: What problem are you trying to solve, and for whom?
+      placeholder: Describe the operator/developer need rather than only the desired implementation.
+    validations:
+      required: true
+
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed behavior
+      description: What should Mantis do differently?
+    validations:
+      required: true
+
+  - type: textarea
+    id: examples
+    attributes:
+      label: Example workflow
+      description: Show a concrete example of how this would be used.
+      placeholder: |
+        User/operator action -> Mantis behavior -> expected result
+
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered
+      description: Are there simpler approaches or existing capabilities that could solve the problem?
+
+  - type: textarea
+    id: scope
+    attributes:
+      label: Scope and non-goals
+      description: What should this request explicitly not try to solve?
+
+  - type: textarea
+    id: security
+    attributes:
+      label: Security, privacy, or mutation considerations
+      description: Note whether this touches credentials, untrusted external data, personal data, or infrastructure mutation/approval boundaries.
+
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Checklist
+      options:
+        - label: I searched existing issues and roadmap items for related work.
+          required: true
+        - label: This request describes the problem/use case, not only an implementation preference.
+          required: true
