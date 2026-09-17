@@ -194,6 +194,33 @@ class RequiredToolCall:
 
 
 @dataclass(frozen=True)
+class RequiredToolAttempt:
+    """Hard by default. The named tool must have been *attempted* at
+    least once, regardless of outcome — including a classified retrieval
+    failure (``outcome == "integration_error"``) or any other non-"ok"
+    result. Distinct from :class:`RequiredToolCall`, which only counts a
+    successful ("ok"/"duplicate") outcome and would therefore never be
+    satisfiable in a scenario where a source is *expected* to fail (see
+    #11's ``system-troubleshooter-retrieval-failure`` golden scenario):
+    the point there is proving the agent actually tried the failing
+    source (so it can honestly report that evidence is unavailable)
+    rather than silently skipping it, not that the call succeeded.
+    """
+
+    tool: str
+    min_count: int = 1
+    name: str | None = None
+    hard: bool = True
+
+    def resolved_name(self) -> str:
+        return self.name or f"required_tool_attempt:{self.tool}"
+
+    def check(self, result: "EvalResult") -> tuple[bool, str]:
+        count = sum(1 for tc in result.tool_calls if tc.tool_name == self.tool)
+        return count >= self.min_count, f"{self.tool} attempted {count} time(s)"
+
+
+@dataclass(frozen=True)
 class ForbiddenToolCall:
     """Hard by default. The named tool must never have been called."""
 
@@ -507,6 +534,20 @@ class NoRetrievalErrorMisattribution:
     ``mantis.reliability`` for the classification that decides which
     specific kind a given failure gets, #15), so this works for any tool
     adopting the shared error taxonomy, not just AWX.
+
+    Also treats a whole-call ``outcome in ("integration_error", "error")``
+    as a retrieval failure, not just a ``ToolError`` embedded *within* an
+    otherwise-successful result. AWX's per-job stdout fetch degrades into
+    the latter shape (a successful call whose result carries a
+    ``stdout_retrieval_error`` field alongside real evidence for other
+    jobs), but a #8/#9/#10-style transport failure (network/Prometheus/
+    Loki) raises a classified ``IntegrationError`` instead, which
+    ``AgentRuntime`` records with ``result=None`` (see
+    ``mantis.runtime.ToolCallLogEntry``) — there is no dict for
+    ``_any_tool_error_present`` to find in that case, so relying on it
+    alone would miss every such failure entirely. See #11's retrieval-
+    failure golden scenario (``mantis.eval.fixtures.system_troubleshooter``)
+    for the concrete case this covers.
     """
 
     retrieval_terms: tuple[str, ...] = (r"retriev", r"\bfetch", r"\bstdout\b")
@@ -527,7 +568,10 @@ class NoRetrievalErrorMisattribution:
         return self.name or "no_retrieval_error_misattribution"
 
     def check(self, result: "EvalResult") -> tuple[bool, str]:
-        has_retrieval_error = any(_any_tool_error_present(tc.result) for tc in result.tool_calls)
+        has_retrieval_error = any(
+            _any_tool_error_present(tc.result) or tc.outcome in ("integration_error", "error")
+            for tc in result.tool_calls
+        )
         if not has_retrieval_error:
             return True, "no retrieval error present in tool results; nothing to misattribute"
         flags = 0 if self.case_sensitive else re.IGNORECASE

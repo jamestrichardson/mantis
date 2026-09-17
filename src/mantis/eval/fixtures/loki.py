@@ -72,9 +72,19 @@ _BASE_TS = 1700000000.0
 
 class FixtureLokiClient:
     """A canned stand-in for ``LokiClient``, scoped to one scenario's
-    range-query response."""
+    range-query response.
 
-    def __init__(self, *, query_range_response: LokiAPIResponse) -> None:
+    ``query_range_response`` may instead be an ``Exception`` instance
+    (typically a real ``mantis.integrations.loki.LokiError``) to raise
+    from ``query_range`` -- used by a retrieval-failure golden scenario
+    (see #11's ``system-troubleshooter-retrieval-failure``) to exercise
+    the real ``AgentRuntime`` integration-error handling path rather than
+    hand-faking a failure result. Mirrors
+    ``mantis.eval.fixtures.awx.FixtureAWXClient.stdout_by_job_id``'s
+    identical convention.
+    """
+
+    def __init__(self, *, query_range_response: "LokiAPIResponse | Exception") -> None:
         self._query_range_response = query_range_response
 
     def query_range(
@@ -87,12 +97,15 @@ class FixtureLokiClient:
         limit: int,
         deadline: Any = None,
     ) -> LokiAPIResponse:
+        if isinstance(self._query_range_response, Exception):
+            raise self._query_range_response
         return self._query_range_response
 
 
-def build_loki_query_tool(response: LokiAPIResponse) -> Tool:
-    """Build a ``Tool`` for ``loki_query`` bound to a canned response --
-    uses the real schema and real tool function, only the HTTP client is
+def build_loki_query_tool(response: "LokiAPIResponse | Exception") -> Tool:
+    """Build a ``Tool`` for ``loki_query`` bound to a canned response (or
+    an ``Exception`` to raise -- see :class:`FixtureLokiClient`) -- uses
+    the real schema and real tool function, only the HTTP client is
     swapped out."""
     client = FixtureLokiClient(query_range_response=response)
 

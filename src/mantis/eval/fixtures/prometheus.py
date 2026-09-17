@@ -61,9 +61,15 @@ from mantis.eval.scenarios import Scenario, default_scenarios
 from mantis.integrations.network import AddressAttempt, TCPConnectResult
 from mantis.integrations.prometheus import PrometheusAPIResponse
 from mantis.registry import Tool, ToolRegistry
-from mantis.tools.prometheus import PROMETHEUS_QUERY_RANGE_SCHEMA, prometheus_query_range
+from mantis.tools.prometheus import (
+    PROMETHEUS_QUERY_RANGE_SCHEMA,
+    PROMETHEUS_QUERY_SCHEMA,
+    prometheus_query,
+    prometheus_query_range,
+)
 
 PROMETHEUS_TOOL_NAME = "prometheus_query_range"
+PROMETHEUS_INSTANT_TOOL_NAME = "prometheus_query"
 JOB_FAILURE_TOOL_NAME = "awx_get_job_failure"
 
 _PORT = 22
@@ -72,18 +78,56 @@ _INSTANCE = f"{_UNREACHABLE_HOST}:9100"
 
 class FixturePrometheusClient:
     """A canned stand-in for ``PrometheusClient``, scoped to one
-    scenario's range-query response."""
+    scenario's instant- and/or range-query response. Either can be
+    omitted (``None``) for a scenario that only exercises one of the two
+    -- calling the corresponding tool then raises ``NotImplementedError``
+    rather than silently returning the other response, so a
+    scenario/fixture bug (calling the wrong tool) fails loudly instead of
+    returning misleading data."""
 
-    def __init__(self, *, query_range_response: PrometheusAPIResponse) -> None:
+    def __init__(
+        self,
+        *,
+        query_response: PrometheusAPIResponse | None = None,
+        query_range_response: PrometheusAPIResponse | None = None,
+    ) -> None:
+        self._query_response = query_response
         self._query_range_response = query_range_response
 
-    def query(self, promql: str, *, time_param: str | None = None, deadline: Any = None):
-        raise NotImplementedError("this fixture only supports prometheus_query_range")
+    def query(
+        self, promql: str, *, time_param: str | None = None, deadline: Any = None
+    ) -> PrometheusAPIResponse:
+        if self._query_response is None:
+            raise NotImplementedError("this fixture was not given a query_response")
+        return self._query_response
 
     def query_range(
         self, promql: str, *, start: str, end: str, step: str, deadline: Any = None
     ) -> PrometheusAPIResponse:
+        if self._query_range_response is None:
+            raise NotImplementedError("this fixture was not given a query_range_response")
         return self._query_range_response
+
+
+def build_prometheus_query_tool(response: PrometheusAPIResponse) -> Tool:
+    """Build a ``Tool`` for ``prometheus_query`` (instant) bound to a
+    canned response — uses the real schema and real tool function, only
+    the HTTP client is swapped out. See
+    :func:`build_prometheus_query_range_tool` for the range-query
+    equivalent."""
+    client = FixturePrometheusClient(query_response=response)
+
+    def _fixture_handler(query: str, time: Any = None) -> dict[str, Any]:
+        return prometheus_query(query, time=time, _client=client)
+
+    return Tool(
+        name=PROMETHEUS_INSTANT_TOOL_NAME,
+        schema=PROMETHEUS_QUERY_SCHEMA,
+        handler=_fixture_handler,
+        category="prometheus",
+        mutating=False,
+        description="Fixture-backed prometheus_query for evaluation scenarios.",
+    )
 
 
 def build_prometheus_query_range_tool(response: PrometheusAPIResponse) -> Tool:
