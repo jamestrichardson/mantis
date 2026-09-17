@@ -181,7 +181,7 @@ lines. Every bound is a named constant in `mantis.tools.loki`:
 |---|---|---|
 | `MAX_STREAMS_RETURNED` | 50 | Distinct label-set streams in one result. |
 | `MAX_LINES_PER_STREAM` | 100 | Log lines returned per stream. |
-| `MAX_TOTAL_LINES` | 500 | Log lines across *all* returned streams combined. Also sent to Loki itself as the request's `limit` parameter (defense in depth, not the primary control). |
+| `MAX_TOTAL_LINES` | 500 | Log lines across *all* returned streams combined — the cap this tool exposes to the model. See "Source-side limit sentinel" below for why the value actually sent to Loki's own `limit` parameter is one higher than this. |
 | `MAX_LINE_CHARS` | 2000 | Per log line's message text. |
 | `MAX_LABELS_PER_STREAM` | 20 | Labels preserved per stream. |
 | `MAX_LABEL_KEY_CHARS` | 128 | Per label key. |
@@ -210,6 +210,35 @@ and couldn't be reasoned about deterministically. See
 `mantis.tools.loki._normalize_streams` and
 `tests/test_loki_tools.py::test_total_result_character_budget_is_enforced`
 for the direct proof.
+
+### Source-side limit sentinel
+
+Loki's own `limit` query parameter caps how many log lines the *server*
+returns, before Mantis ever sees the response — this is fundamentally
+different from #9's Prometheus tools, which always receive Prometheus's
+complete result and apply `MAX_SERIES_RETURNED`/etc. locally. Because of
+that difference, an exact-at-`MAX_TOTAL_LINES` raw response from Loki is
+ambiguous: it could mean "there were exactly that many matching lines"
+or "there were 501, or 5,000, or 500,000, and Loki's own limit silently
+discarded the rest" — and Mantis has no way to tell those apart just by
+counting what it received.
+
+`loki_query` resolves this with a sentinel: it requests
+`LOKI_REQUEST_LIMIT` (`MAX_TOTAL_LINES + 1` = 501) from Loki, but still
+exposes at most `MAX_TOTAL_LINES` (500) lines in the result. Then:
+
+- Raw response has ≤ 500 total lines → nothing was cut server-side;
+  `meta.truncated` can be truthfully `false` (subject to every other
+  bound above still being satisfied).
+- Raw response has exactly 501 (or, in principle, more) total lines →
+  proof that at least one more matching line existed than fits in this
+  tool's exposed cap; `meta.truncated` is forced `true`, and the result
+  still exposes at most 500 lines.
+
+See `mantis.tools.loki.LOKI_REQUEST_LIMIT`'s docstring and
+`tests/test_loki_tools.py::test_exactly_max_total_lines_from_source_does_not_mark_truncated`/
+`test_one_more_than_max_total_lines_from_source_marks_truncated` for the
+direct proof of both sides of this behavior.
 
 ### Truncation correctness
 
@@ -423,6 +452,15 @@ with thousands of warnings never reaches the model as thousands of
 bounded strings. Never discarded silently, never turned into a query
 failure, never dumped unbounded. Warning text is untrusted external data
 and flows through the same #14 pipeline as everything else here.
+
+A malformed `"warnings"` field itself (e.g. a bare string instead of a
+list) is handled conservatively at the integration layer
+(`mantis.integrations.loki._parse_envelope`): it's treated as no
+warnings at all, rather than iterated. Iterating a string yields one
+list entry per character — a large malformed string could otherwise
+build a huge intermediate Python list straight from unbounded response
+data before `MAX_WARNINGS_RETURNED`/`MAX_WARNING_CHARS` ever get a
+chance to apply.
 
 ## Security (#14): Loki is the highest-risk untrusted-text source
 

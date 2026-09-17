@@ -166,7 +166,16 @@ def _parse_envelope(response: httpx.Response, *, action: str) -> LokiAPIResponse
         )
 
     status = payload.get("status")
-    warnings = [str(w) for w in (payload.get("warnings") or [])]
+    # A malformed "warnings" field (e.g. a bare string instead of a
+    # list) is ignored conservatively rather than iterated -- iterating
+    # a string yields one list entry per character, which would build a
+    # potentially enormous intermediate list from arbitrary response
+    # data before mantis.tools.loki's warning-count/length bounds ever
+    # get a chance to apply. Warnings are supplementary context, not
+    # core evidence, so silently dropping a malformed set of them (as
+    # opposed to raising) is the right level of severity here.
+    raw_warnings = payload.get("warnings")
+    warnings = [str(w) for w in raw_warnings] if isinstance(raw_warnings, list) else []
 
     if status == "success":
         data = payload.get("data")

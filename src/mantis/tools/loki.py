@@ -82,10 +82,34 @@ MAX_LINES_PER_STREAM = 100
 MAX_TOTAL_LINES = 500
 """Global cap on log lines across *all* returned streams combined --
 protects against a many-streams, many-lines-each response even when each
-individual stream stays under :data:`MAX_LINES_PER_STREAM`. Also sent to
-Loki itself as the request's ``limit`` parameter (defense in depth: Mantis
-never relies on Loki alone to bound its own response, but there's no
-reason to ask Loki to do more work than Mantis will use either)."""
+individual stream stays under :data:`MAX_LINES_PER_STREAM`. This is the
+cap actually *exposed* to the model; see :data:`LOKI_REQUEST_LIMIT` for
+why the value sent to Loki itself is one higher than this."""
+
+LOKI_REQUEST_LIMIT = MAX_TOTAL_LINES + 1
+"""The ``limit`` query parameter actually sent to Loki -- deliberately
+one more than :data:`MAX_TOTAL_LINES`, the cap this tool exposes.
+
+Unlike Prometheus (#9), where Mantis always receives the *complete*
+query result and applies its own cap locally -- so an exact-at-cap count
+is genuinely known to be complete -- Loki's own ``limit`` parameter
+truncates the result *before* Mantis ever sees it. If Mantis asked for
+exactly ``MAX_TOTAL_LINES`` and received exactly that many lines back,
+there would be no way to tell "there were exactly that many matching
+lines" apart from "there were 501, or 5,000, or 500,000, and Loki's own
+limit silently cut the rest" -- an exact-at-cap response would be
+indistinguishable from a truncated one, which would force
+``meta.truncated`` to always be conservatively ``true`` at the cap, or
+worse, to silently lie and say ``false``.
+
+Asking for one more than what's exposed resolves this: if Loki's raw
+response contains at most :data:`MAX_TOTAL_LINES` total lines, nothing
+was cut server-side, and completeness can be reported truthfully
+(``meta.truncated=false`` is possible again). If it contains more than
+that (i.e. Loki actually had at least one line beyond what fits),
+:func:`_normalize_streams` still exposes at most :data:`MAX_TOTAL_LINES`
+of them, but now correctly marks ``truncated=true`` -- because Mantis
+can now see, from the sentinel line's mere presence, that more existed."""
 
 MAX_LINE_CHARS = 2000
 """Bound on a single log line's message text. Larger than #9's per-value
@@ -387,6 +411,18 @@ def _normalize_streams(raw_result: Any) -> tuple[list[dict[str, Any]], bool]:
     serialized JSON string; the budget is tracked against the real
     character length of each admitted label/message.
 
+    Also accounts for Loki's own server-side ``limit`` (see
+    :data:`LOKI_REQUEST_LIMIT`): unlike Prometheus, where Mantis always
+    receives the complete result and applies its own cap locally, Loki
+    may have already discarded matching lines before this function ever
+    sees them. If the raw response contains more than
+    :data:`MAX_TOTAL_LINES` lines total (possible only because
+    :data:`LOKI_REQUEST_LIMIT` deliberately asks for one more than that),
+    ``truncated`` is forced ``true`` even if every per-stream/per-line
+    cap below happens to look satisfied on its own -- an exact-at-cap
+    count from a source that itself truncates cannot be treated the same
+    as Prometheus's exact-at-cap case, where nothing was hidden upstream.
+
     Raises :class:`MalformedResultError` if ``raw_result`` itself isn't
     a list -- Loki's own contract guarantees a ``streams`` result's
     ``result`` is always a list of stream objects, so anything else
@@ -404,6 +440,12 @@ def _normalize_streams(raw_result: Any) -> tuple[list[dict[str, Any]], bool]:
         if isinstance(e, dict) and isinstance(e.get("stream"), dict) and isinstance(e.get("values"), list)
     ]
     candidates.sort(key=lambda e: _label_sort_key(e["stream"]))
+
+    # See LOKI_REQUEST_LIMIT's docstring: this is the sentinel check that
+    # detects Loki's own server-side `limit` having already discarded
+    # matching lines before this function could see them.
+    raw_total_lines = sum(len(e["values"]) for e in candidates)
+    source_limit_exceeded = raw_total_lines > MAX_TOTAL_LINES
 
     streams: list[dict[str, Any]] = []
     any_truncation = False
@@ -458,7 +500,7 @@ def _normalize_streams(raw_result: Any) -> tuple[list[dict[str, Any]], bool]:
             any_truncation = True
             break
 
-    truncated = (raw_count > len(streams)) or any_truncation
+    truncated = (raw_count > len(streams)) or any_truncation or source_limit_exceeded
     return streams, truncated
 
 
@@ -677,7 +719,7 @@ def loki_query(
         start_ns=_to_ns_string(start_ts),
         end_ns=_to_ns_string(end_ts),
         direction=safe_direction,
-        limit=MAX_TOTAL_LINES,
+        limit=LOKI_REQUEST_LIMIT,
         deadline=_deadline,
     )
 

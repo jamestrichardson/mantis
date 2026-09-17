@@ -19,6 +19,7 @@ from mantis.integrations.loki import LokiClient
 from mantis.registry import default_registry
 from mantis.security import make_model_safe
 from mantis.tools.loki import (
+    LOKI_REQUEST_LIMIT,
     MAX_LABEL_KEY_CHARS,
     MAX_LABEL_VALUE_CHARS,
     MAX_LABELS_PER_STREAM,
@@ -435,6 +436,81 @@ def test_total_line_cap_across_multiple_streams(loki_client):
     total_returned = sum(len(s["entries"]) for s in result["streams"])
     assert total_returned <= MAX_TOTAL_LINES
     assert total_returned == MAX_TOTAL_LINES
+    assert result["meta"]["truncated"] is True
+
+
+# ---------------------------------------------------------------------------
+# Source-side limit sentinel (PR #80 review): Loki's own `limit` query
+# parameter can silently truncate the response before Mantis ever sees
+# it -- unlike Prometheus, which always returns its complete result for
+# Mantis to cap locally. loki_query() asks for LOKI_REQUEST_LIMIT
+# (MAX_TOTAL_LINES + 1) so an exact-at-cap raw response is distinguishable
+# from a source-truncated one.
+# ---------------------------------------------------------------------------
+
+
+@respx.mock
+def test_loki_query_requests_one_more_than_the_exposed_line_cap(loki_client):
+    assert LOKI_REQUEST_LIMIT == MAX_TOTAL_LINES + 1
+    route = respx.get("https://loki.example.test/loki/api/v1/query_range").mock(
+        return_value=httpx.Response(200, json=_success("streams", []))
+    )
+
+    loki_query('{job="sshd"}', 0, 3600, _client=loki_client)
+
+    assert dict(route.calls.last.request.url.params)["limit"] == str(LOKI_REQUEST_LIMIT)
+
+
+@respx.mock
+def test_exactly_max_total_lines_from_source_does_not_mark_truncated(loki_client):
+    # The raw response contains exactly MAX_TOTAL_LINES total lines,
+    # spread so no per-stream/per-line-count cap is independently
+    # triggered (5 streams x 100 lines each, matching MAX_LINES_PER_STREAM
+    # exactly). Since the source returned strictly fewer than
+    # LOKI_REQUEST_LIMIT, nothing was hidden by Loki's own limit, so this
+    # is genuinely complete evidence.
+    streams_needed = MAX_TOTAL_LINES // MAX_LINES_PER_STREAM
+    assert streams_needed <= MAX_STREAMS_RETURNED
+    lines = [(i, "x") for i in range(MAX_LINES_PER_STREAM)]
+    streams = [_stream({"job": "sshd", "instance": f"host{i:03d}"}, lines) for i in range(streams_needed)]
+    respx.get("https://loki.example.test/loki/api/v1/query_range").mock(
+        return_value=httpx.Response(200, json=_success("streams", streams))
+    )
+
+    result = loki_query('{job="sshd"}', 0, 3600, _client=loki_client)
+
+    total_returned = sum(len(s["entries"]) for s in result["streams"])
+    assert total_returned == MAX_TOTAL_LINES
+    assert result["meta"]["truncated"] is False
+
+
+@respx.mock
+def test_one_more_than_max_total_lines_from_source_marks_truncated(loki_client):
+    # The raw response contains exactly LOKI_REQUEST_LIMIT (one more
+    # than MAX_TOTAL_LINES) total lines -- proof Loki's own limit was
+    # actually reached, meaning more matching lines could exist beyond
+    # what was returned. Mantis must still expose at most
+    # MAX_TOTAL_LINES, but must report this as incomplete.
+    streams_needed = (MAX_TOTAL_LINES // MAX_LINES_PER_STREAM) + 1
+    assert streams_needed <= MAX_STREAMS_RETURNED
+    lines = [(i, "x") for i in range(MAX_LINES_PER_STREAM)]
+    # streams_needed - 1 full streams plus one stream with a single
+    # extra line = exactly LOKI_REQUEST_LIMIT lines total, never
+    # tripping the per-stream MAX_LINES_PER_STREAM cap on its own.
+    streams = [
+        _stream({"job": "sshd", "instance": f"host{i:03d}"}, lines) for i in range(streams_needed - 1)
+    ]
+    streams.append(_stream({"job": "sshd", "instance": "hostlast"}, [(0, "x")]))
+    total_raw_lines = sum(len(s["values"]) for s in streams)
+    assert total_raw_lines == LOKI_REQUEST_LIMIT
+    respx.get("https://loki.example.test/loki/api/v1/query_range").mock(
+        return_value=httpx.Response(200, json=_success("streams", streams))
+    )
+
+    result = loki_query('{job="sshd"}', 0, 3600, _client=loki_client)
+
+    total_returned = sum(len(s["entries"]) for s in result["streams"])
+    assert total_returned <= MAX_TOTAL_LINES
     assert result["meta"]["truncated"] is True
 
 

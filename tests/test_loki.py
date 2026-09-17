@@ -88,6 +88,40 @@ def test_warnings_preserved_alongside_valid_data(loki_client):
     assert response.status == "success"
 
 
+@respx.mock
+def test_malformed_warnings_field_is_ignored_not_iterated_char_by_char(loki_client):
+    # Regression test (PR #80 review): "warnings" being a bare string
+    # (instead of a list) must not be iterated -- that would silently
+    # explode into one list entry per character, building a potentially
+    # enormous intermediate list straight from an unbounded response
+    # field before any semantic-layer bound applies.
+    payload = _success("streams", [])
+    payload["warnings"] = "x" * 100_000
+    respx.get("https://loki.example.test/loki/api/v1/query_range").mock(
+        return_value=httpx.Response(200, json=payload)
+    )
+
+    response = loki_client.query_range(
+        '{job="sshd"}', start_ns="0", end_ns="60000000000", direction="backward", limit=100
+    )
+
+    assert response.warnings == []
+
+
+@respx.mock
+def test_malformed_warnings_field_on_error_response_is_also_ignored(loki_client):
+    payload = {"status": "error", "error": "bad query", "warnings": {"not": "a list"}}
+    respx.get("https://loki.example.test/loki/api/v1/query_range").mock(
+        return_value=httpx.Response(400, json=payload)
+    )
+
+    response = loki_client.query_range(
+        "{job=", start_ns="0", end_ns="60000000000", direction="backward", limit=100
+    )
+
+    assert response.warnings == []
+
+
 # ---------------------------------------------------------------------------
 # Request shape: query params
 # ---------------------------------------------------------------------------
