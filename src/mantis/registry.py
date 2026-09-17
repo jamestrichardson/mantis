@@ -55,6 +55,20 @@ class Tool:
         description: Short human-readable description, primarily for
             documentation/introspection (the model-facing description
             lives in ``schema``).
+        contains_untrusted_text: True if this tool's output may contain
+            arbitrary external text the runtime does not control (AWX
+            stdout, a future Loki log line, Git commit/file content, a
+            Kubernetes event message, ...) — as opposed to output Mantis
+            itself fully constructs (e.g. a small fixed status object).
+            Defaults to ``True``: external operational evidence should
+            default safely, and every tool implemented so far genuinely
+            is external evidence. ``AgentRuntime`` passes this straight
+            through to ``mantis.security.make_model_safe`` for every
+            successful call, which marks the result as untrusted
+            evidence for the model accordingly — see
+            ``docs/security.md``. This does not gate whether a result is
+            redacted/bounded (that always happens); it only controls
+            whether the explicit "untrusted evidence" marker is added.
     """
 
     name: str
@@ -63,6 +77,7 @@ class Tool:
     category: str = "general"
     mutating: bool = False
     description: str = ""
+    contains_untrusted_text: bool = True
 
 
 class ToolRegistry:

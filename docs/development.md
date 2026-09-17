@@ -86,6 +86,7 @@ src/mantis/
 ├── contracts.py               # shared tool-result contract (QueryMeta, ToolError)
 ├── registry.py                # ToolRegistry, Tool, default_registry
 ├── runtime.py                 # AgentRuntime: shared model/tool loop
+├── security.py                # untrusted tool-output trust boundary — see docs/security.md
 ├── cli.py                     # `mantis <agent-name> [prompt]` dispatcher
 ├── integrations/
 │   └── awx.py                 # AWXClient: raw AWX API access
@@ -105,7 +106,7 @@ src/mantis/
     ├── results.py             # EvalResult, ToolCallSummary
     ├── cli.py                 # `mantis eval run|list-scenarios|list-models`
     └── fixtures/
-        └── awx.py             # FixtureAWXClient + six golden AWX scenarios
+        └── awx.py             # FixtureAWXClient + seven golden AWX scenarios
 ```
 
 See [docs/evaluation.md](evaluation.md) for the evaluation harness itself

@@ -24,22 +24,14 @@ import uuid
 from datetime import datetime, timezone
 from typing import Any
 
+from mantis.security import is_sensitive_key
+
 DEFAULT_LEVEL = "INFO"
 MAX_LOGGED_VALUE_CHARS = 2000
 """Cap on a single bounded field's serialized size (see :func:`bound_for_log`).
 Deliberately much smaller than tool output bounds like
 ``mantis.tools._text.STDOUT_TAIL_CHARS`` — a log line represents one
 event among many, not the primary evidence surface an agent reads."""
-
-_SENSITIVE_KEY_MARKERS = (
-    "token",
-    "password",
-    "secret",
-    "api_key",
-    "apikey",
-    "authorization",
-    "credential",
-)
 
 # Captured once, from a real LogRecord, so this always matches whatever
 # attributes *this* Python version's logging module reserves (e.g. the
@@ -59,18 +51,18 @@ def new_run_id() -> str:
     return uuid.uuid4().hex
 
 
-def _is_sensitive_key(key: str) -> bool:
-    lowered = key.lower()
-    return any(marker in lowered for marker in _SENSITIVE_KEY_MARKERS)
-
-
 def _redact(value: Any, _seen: frozenset[int] = frozenset()) -> Any:
+    # Shares only this lowest-level "does this key name look like a
+    # credential" primitive with mantis.security — the two modules
+    # otherwise have separate policies (telemetry vs. model input). See
+    # mantis.security's module docstring.
     if isinstance(value, (dict, list)) and id(value) in _seen:
         return "<circular reference>"
     if isinstance(value, dict):
         seen = _seen | {id(value)}
         return {
-            k: ("***" if _is_sensitive_key(k) else _redact(v, seen)) for k, v in value.items()
+            k: ("***" if isinstance(k, str) and is_sensitive_key(k) else _redact(v, seen))
+            for k, v in value.items()
         }
     if isinstance(value, list):
         seen = _seen | {id(value)}

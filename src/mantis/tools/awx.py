@@ -208,6 +208,11 @@ default_registry.register(
         handler=awx_recent_failed_jobs,
         category="awx",
         mutating=False,
+        # Explicit even though it's also Tool's default: stdout/job-event
+        # text is external, Mantis-uncontrolled evidence and must be
+        # treated as untrusted by the runtime's model-input safety
+        # pipeline — see mantis.security and docs/security.md.
+        contains_untrusted_text=True,
         description=(
             "List the most recently finished failed AWX jobs with "
             "preprocessed stdout evidence."

@@ -94,3 +94,16 @@ def test_mutating_defaults_to_false():
     tool = _make_tool("ping")
 
     assert tool.mutating is False
+
+
+def test_tool_contains_untrusted_text_defaults_to_true():
+    # External operational evidence should default safely — see
+    # mantis.security and docs/security.md. A tool author has to opt
+    # *out* explicitly, not opt in.
+    tool = _make_tool("ping")
+    assert tool.contains_untrusted_text is True
+
+
+def test_tool_contains_untrusted_text_can_be_declared_false():
+    tool = _make_tool("ping", contains_untrusted_text=False)
+    assert tool.contains_untrusted_text is False
