@@ -12,3 +12,4 @@ Importing this package registers every built-in scenario into
 """
 
 from mantis.eval.fixtures import awx as _awx  # noqa: F401  (registers scenarios)
+from mantis.eval.fixtures import network as _network  # noqa: F401  (registers scenarios)
