@@ -37,17 +37,24 @@ from __future__ import annotations
 
 import json
 import logging
+import time
 from dataclasses import dataclass, field
 from typing import Any
 
 from openai import OpenAI
 
 from mantis.config import LiteLLMConfig
+from mantis.observability import metrics
+from mantis.observability.logging import bound_for_log, log_event, new_run_id
 from mantis.registry import Tool, ToolRegistry, default_registry
 
 logger = logging.getLogger(__name__)
 
 DEFAULT_MAX_ITERATIONS = 8
+
+_NO_RESULT = object()
+"""Sentinel distinguishing "no result to log" from a tool genuinely
+returning ``None`` as its result."""
 
 
 class RuntimeError_(RuntimeError):
@@ -197,6 +204,10 @@ class AgentRuntime:
         # to avoid bloating every successful run with a redundant dump of
         # data already in the returned answer.
         self.diagnostic_raw_message: dict[str, Any] | None = None
+        # The run_id generated for the most recent run() call — exposed so
+        # a caller wrapping this runtime (e.g. mantis.eval.runner) can
+        # attach the same correlation ID to its own events for that run.
+        self.last_run_id: str | None = None
 
     def _tool_schemas(self) -> list[dict[str, Any]]:
         return [dict(tool.schema) for tool in self._resolved_tools.values()]
@@ -204,7 +215,64 @@ class AgentRuntime:
     def run(self, user_prompt: str) -> str:
         """Run the agent loop for a single user prompt and return the
         model's final textual answer.
+
+        Emits ``mantis_run_started``/``mantis_run_completed``/
+        ``mantis_run_failed`` structured events and records
+        ``mantis_runs_total``/``mantis_run_duration_seconds`` under a
+        fresh ``run_id`` (see :attr:`last_run_id`) — on failure, the
+        event/metric are recorded and the exception still propagates
+        unchanged; observability here never changes control flow.
         """
+        run_id = new_run_id()
+        self.last_run_id = run_id
+        model_alias = self.model_config.model
+        env = metrics.environment()
+
+        log_event(logger, "mantis_run_started", run_id=run_id, agent=self.name, model_alias=model_alias)
+        run_start = time.perf_counter()
+        try:
+            final_answer = self._run_loop(user_prompt, run_id=run_id)
+        except Exception as exc:
+            duration = time.perf_counter() - run_start
+            outcome = "max_iterations" if isinstance(exc, MaxIterationsExceededError) else "error"
+            log_event(
+                logger,
+                "mantis_run_failed",
+                level=logging.WARNING,
+                run_id=run_id,
+                agent=self.name,
+                model_alias=model_alias,
+                duration_seconds=duration,
+                outcome=outcome,
+                error_kind=type(exc).__name__,
+            )
+            metrics.RUNS_TOTAL.labels(
+                agent=self.name, model_alias=model_alias, result=outcome, environment=env
+            ).inc()
+            metrics.RUN_DURATION_SECONDS.labels(
+                agent=self.name, model_alias=model_alias, result=outcome, environment=env
+            ).observe(duration)
+            raise
+
+        duration = time.perf_counter() - run_start
+        log_event(
+            logger,
+            "mantis_run_completed",
+            run_id=run_id,
+            agent=self.name,
+            model_alias=model_alias,
+            duration_seconds=duration,
+            outcome="ok",
+        )
+        metrics.RUNS_TOTAL.labels(
+            agent=self.name, model_alias=model_alias, result="ok", environment=env
+        ).inc()
+        metrics.RUN_DURATION_SECONDS.labels(
+            agent=self.name, model_alias=model_alias, result="ok", environment=env
+        ).observe(duration)
+        return final_answer
+
+    def _run_loop(self, user_prompt: str, *, run_id: str) -> str:
         messages: list[dict[str, Any]] = [
             {"role": "system", "content": self.system_prompt},
             {"role": "user", "content": user_prompt},
@@ -249,8 +317,37 @@ class AgentRuntime:
             if self.temperature is not None:
                 kwargs["temperature"] = self.temperature
 
+            model_alias = self.model_config.model
+            env = metrics.environment()
+            model_call_start = time.perf_counter()
             response = self._client.chat.completions.create(**kwargs)
-            self.usage_log.append(_usage_to_dict(getattr(response, "usage", None)))
+            model_call_duration = time.perf_counter() - model_call_start
+
+            usage = _usage_to_dict(getattr(response, "usage", None))
+            self.usage_log.append(usage)
+            total_tokens = usage.get("total_tokens") if usage else None
+
+            log_event(
+                logger,
+                "mantis_model_call",
+                run_id=run_id,
+                agent=self.name,
+                model_alias=model_alias,
+                iteration=iteration,
+                duration_seconds=model_call_duration,
+                tokens=total_tokens,
+            )
+            metrics.MODEL_CALLS_TOTAL.labels(
+                agent=self.name, model_alias=model_alias, environment=env
+            ).inc()
+            metrics.MODEL_CALL_DURATION_SECONDS.labels(
+                agent=self.name, model_alias=model_alias, environment=env
+            ).observe(model_call_duration)
+            if total_tokens is not None:
+                metrics.MODEL_TOKENS_TOTAL.labels(
+                    agent=self.name, model_alias=model_alias, environment=env
+                ).inc(total_tokens)
+
             choice = response.choices[0]
             message = choice.message
 
@@ -295,7 +392,10 @@ class AgentRuntime:
 
             for tool_call in tool_calls:
                 result_text, fresh_success = self._dispatch_tool_call(
-                    tool_call, iteration=iteration, tool_result_cache=tool_result_cache
+                    tool_call,
+                    iteration=iteration,
+                    run_id=run_id,
+                    tool_result_cache=tool_result_cache,
                 )
                 if fresh_success:
                     successful_tool_calls += 1
@@ -317,6 +417,7 @@ class AgentRuntime:
         tool_call: Any,
         *,
         iteration: int,
+        run_id: str,
         tool_result_cache: dict[tuple[str, str], Any],
     ) -> tuple[str, bool]:
         """Execute (or replay/reject) one tool call.
@@ -325,9 +426,50 @@ class AgentRuntime:
         is True only when this call newly executed a tool's handler
         successfully (not on a cache replay, error, or rejection), which is
         what counts against ``tool_call_budget``.
+
+        Emits one ``mantis_tool_call`` event and records
+        ``mantis_tool_calls_total`` (plus, for an executed call,
+        ``mantis_tool_call_duration_seconds`` and — on failure —
+        ``mantis_tool_errors_total``) for every outcome, including
+        rejections that never reach a tool handler.
         """
         tool_name = tool_call.function.name
         raw_arguments = tool_call.function.arguments or "{}"
+        env = metrics.environment()
+
+        def emit(
+            outcome: str,
+            *,
+            arguments: dict[str, Any] | None = None,
+            result: Any = _NO_RESULT,
+            duration: float | None = None,
+            error_kind: str | None = None,
+        ) -> None:
+            log_event(
+                logger,
+                "mantis_tool_call",
+                level=logging.WARNING if outcome in ("bad_arguments", "unknown_tool", "error") else logging.INFO,
+                run_id=run_id,
+                agent=self.name,
+                iteration=iteration,
+                tool=tool_name,
+                outcome=outcome,
+                duration_seconds=duration,
+                error_kind=error_kind,
+                bound_arguments=bound_for_log(arguments) if arguments is not None else None,
+                bound_result=bound_for_log(result) if result is not _NO_RESULT else None,
+            )
+            metrics.TOOL_CALLS_TOTAL.labels(
+                agent=self.name, tool=tool_name, result=outcome, environment=env
+            ).inc()
+            if duration is not None:
+                metrics.TOOL_CALL_DURATION_SECONDS.labels(
+                    agent=self.name, tool=tool_name, environment=env
+                ).observe(duration)
+            if error_kind is not None:
+                metrics.TOOL_ERRORS_TOTAL.labels(
+                    agent=self.name, tool=tool_name, error_kind=error_kind, environment=env
+                ).inc()
 
         try:
             arguments = json.loads(raw_arguments)
@@ -339,6 +481,7 @@ class AgentRuntime:
             self.call_log.append(
                 ToolCallLogEntry(iteration, tool_name, None, "bad_arguments", detail)
             )
+            emit("bad_arguments")
             return json.dumps({"error": detail}), False
 
         dedupe_key = (tool_name, json.dumps(arguments, sort_keys=True))
@@ -354,6 +497,7 @@ class AgentRuntime:
                     result=tool_result_cache[dedupe_key],
                 )
             )
+            emit("duplicate", arguments=arguments, result=tool_result_cache[dedupe_key])
             # Never withhold data the model is asking for, even on a repeat
             # call — a small/local model may not attend well to a tool
             # result on the first pass and re-ask for it. Returning an error
@@ -377,23 +521,34 @@ class AgentRuntime:
             self.call_log.append(
                 ToolCallLogEntry(iteration, tool_name, arguments, "unknown_tool", detail)
             )
+            emit("unknown_tool", arguments=arguments)
             return json.dumps({"error": detail}), False
 
         tool = self._resolved_tools[tool_name]
+        handler_start = time.perf_counter()
         try:
             result = tool.handler(**arguments)
         except Exception as exc:  # noqa: BLE001 — deliberately broad: any
             # integration exception must fail cleanly back into the
             # conversation, not crash the runtime.
+            handler_duration = time.perf_counter() - handler_start
             detail = f"Tool '{tool_name}' raised an error: {exc}"
             logger.warning("[%s] %s", self.name, detail)
             self.call_log.append(
                 ToolCallLogEntry(iteration, tool_name, arguments, "error", detail)
             )
+            emit(
+                "error",
+                arguments=arguments,
+                duration=handler_duration,
+                error_kind=type(exc).__name__,
+            )
             return json.dumps({"error": detail}), False
 
+        handler_duration = time.perf_counter() - handler_start
         tool_result_cache[dedupe_key] = result
         self.call_log.append(
             ToolCallLogEntry(iteration, tool_name, arguments, "ok", result=result)
         )
+        emit("ok", arguments=arguments, result=result, duration=handler_duration)
         return json.dumps(result, default=str), True

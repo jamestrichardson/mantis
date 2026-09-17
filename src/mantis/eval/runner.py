@@ -14,7 +14,9 @@ from openai import OpenAIError
 from mantis.config import LiteLLMConfig
 from mantis.eval.results import EvalResult, ToolCallSummary
 from mantis.eval.scenarios import Scenario
-from mantis.eval.scoring import evaluate_result
+from mantis.eval.scoring import Evaluation, evaluate_result
+from mantis.observability import metrics
+from mantis.observability.logging import log_event
 from mantis.runtime import AgentRuntime, RuntimeError_
 
 logger = logging.getLogger(__name__)
@@ -132,11 +134,75 @@ def run_scenario(
         raw_message=runtime.diagnostic_raw_message,
     )
 
+    evaluation = None
     if scenario.expectations:
         evaluation = evaluate_result(scenario.expectations, result)
         result = dataclasses.replace(result, evaluation=evaluation.to_dict())
 
+    _emit_eval_observability(scenario, model_alias, result, evaluation, run_id=runtime.last_run_id)
+
     return result
+
+
+def _emit_eval_observability(
+    scenario: Scenario,
+    model_alias: str,
+    result: EvalResult,
+    evaluation: Evaluation | None,
+    *,
+    run_id: str | None,
+) -> None:
+    """Emit ``mantis_eval_result``/``mantis_eval_check`` events and record
+    ``mantis_eval_*`` metrics — onto the *same* registry/event schema
+    ``AgentRuntime`` itself uses, not a parallel eval-only implementation.
+    """
+    env = metrics.environment()
+
+    if result.outcome == "error":
+        eval_outcome = "error"
+    elif evaluation is not None:
+        eval_outcome = "pass" if evaluation.passed else "fail"
+    else:
+        eval_outcome = "unscored"
+
+    log_event(
+        logger,
+        "mantis_eval_result",
+        run_id=run_id,
+        scenario=scenario.name,
+        model_alias=model_alias,
+        outcome=eval_outcome,
+        duration_seconds=result.elapsed_seconds,
+        score=evaluation.score if evaluation is not None else None,
+        max_score=evaluation.max_score if evaluation is not None else None,
+    )
+    metrics.EVAL_RUNS_TOTAL.labels(
+        scenario=scenario.name, model_alias=model_alias, result=eval_outcome, environment=env
+    ).inc()
+
+    if evaluation is None:
+        return
+
+    metrics.EVAL_SCORE_RATIO.labels(
+        scenario=scenario.name, model_alias=model_alias, environment=env
+    ).observe(evaluation.score / evaluation.max_score)
+    if evaluation.hard_failures:
+        metrics.EVAL_HARD_FAILURES_TOTAL.labels(
+            scenario=scenario.name, model_alias=model_alias, environment=env
+        ).inc(len(evaluation.hard_failures))
+
+    for check in evaluation.checks:
+        log_event(
+            logger,
+            "mantis_eval_check",
+            run_id=run_id,
+            scenario=scenario.name,
+            model_alias=model_alias,
+            check_name=check.name,
+            outcome="pass" if check.passed else "fail",
+            hard=check.hard,
+            detail=check.detail,
+        )
 
 
 def run_comparison(

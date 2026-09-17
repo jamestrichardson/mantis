@@ -94,6 +94,9 @@ src/mantis/
 │   └── awx.py                 # awx_recent_failed_jobs (semantic tool)
 ├── agents/
 │   └── awx_troubleshooter.py  # AWX Troubleshooting Agent
+├── observability/              # structured logs + Prometheus metrics — see docs/observability.md
+│   ├── logging.py             # JSONFormatter, log_event(), bound_for_log(), configure_logging()
+│   └── metrics.py             # shared CollectorRegistry, metric definitions, start_metrics_server()
 └── eval/                      # evaluation harness — see docs/evaluation.md
     ├── scenarios.py           # Scenario, ScenarioRegistry
     ├── expectations.py        # deterministic check vocabulary (RequiredToolCall, ...)
@@ -106,7 +109,9 @@ src/mantis/
 ```
 
 See [docs/evaluation.md](evaluation.md) for the evaluation harness itself
-(running scenarios, adding a new one, the result format).
+(running scenarios, adding a new one, the result format), and
+[docs/observability.md](observability.md) for the structured log event
+schema and Prometheus metrics catalog.
 
 ## Adding an integration
 
