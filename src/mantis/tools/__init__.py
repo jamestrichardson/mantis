@@ -11,3 +11,4 @@ Importing a tool module registers its tools as a side effect, via
 
 from mantis.tools import awx as _awx  # noqa: F401  (registers AWX tools)
 from mantis.tools import network as _network  # noqa: F401  (registers network tools)
+from mantis.tools import prometheus as _prometheus  # noqa: F401  (registers Prometheus tools)

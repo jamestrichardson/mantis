@@ -149,10 +149,12 @@ cheap:
   [docs/awx-job-failure.md](awx-job-failure.md)) + `check_tcp_connectivity`
   (already implemented, #8, see
   [docs/network-tcp-connectivity.md](network-tcp-connectivity.md)) +
-  `prometheus_query` + `loki_query`, with a higher `tool_call_budget`
-  than the AWX Troubleshooter's `1` to actually chain a list-then-deep-dive
-  investigation correlating historical AWX evidence with current network
-  state. Broader operational diagnosis than AWX alone.
+  `prometheus_query`/`prometheus_query_range` (already implemented, #9,
+  see [docs/prometheus.md](prometheus.md)) + `loki_query`, with a higher
+  `tool_call_budget` than the AWX Troubleshooter's `1` to actually chain
+  a list-then-deep-dive investigation correlating historical AWX
+  evidence, monitored time-series state, and current network state.
+  Broader operational diagnosis than AWX alone.
 - **Incident Triage Agent** — adds Kubernetes and git/change-history
   tools to correlate a live incident against recent changes.
 - **Daily Operations Digest Agent** — a scheduled, read-only agent that

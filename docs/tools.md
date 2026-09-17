@@ -275,3 +275,19 @@ posture, and how it correlates with #28's historical AWX evidence in an
 evaluation scenario). DNS/socket mechanics live in
 `mantis/integrations/network.py`; semantic shaping in
 `mantis/tools/network.py`.
+
+## Prometheus tool behavior
+
+### `prometheus_query` / `prometheus_query_range` (#9): time-series evidence
+
+`prometheus_query(query, time=None)` and
+`prometheus_query_range(query, start, end, step)` are Mantis's first
+time-series evidence tools — bounded, deterministically ordered
+PromQL evidence answering "what did monitored state do (at an instant,
+or over a window)?", distinct from #28's historical AWX evidence and
+#8's current-state TCP evidence. See [docs/prometheus.md](prometheus.md)
+for the full design (PromQL/time/range validation, cardinality/sample
+bounding, truncation correctness, deterministic ordering, query errors
+vs. retrieval failures, and `up` metric semantics). HTTP/auth/reliability
+mechanics live in `mantis/integrations/prometheus.py`; semantic
+shaping in `mantis/tools/prometheus.py`.

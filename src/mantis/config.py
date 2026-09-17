@@ -199,6 +199,42 @@ class AWXConfig:
 
 
 @dataclass(frozen=True)
+class PrometheusConfig:
+    """Connection settings for Prometheus (#9).
+
+    Authentication is optional: an unauthenticated Prometheus endpoint
+    works with no further configuration. When both a bearer token and
+    basic auth credentials are set, the bearer token takes priority
+    (mirrors the more common Prometheus deployment pattern of a reverse
+    proxy adding one or the other, not both). ``verify_ssl`` defaults to
+    ``True`` — disabling TLS verification is possible (for a local/dev
+    endpoint with a self-signed certificate) but must be opted into
+    explicitly via ``MANTIS_PROMETHEUS_VERIFY_SSL=false``; doing so
+    removes protection against a machine-in-the-middle intercepting or
+    tampering with monitoring data in transit.
+    """
+
+    url: str
+    bearer_token: Secret | None = None
+    basic_auth_username: str | None = None
+    basic_auth_password: Secret | None = None
+    verify_ssl: bool = True
+
+    @classmethod
+    def from_env(cls) -> "PrometheusConfig":
+        bearer_token = os.environ.get("MANTIS_PROMETHEUS_BEARER_TOKEN")
+        basic_auth_username = os.environ.get("MANTIS_PROMETHEUS_BASIC_AUTH_USERNAME")
+        basic_auth_password = os.environ.get("MANTIS_PROMETHEUS_BASIC_AUTH_PASSWORD")
+        return cls(
+            url=_require("MANTIS_PROMETHEUS_URL").rstrip("/"),
+            bearer_token=Secret(bearer_token) if bearer_token else None,
+            basic_auth_username=basic_auth_username or None,
+            basic_auth_password=Secret(basic_auth_password) if basic_auth_password else None,
+            verify_ssl=_getenv_bool("MANTIS_PROMETHEUS_VERIFY_SSL", True),
+        )
+
+
+@dataclass(frozen=True)
 class ReliabilityConfig:
     """The shared reliability contract's configurable knobs (see
     ``mantis.reliability`` and ``docs/reliability.md``) — one shared
