@@ -139,6 +139,15 @@ any other tool result, not through the runtime's generic last-resort
 exception path (which skips that pipeline). No HTTP request is made
 when validation fails.
 
+The rejected query and the validation message are themselves bounded
+before being echoed back (`_invalid_input_result()`, reusing
+`MAX_PROMQL_CHARS`/`MAX_WARNING_CHARS`), and `meta.truncated` is set
+when either was shortened. Otherwise a query rejected specifically
+*for being too long* would be echoed back at full, unbounded length —
+exactly contradicting the point of rejecting it. Semantic-tool bounds
+are meant to be the primary control here, with #14's global ceiling
+only a final backstop.
+
 ## Range-query bounding
 
 | Constant | Default | Purpose |
@@ -165,6 +174,7 @@ bound is a named constant in `mantis.tools.prometheus`:
 | `MAX_LABELS_PER_SERIES` | 20 | Labels preserved per series. |
 | `MAX_LABEL_KEY_CHARS` | 128 | Per label key. |
 | `MAX_LABEL_VALUE_CHARS` | 256 | Per label value. |
+| `MAX_SAMPLE_VALUE_CHARS` | 256 | Per sample `value` string (vector/matrix/scalar/string) — Prometheus's `string` result type can legitimately be large, and malformed/proxy-controlled data could smuggle a huge value through any sample otherwise. |
 | `MAX_WARNING_CHARS` | 500 | Per Prometheus warning string. |
 | `MAX_WARNINGS_RETURNED` | 20 | Number of warning strings — separate from `MAX_WARNING_CHARS`, which only bounds each string's length. |
 
@@ -191,17 +201,20 @@ actually kept after bounding:
 - One more than that → `truncated = true`.
 
 This also covers **shortening**, not just dropping: a label key or
-value, or a warning string, that gets cut down to its character limit
-is evidence being reduced just as much as an omitted series — so
-`_bounded_labels()`/`_bound_warnings()` set the truncation flag on that
-basis too, not only on count. The same applies to malformed entries
-dropped during normalization (see "Malformed data" below) — any of
-these reduce the returned count/content below what Prometheus actually
-reported, which is exactly what `truncated` tracks. See
+value, a sample `value` string, a warning string, or a query error's
+`type`/`message`, that gets cut down to its character limit is evidence
+being reduced just as much as an omitted series — so
+`_bounded_labels()`/`_normalize_sample()`/`_bound_warnings()`/the
+query-error branch in `_shape_result()` all set the truncation flag on
+that basis too, not only on count. The same applies to malformed
+entries dropped during normalization (see "Malformed data" below) and
+to a rejected invalid input's own echoed query/message (see "PromQL
+validation" above) — any of these reduce or shorten what would
+otherwise be shown, which is exactly what `truncated` tracks. See
 `mantis.tools.prometheus._normalize_vector`/`_normalize_matrix`/
-`_bounded_labels`/`_bound_warnings` and `tests/test_prometheus_tools.py`'s
-exact-cap-vs-over-cap and oversized-key/value tests for the direct
-proof.
+`_bounded_labels`/`_bound_warnings`/`_normalize_sample` and
+`tests/test_prometheus_tools.py`'s exact-cap-vs-over-cap and
+oversized-value tests for the direct proof.
 
 ### Deterministic ordering
 
@@ -216,12 +229,13 @@ series preserve Prometheus's own chronological order.
 
 ### Malformed data
 
-A structurally invalid sample (wrong shape, non-numeric timestamp) is
-skipped rather than crashing the whole query — see
-`mantis.tools.prometheus._normalize_sample`. A dropped sample or series
-counts toward `truncated` the same as a capped one (see above): either
-way, the returned evidence is incomplete relative to what Prometheus
-reported.
+A structurally invalid sample (wrong shape, non-numeric timestamp, or a
+timestamp so pathologically large that formatting it as a date would
+raise `OverflowError`/`OSError`) is skipped rather than crashing the
+whole query — see `mantis.tools.prometheus._normalize_sample`. A
+dropped sample or series counts toward `truncated` the same as a capped
+one (see above): either way, the returned evidence is incomplete
+relative to what Prometheus reported.
 
 ## Result shape
 
@@ -278,7 +292,10 @@ against a mocked HTTP response with the shape above.)
 - **`value` is always a string, never coerced to `float`.** Prometheus
   can legitimately report `"NaN"`, `"+Inf"`, `"-Inf"` — converting those
   to Python floats either loses that information or requires
-  reinventing it; the raw string representation is simply safer.
+  reinventing it; the raw string representation is simply safer. It is
+  still bounded to `MAX_SAMPLE_VALUE_CHARS`, though — Prometheus's
+  `string` result type can legitimately be large, and this bound (not
+  #14's global backstop) is the primary control for that.
 
 ### `observation_time`
 

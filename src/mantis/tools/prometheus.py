@@ -68,6 +68,13 @@ MAX_WARNING_CHARS = 500
 """Bounds on individual label keys/values and Prometheus warning
 strings — never a raw, unbounded string reaching the model."""
 
+MAX_SAMPLE_VALUE_CHARS = 256
+"""Bound on a single sample's ``value`` string. Prometheus numeric
+samples are always small, but the API also supports arbitrarily large
+``string`` results and malformed/proxy-controlled responses could smuggle
+a huge value through a vector/matrix/scalar sample otherwise — this
+bound is the primary control, not #14's global backstop."""
+
 MAX_WARNINGS_RETURNED = 20
 """Cap on the *number* of Prometheus warning strings returned, separate
 from :data:`MAX_WARNING_CHARS` (which only bounds each string's
@@ -245,23 +252,36 @@ def _bounded_labels(metric: dict[str, Any]) -> tuple[dict[str, str], bool]:
     return bounded, labels_truncated
 
 
-def _normalize_sample(raw_sample: Any) -> dict[str, Any] | None:
+def _normalize_sample(raw_sample: Any) -> tuple[dict[str, Any] | None, bool]:
     """Normalize one Prometheus ``[timestamp, value]`` pair. Returns
-    ``None`` if malformed (missing/wrong-shaped) rather than raising —
-    malformed sample data is handled safely, not fatally (#9 item 21).
+    ``(normalized_sample_or_none, value_was_truncated)`` — ``None`` for
+    the sample if malformed (missing/wrong-shaped, or a timestamp so
+    pathological it can't be formatted) rather than raising — malformed
+    sample data is handled safely, not fatally (#9 item 21).
 
     ``value`` is preserved exactly as Prometheus's own string
     representation (never coerced to ``float``) — Prometheus can
     legitimately report ``"NaN"``/``"+Inf"``/``"-Inf"``, and converting
     those to Python floats either loses that information or requires
-    reinventing it later; the raw string is simply safer.
+    reinventing it later; the raw string is simply safer. It is bounded
+    to :data:`MAX_SAMPLE_VALUE_CHARS` regardless — Prometheus's
+    ``string`` result type can legitimately be large, and this bound
+    (not #14's global backstop) is the primary control for that.
     """
     try:
         raw_timestamp, raw_value = raw_sample
-        timestamp = _format_timestamp(float(raw_timestamp))
-    except (TypeError, ValueError):
-        return None
-    return {"timestamp": timestamp, "value": str(raw_value)}
+        timestamp_float = float(raw_timestamp)
+        if not math.isfinite(timestamp_float):
+            return None, False
+        timestamp = _format_timestamp(timestamp_float)
+    except (TypeError, ValueError, OverflowError, OSError):
+        # OverflowError/OSError: datetime.fromtimestamp() can raise
+        # either depending on platform for a pathological but
+        # technically-finite value (e.g. 1e300) — treated the same as
+        # any other malformed sample, not a crash.
+        return None, False
+    value, value_truncated = _bounded_str_with_flag(raw_value, MAX_SAMPLE_VALUE_CHARS)
+    return {"timestamp": timestamp, "value": value}, value_truncated
 
 
 def _normalize_vector(raw_result: list[Any]) -> tuple[list[dict[str, Any]], bool]:
@@ -284,8 +304,8 @@ def _normalize_vector(raw_result: list[Any]) -> tuple[list[dict[str, Any]], bool
     any_label_truncation = False
     for entry in entries[:MAX_SERIES_RETURNED]:
         metric, labels_truncated = _bounded_labels(entry.get("metric") or {})
-        any_label_truncation = any_label_truncation or labels_truncated
-        sample = _normalize_sample(entry.get("value"))
+        sample, value_truncated = _normalize_sample(entry.get("value"))
+        any_label_truncation = any_label_truncation or labels_truncated or value_truncated
         if sample is None:
             continue
         series.append({"metric": metric, "sample": sample})
@@ -317,13 +337,15 @@ def _normalize_matrix(raw_result: list[Any]) -> tuple[list[dict[str, Any]], bool
         this_series_cap = min(MAX_SAMPLES_PER_SERIES, remaining_global_budget)
 
         samples: list[dict[str, Any]] = []
+        any_value_truncation = False
         for raw_sample in raw_values[:this_series_cap]:
-            normalized = _normalize_sample(raw_sample)
+            normalized, value_truncated = _normalize_sample(raw_sample)
+            any_value_truncation = any_value_truncation or value_truncated
             if normalized is not None:
                 samples.append(normalized)
         total_samples_used += len(samples)
 
-        if labels_truncated or raw_sample_count > len(samples):
+        if labels_truncated or any_value_truncation or raw_sample_count > len(samples):
             any_truncation = True
 
         series.append({"metric": metric, "samples": samples})
@@ -339,8 +361,26 @@ def _get_client() -> PrometheusClient:
 def _invalid_input_result(
     *, mode: str, promql: Any, exc: Exception, extra_query_fields: dict[str, Any] | None = None
 ) -> dict[str, Any]:
-    meta = QueryMeta(source_system="prometheus", derived_fields=list(DERIVED_RESULT_FIELDS))
-    query_section: dict[str, Any] = {"promql": promql, "mode": mode}
+    """Build the result for a Mantis-side validation rejection.
+
+    The rejected ``promql`` (which is exactly what a query too long or
+    otherwise invalid would be) and the validation exception's own
+    message (which can itself embed the invalid input, e.g.
+    ``_parse_time_input``'s ``"time value must be ... got {value!r}"``)
+    are both bounded here rather than echoed raw — semantic-tool bounds
+    are meant to be the primary control, with #14's global ceiling only
+    a final backstop; returning an already-rejected-for-being-too-long
+    query unbounded would defeat that for exactly the case this
+    function handles.
+    """
+    bounded_promql, promql_truncated = _bounded_str_with_flag(promql, MAX_PROMQL_CHARS)
+    bounded_message, message_truncated = _bounded_str_with_flag(str(exc), MAX_WARNING_CHARS)
+    meta = QueryMeta(
+        source_system="prometheus",
+        truncated=promql_truncated or message_truncated,
+        derived_fields=list(DERIVED_RESULT_FIELDS),
+    )
+    query_section: dict[str, Any] = {"promql": bounded_promql, "mode": mode}
     if extra_query_fields:
         query_section.update(extra_query_fields)
     return {
@@ -350,7 +390,7 @@ def _invalid_input_result(
         "series": [],
         "value": None,
         "warnings": [],
-        "query_error": {"type": "invalid_input", "message": str(exc)},
+        "query_error": {"type": "invalid_input", "message": bounded_message},
     }
 
 
@@ -373,9 +413,15 @@ def _shape_result(response: PrometheusAPIResponse, *, query_section: dict[str, A
     warnings, warnings_truncated = _bound_warnings(response.warnings)
 
     if response.status == "error":
+        error_type, error_type_truncated = _bounded_str_with_flag(
+            response.error_type or "unknown", MAX_LABEL_KEY_CHARS
+        )
+        error_message, error_message_truncated = _bounded_str_with_flag(
+            response.error or "", MAX_WARNING_CHARS
+        )
         meta = QueryMeta(
             source_system="prometheus",
-            truncated=warnings_truncated,
+            truncated=warnings_truncated or error_type_truncated or error_message_truncated,
             derived_fields=list(DERIVED_RESULT_FIELDS),
         )
         return {
@@ -385,10 +431,7 @@ def _shape_result(response: PrometheusAPIResponse, *, query_section: dict[str, A
             "series": [],
             "value": None,
             "warnings": warnings,
-            "query_error": {
-                "type": _bounded_str(response.error_type or "unknown", MAX_LABEL_KEY_CHARS),
-                "message": _bounded_str(response.error or "", MAX_WARNING_CHARS),
-            },
+            "query_error": {"type": error_type, "message": error_message},
         }
 
     result_type = response.result_type
@@ -404,7 +447,8 @@ def _shape_result(response: PrometheusAPIResponse, *, query_section: dict[str, A
         series, series_truncated = _normalize_matrix(response.result or [])
         truncated = truncated or series_truncated
     elif result_type in ("scalar", "string"):
-        value = _normalize_sample(response.result)
+        value, value_truncated = _normalize_sample(response.result)
+        truncated = truncated or value_truncated
         if value is not None:
             observation_time = value["timestamp"]
     # Any other result_type is unexpected per Prometheus's own API

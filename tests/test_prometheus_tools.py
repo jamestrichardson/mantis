@@ -24,6 +24,7 @@ from mantis.tools.prometheus import (
     MAX_LABELS_PER_SERIES,
     MAX_PROMQL_CHARS,
     MAX_RANGE_SECONDS,
+    MAX_SAMPLE_VALUE_CHARS,
     MAX_SAMPLES_PER_SERIES,
     MAX_SERIES_RETURNED,
     MAX_TOTAL_SAMPLES,
@@ -247,6 +248,41 @@ def test_promql_validation_failure_makes_zero_http_calls(prom_client):
     assert result["query_error"]["type"] == "invalid_input"
 
 
+def test_invalid_input_echoes_a_bounded_query_not_the_raw_oversized_one(prom_client):
+    # Regression test (PR #76 review): a query rejected for being too
+    # long must not be echoed back unbounded in the result -- semantic-
+    # tool bounds are the primary control, #14's global ceiling is only
+    # a final backstop, and this specific path would otherwise defeat
+    # that for exactly the query it just rejected.
+    huge_query = "x" * (MAX_PROMQL_CHARS * 5)
+
+    result = prometheus_query(huge_query, _client=prom_client)
+
+    assert result["query_error"]["type"] == "invalid_input"
+    assert len(result["query"]["promql"]) <= MAX_PROMQL_CHARS + len("...")
+    assert result["meta"]["truncated"] is True
+
+
+def test_invalid_input_bounds_the_validation_message_too(prom_client):
+    # _parse_time_input's own exception message embeds the invalid
+    # value verbatim (via {value!r}) -- a huge invalid time string must
+    # not reach the model unbounded through that path either.
+    huge_time_value = "x" * 5000
+
+    result = prometheus_query("up", time=huge_time_value, _client=prom_client)
+
+    assert result["query_error"]["type"] == "invalid_input"
+    assert len(result["query_error"]["message"]) <= MAX_WARNING_CHARS + len("...")
+    assert result["meta"]["truncated"] is True
+
+
+def test_invalid_input_within_bounds_does_not_mark_truncated(prom_client):
+    result = prometheus_query("", _client=prom_client)
+
+    assert result["query_error"]["type"] == "invalid_input"
+    assert result["meta"]["truncated"] is False
+
+
 # ---------------------------------------------------------------------------
 # Instant query result shaping
 # ---------------------------------------------------------------------------
@@ -349,6 +385,95 @@ def test_string_result_shape(prom_client):
 
     assert result["result_type"] == "string"
     assert result["value"]["value"] == "hello"
+
+
+@respx.mock
+def test_oversized_string_result_value_is_bounded(prom_client):
+    # Regression test (PR #76 review): Prometheus's "string" result type
+    # can legitimately be large -- this must be bounded by a named
+    # constant, not left to #14's global backstop.
+    huge_value = "s" * 5000
+    respx.get("https://prom.example.test/api/v1/query").mock(
+        return_value=httpx.Response(200, json=_success("string", [1700000000.0, huge_value]))
+    )
+
+    result = prometheus_query('"..."', _client=prom_client)
+
+    assert len(result["value"]["value"]) <= MAX_SAMPLE_VALUE_CHARS + len("...")
+    assert result["meta"]["truncated"] is True
+
+
+@respx.mock
+def test_oversized_scalar_result_value_is_bounded(prom_client):
+    huge_value = "1" * 5000
+    respx.get("https://prom.example.test/api/v1/query").mock(
+        return_value=httpx.Response(200, json=_success("scalar", [1700000000.0, huge_value]))
+    )
+
+    result = prometheus_query("1+1", _client=prom_client)
+
+    assert len(result["value"]["value"]) <= MAX_SAMPLE_VALUE_CHARS + len("...")
+    assert result["meta"]["truncated"] is True
+
+
+@respx.mock
+def test_scalar_value_within_bounds_does_not_mark_truncated(prom_client):
+    respx.get("https://prom.example.test/api/v1/query").mock(
+        return_value=httpx.Response(200, json=_success("scalar", [1700000000.0, "42"]))
+    )
+
+    result = prometheus_query("1+1", _client=prom_client)
+
+    assert result["meta"]["truncated"] is False
+
+
+@respx.mock
+def test_oversized_vector_sample_value_is_bounded_and_marks_truncated(prom_client):
+    huge_value = "v" * 5000
+    entry = _vector_entry("weird_metric", "a:9100", huge_value)
+    respx.get("https://prom.example.test/api/v1/query").mock(
+        return_value=httpx.Response(200, json=_success("vector", [entry]))
+    )
+
+    result = prometheus_query("weird_metric", _client=prom_client)
+
+    assert len(result["series"][0]["sample"]["value"]) <= MAX_SAMPLE_VALUE_CHARS + len("...")
+    assert result["meta"]["truncated"] is True
+
+
+@respx.mock
+def test_oversized_matrix_sample_value_is_bounded_and_marks_truncated(prom_client):
+    huge_value = "v" * 5000
+    entry = _matrix_entry("weird_metric", "a:9100", [[1700000000.0, huge_value]])
+    respx.get("https://prom.example.test/api/v1/query_range").mock(
+        return_value=httpx.Response(200, json=_success("matrix", [entry]))
+    )
+
+    result = prometheus_query_range("weird_metric", 1700000000, 1700000060, 60, _client=prom_client)
+
+    assert len(result["series"][0]["samples"][0]["value"]) <= MAX_SAMPLE_VALUE_CHARS + len("...")
+    assert result["meta"]["truncated"] is True
+
+
+@respx.mock
+def test_pathological_but_finite_timestamp_is_skipped_not_fatal(prom_client):
+    # A finite but absurd timestamp (e.g. 1e300) can make
+    # datetime.fromtimestamp() raise OverflowError/OSError depending on
+    # platform -- must be handled the same as any other malformed
+    # sample, never crash the tool.
+    entries = [
+        {"metric": {"__name__": "up", "instance": "a:9100"}, "value": [1e300, "1"]},
+        _vector_entry("up", "b:9100", "1"),
+    ]
+    respx.get("https://prom.example.test/api/v1/query").mock(
+        return_value=httpx.Response(200, json=_success("vector", entries))
+    )
+
+    result = prometheus_query("up", _client=prom_client)
+
+    assert len(result["series"]) == 1
+    assert result["series"][0]["metric"]["instance"] == "b:9100"
+    assert result["meta"]["truncated"] is True
 
 
 @respx.mock
@@ -661,6 +786,26 @@ def test_query_error_is_separate_from_retrieval_error_shape(prom_client):
     assert result["query_error"] == {"type": "bad_data", "message": "bad syntax"}
     assert result["result_type"] is None
     assert result["series"] == []
+    assert result["meta"]["truncated"] is False
+
+
+@respx.mock
+def test_oversized_query_error_message_marks_truncated(prom_client):
+    # Regression test (PR #76 review): bounding errorType/error via
+    # _bounded_str() alone silently discarded the "was this shortened"
+    # information -- a 10KB Prometheus error message could be cut to
+    # MAX_WARNING_CHARS while meta.truncated still said false.
+    huge_message = "e" * 5000
+    respx.get("https://prom.example.test/api/v1/query").mock(
+        return_value=httpx.Response(
+            400, json={"status": "error", "errorType": "bad_data", "error": huge_message}
+        )
+    )
+
+    result = prometheus_query("up{", _client=prom_client)
+
+    assert len(result["query_error"]["message"]) <= MAX_WARNING_CHARS + len("...")
+    assert result["meta"]["truncated"] is True
 
 
 @respx.mock
