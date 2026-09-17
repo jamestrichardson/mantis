@@ -70,13 +70,31 @@ as the basis for a differently-named environment (e.g. `cp .env.example
 | `AWX_TOKEN`      | yes      | —       | AWX API token. Use a read-only service-account token where possible — see [docs/security.md](security.md). |
 | `AWX_VERIFY_SSL` | no       | `true`  | Whether to verify TLS certificates when talking to AWX. Accepts `true`/`false`/`1`/`0`/`yes`/`no`/`on`/`off` (case-insensitive). Only disable for local/dev testing against a self-signed endpoint. |
 
+## Prometheus
+
+See [docs/prometheus.md](prometheus.md) for the full contract: instant/
+range PromQL, result bounding, truncation semantics, and query errors
+vs. retrieval failures.
+
+| Variable | Required | Default | Description |
+|---|---|---|---|
+| `MANTIS_PROMETHEUS_URL` | yes | — | Base URL of your Prometheus server, no trailing slash required (stripped). |
+| `MANTIS_PROMETHEUS_BEARER_TOKEN` | no | — | Bearer token for `Authorization: Bearer <token>`. |
+| `MANTIS_PROMETHEUS_BASIC_AUTH_USERNAME` | no | — | HTTP Basic auth username. |
+| `MANTIS_PROMETHEUS_BASIC_AUTH_PASSWORD` | no | — | HTTP Basic auth password. |
+| `MANTIS_PROMETHEUS_VERIFY_SSL` | no | `true` | Whether to verify TLS certificates when talking to Prometheus. Only disable for local/dev testing against a self-signed endpoint. |
+
+An unauthenticated Prometheus endpoint works with none of the auth
+variables set. If both a bearer token and basic auth are configured,
+the bearer token takes priority.
+
 ## Reliability
 
 See [docs/reliability.md](reliability.md) for the full contract:
 timeouts, retries, the failure taxonomy, run/tool deadlines, and the
 run-local short circuit. All eight are `mantis.config.ReliabilityConfig`
-fields — every integration (AWX today) and `AgentRuntime` use the same
-schema and environment-variable defaults, not one set of knobs per
+fields — every HTTP integration (AWX and Prometheus today) and
+`AgentRuntime` use the same schema and environment-variable defaults, not one set of knobs per
 integration, even though each constructs its own
 `ReliabilityConfig.from_env()` instance rather than sharing one object.
 

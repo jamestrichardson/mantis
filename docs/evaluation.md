@@ -49,8 +49,9 @@ mantis.eval
 ├── expectations.py  # Deterministic check vocabulary (RequiredToolCall, ...)
 ├── scoring.py       # evaluate_result(): expectations -> Evaluation
 ├── fixtures/        # Fixture-backed Tool builders, one module per system
-│   ├── awx.py       # FixtureAWXClient(s) + eight golden AWX scenarios
-│   └── network.py   # check_tcp_connectivity fixture + two combined AWX+network scenarios
+│   ├── awx.py         # FixtureAWXClient(s) + eight golden AWX scenarios
+│   ├── network.py     # check_tcp_connectivity fixture + two combined AWX+network scenarios
+│   └── prometheus.py  # FixturePrometheusClient + two combined AWX+network+Prometheus scenarios
 ├── runner.py        # run_scenario() / run_comparison()
 ├── results.py       # EvalResult / ToolCallSummary (the result record)
 └── cli.py           # `mantis eval run|list-scenarios|list-models`
@@ -370,6 +371,23 @@ See [docs/network-tcp-connectivity.md](network-tcp-connectivity.md) for
 the full tool design and `tests/eval/test_network_scenarios.py` for the
 deterministic scoring tests.
 
+### The golden multi-signal scenarios (#9)
+
+Two live in `mantis/eval/fixtures/prometheus.py`, combining all three
+evidence sources — `awx_get_job_failure` (#28, historical),
+`prometheus_query_range` (#9, time-series), and `check_tcp_connectivity`
+(#8, current-state) — in one run, with their own dedicated system prompt
+and `tool_call_budget=3`:
+
+| Scenario | Tests |
+|---|---|
+| `multi-signal-recovery` | AWX historically observed `ferros-c01:22` as unreachable; a Prometheus range query for `up{instance="ferros-c01:9100"}` over roughly the same window shows the scrape drop to 0 and then recover; a current TCP probe now succeeds. Golden behavior: correlate the timeline across all three sources without asserting an unsupported specific cause (firewall, switch, reboot, sshd) or claiming the incident is permanently fixed (both hard checks). |
+| `multi-signal-still-down` | The inverse — AWX historically failed, Prometheus shows `up` still at 0 with no recovery, and a current TCP probe also still fails. Golden behavior: avoid unsupported causal certainty even with all three signals agreeing, and never treat a zero/missing `up` sample as proof the host itself is completely down (a hard check — see [docs/prometheus.md](prometheus.md#prometheus-up-semantics)). |
+
+See [docs/prometheus.md](prometheus.md) for the full tool design and
+`tests/eval/test_prometheus_scenarios.py` for the deterministic scoring
+tests.
+
 ### Scoring is computed once, at run time, and persisted
 
 `run_scenario` computes `evaluate_result(scenario.expectations, result)`
@@ -437,14 +455,16 @@ is deliberately not a database — see "Non-goals".
 - **No prose-quality scoring.** Conciseness, tone, "sounds like good
   troubleshooting advice" — none of it. Scoring is about correctness and
   agent behavior only; see "What is and isn't scored" above.
-- **Not every possible golden scenario.** Eight AWX scenarios plus two
-  combined AWX+network scenarios (#8) prove the execution path and
+- **Not every possible golden scenario.** Eight AWX scenarios, two
+  combined AWX+network scenarios (#8), and two combined
+  AWX+network+Prometheus scenarios (#9) prove the execution path and
   scoring both work end to end across a real spread of behaviors
   (grounding, count-acknowledgment, error-source attribution, ambiguity,
   truncation, stopping behavior, structured-event grounding,
-  historical-vs-current-state grounding); Prometheus/Loki/Git/Kubernetes
-  scenarios are follow-on work under #13, reusing this same expectation
-  vocabulary and the fixture pattern documented above.
+  historical-vs-current-state grounding, multi-signal timeline
+  correlation); Loki/Git/Kubernetes scenarios are follow-on work under
+  #13, reusing this same expectation vocabulary and the fixture pattern
+  documented above.
 - **No cross-run regression tracking / trend dashboards.** Each JSONL
   file is self-contained and comparable to others by hand; automated
   "did this get worse since last week" tooling is a later Track 1

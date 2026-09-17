@@ -1,8 +1,9 @@
 # Security
 
-Mantis operates against real infrastructure (AWX today; Prometheus, Loki,
-Kubernetes, and others planned). These principles govern how it's built,
-and are enforced architecturally, not just by convention.
+Mantis operates against real infrastructure (AWX, network/TCP, and
+Prometheus today; Loki, Kubernetes, and others planned). These
+principles govern how it's built, and are enforced architecturally, not
+just by convention.
 
 ## Least privilege
 
