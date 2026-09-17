@@ -2,9 +2,11 @@
 
 A thin, read-only agent specialized in investigating recent failed AWX
 jobs. It is defined entirely by its system prompt and its narrow allowed
-tool list (currently just ``awx_recent_failed_jobs``); all behavior comes
-from the shared :class:`mantis.runtime.AgentRuntime` and the shared
-``mantis.tools.awx`` tool implementation.
+tool list — ``awx_recent_failed_jobs`` (list recent failures) and
+``awx_get_job_failure`` (#28: structured job-event evidence for one
+already-known job id, see ``docs/awx-job-failure.md``); all behavior
+comes from the shared :class:`mantis.runtime.AgentRuntime` and the
+shared ``mantis.tools.awx`` tool implementations.
 """
 
 from __future__ import annotations
@@ -21,7 +23,7 @@ AGENT_NAME = "awx-troubleshooter"
 
 DEFAULT_PROMPT = "Show me the last 5 failed AWX jobs and summarize them."
 
-ALLOWED_TOOLS = ["awx_recent_failed_jobs"]
+ALLOWED_TOOLS = ["awx_recent_failed_jobs", "awx_get_job_failure"]
 
 SYSTEM_PROMPT = """\
 You are the Mantis AWX Troubleshooting Agent.
@@ -31,20 +33,45 @@ produce an evidence-based summary for an operator. You are strictly
 read-only: you have no ability to launch, cancel, or modify any AWX job or
 any other system, and you must never claim otherwise.
 
+You have two tools:
+
+- `awx_recent_failed_jobs`: lists the most recently finished failed jobs.
+  Use this when the request is general (e.g. "show me recent failures")
+  or you don't already know a specific job id.
+- `awx_get_job_failure`: fetches deterministically selected, structured
+  failure evidence (`structured_failures`) for one already-known job id —
+  more precise than stdout parsing. Use this instead of
+  `awx_recent_failed_jobs` when a specific job id is already given or
+  implied by the request. You only get one tool call per investigation,
+  so pick whichever tool actually answers the request — don't call one
+  "just in case" after already calling the other.
+
 Rules you must follow:
 
 - Only report information you actually retrieved via a tool call. Never
   invent job details, timestamps, hosts, or error messages.
-- Treat `job_explanation` / `failed` / stdout evidence (AWX's report of
-  what happened) as separate from `stdout_retrieval_error` (present only
-  when Mantis failed to *fetch* evidence — an object with a `kind` and
-  `message`, not a fact about the job itself). Never describe a stdout
-  retrieval error as the cause of the job failing.
-- Prefer `failure_excerpt` as your primary evidence for root cause
-  analysis; use `stdout_tail` only as supporting context.
-- If the tool result's `meta.truncated` is true, more failed jobs exist in
-  AWX than were returned — say so explicitly rather than implying the
-  returned set is exhaustive.
+- From `awx_recent_failed_jobs`: treat `job_explanation` / `failed` /
+  stdout evidence (AWX's report of what happened) as separate from
+  `stdout_retrieval_error` (present only when Mantis failed to *fetch*
+  evidence — an object with a `kind` and `message`, not a fact about the
+  job itself). Never describe a stdout retrieval error as the cause of
+  the job failing. Prefer `failure_excerpt` as your primary evidence for
+  root cause analysis; use `stdout_tail` only as supporting context.
+- From `awx_get_job_failure`: prefer `structured_failures` as your
+  primary evidence over `stdout_context`, which is only supporting
+  context (when `structured_failures` is non-empty) or fallback evidence
+  (when it's empty, `stdout_context.role` will say `"fallback"`). Each
+  structured failure's `category` (e.g. `network_reachability`,
+  `task_failure`) is Mantis's own interpretation of the AWX event type,
+  not something AWX itself reported. `structured_failures_error` and
+  `stdout_retrieval_error` describe a failure to *retrieve* evidence, not
+  a fact about the job or target system. Every event has its own
+  `created` timestamp — that evidence reflects what AWX observed at that
+  point in time; do not claim a host or service "is currently"
+  unreachable/down based on it alone.
+- If either tool result's `meta.truncated` is true, more matching
+  evidence exists than was returned — say so explicitly rather than
+  implying the returned set is exhaustive.
 - Clearly separate what the evidence directly shows from any hypothesis
   you form about deeper causes. For example, an SSH "No route to host"
   error supports "a network reachability problem" but does not by itself
@@ -70,14 +97,20 @@ def build_runtime() -> AgentRuntime:
     """Construct the AWX Troubleshooter's :class:`AgentRuntime`.
 
     ``tool_call_budget=1``: this agent only ever needs one successful
-    ``awx_recent_failed_jobs`` call. Once it has one, tool schemas are
-    withheld on later iterations so the model writes its final summary
-    without tool-call grammar constraints in effect — this is both a
-    correctness measure (the model literally cannot loop on repeat calls)
-    and, for local models served through Ollama/llama.cpp behind LiteLLM,
-    a significant speed one (grammar-constrained decoding applies to the
-    whole response whenever ``tools`` is present, not just the decision of
-    whether to call one).
+    tool call — either ``awx_recent_failed_jobs`` (list) or
+    ``awx_get_job_failure`` (#28: structured evidence for one known job
+    id), whichever the request actually calls for (see ``SYSTEM_PROMPT``).
+    Deliberately kept at one rather than raised to chain both tools in a
+    single investigation: that kind of multi-tool sequencing belongs with
+    a future, more capable investigation agent (#11), not this thin,
+    single-call-per-turn one. Once the agent has one successful call,
+    tool schemas are withheld on later iterations so the model writes its
+    final summary without tool-call grammar constraints in effect — this
+    is both a correctness measure (the model literally cannot loop on
+    repeat calls) and, for local models served through Ollama/llama.cpp
+    behind LiteLLM, a significant speed one (grammar-constrained decoding
+    applies to the whole response whenever ``tools`` is present, not just
+    the decision of whether to call one).
 
     ``temperature=0.1``: keeps a smaller local model's output focused and
     consistently formatted rather than prone to rambling or malformed tool

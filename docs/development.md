@@ -93,7 +93,8 @@ src/mantis/
 │   └── awx.py                 # AWXClient: raw AWX API access
 ├── tools/
 │   ├── _text.py               # excerpt/tail preprocessing helpers
-│   └── awx.py                 # awx_recent_failed_jobs (semantic tool)
+│   ├── _awx_events.py         # AWX job-event selection/bounding — see docs/awx-job-failure.md
+│   └── awx.py                 # awx_recent_failed_jobs, awx_get_job_failure (semantic tools)
 ├── agents/
 │   └── awx_troubleshooter.py  # AWX Troubleshooting Agent
 ├── observability/              # structured logs + Prometheus metrics — see docs/observability.md

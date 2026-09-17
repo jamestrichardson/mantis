@@ -201,6 +201,7 @@ as (for example) a proven firewall misconfiguration.
 - [docs/local-development.md](docs/local-development.md) — **start here**: install, configure, run, troubleshoot
 - [docs/architecture.md](docs/architecture.md) — layers, data flow, why the boundaries are where they are
 - [docs/tools.md](docs/tools.md) — what a tool is, how to add one
+- [docs/awx-job-failure.md](docs/awx-job-failure.md) — structured AWX job-event failure evidence: selection rules, bounding/pagination, provenance, stdout fallback
 - [docs/agents.md](docs/agents.md) — what an agent is, how to add one
 - [docs/configuration.md](docs/configuration.md) — the `.env.*` convention and all environment variables
 - [docs/security.md](docs/security.md) — least privilege, credentials, future mutation gates

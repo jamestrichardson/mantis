@@ -249,3 +249,14 @@ even as the shared registry grows.
 This preprocessing lives entirely in `mantis/tools/_text.py` and
 `mantis/tools/awx.py`; it can be improved (better heuristics, different
 tail length, etc.) without any change to the AWX Troubleshooter agent.
+
+### `awx_get_job_failure` (#28): structured job-event evidence
+
+`awx_get_job_failure(job_id: int)` fetches deterministically selected,
+bounded AWX job-*event* records (task failures, unreachable hosts) as
+the preferred evidence source for one job, with bounded stdout used only
+as supporting/fallback context rather than the primary source — see
+[docs/awx-job-failure.md](awx-job-failure.md) for the full design
+(selection rules, pagination/inspection caps, provenance, partial-success
+behavior, and a concrete sample result). Selection logic lives in
+`mantis/tools/_awx_events.py`, independently testable without a model.
