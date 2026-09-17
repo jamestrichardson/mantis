@@ -121,6 +121,20 @@ class RangeValidationError(ValueError):
     window or point-density exceeding the named caps)."""
 
 
+class MalformedResultError(ValueError):
+    """Raised by :func:`_normalize_vector`/:func:`_normalize_matrix` when
+    a Prometheus response's ``result`` container doesn't match its own
+    declared ``resultType`` — e.g. ``resultType="vector"`` but ``result``
+    isn't a list at all. Prometheus itself reported HTTP success
+    (``status="success"``), so this is neither a transport failure nor
+    a Mantis-side input rejection; :func:`_shape_result` catches this
+    and represents it as ``query_error.type == "malformed_result"``
+    rather than letting a genuinely malformed container be silently
+    normalized into what would look like valid empty evidence (an empty
+    vector has its own real meaning — "no matching series" — which must
+    never be confused with "the response shape didn't make sense")."""
+
+
 def validate_promql(query: Any) -> str:
     """Validate ``query`` is plain, bounded PromQL text.
 
@@ -284,26 +298,43 @@ def _normalize_sample(raw_sample: Any) -> tuple[dict[str, Any] | None, bool]:
     return {"timestamp": timestamp, "value": value}, value_truncated
 
 
-def _normalize_vector(raw_result: list[Any]) -> tuple[list[dict[str, Any]], bool]:
+def _normalize_vector(raw_result: Any) -> tuple[list[dict[str, Any]], bool]:
     """Normalize an instant ``vector`` result's series list.
 
     Deterministically ordered by normalized label set (see
     :func:`_label_sort_key`), bounded to :data:`MAX_SERIES_RETURNED`.
     Returns ``(series, truncated)`` — ``truncated`` is computed by
-    directly comparing the raw entry count to the final returned count
-    (which is affected by both the series cap and any malformed/label
-    truncation), never inferred merely from
-    ``len(series) == MAX_SERIES_RETURNED`` (see #9 item 12 / #28's and
-    #8's review history on this exact mistake).
+    directly comparing the raw entry count (**before** any filtering —
+    a non-dict entry or one with a malformed ``metric`` is omitted
+    evidence just as much as one dropped by the series cap, and must
+    count toward it the same way) to the final returned count, never
+    inferred merely from ``len(series) == MAX_SERIES_RETURNED`` (see #9
+    item 12 / #28's and #8's review history on this exact mistake).
+
+    Raises :class:`MalformedResultError` if ``raw_result`` itself isn't
+    a list — Prometheus's own contract guarantees a vector's ``result``
+    is always a list of series, so anything else means the response
+    doesn't match its declared ``resultType`` at all.
     """
-    entries = [e for e in raw_result if isinstance(e, dict)]
-    entries.sort(key=lambda e: _label_sort_key(e.get("metric") or {}))
-    raw_count = len(entries)
+    if not isinstance(raw_result, list):
+        raise MalformedResultError(
+            f"expected a list for a vector result, got {type(raw_result).__name__}"
+        )
+    raw_count = len(raw_result)
+    # A malformed entry (not a dict, or a non-mapping "metric") is
+    # dropped entirely here rather than partially normalized -- the
+    # raw_count-vs-final-count comparison below is what turns that into
+    # correct truncation reporting, the same mechanism that already
+    # covers the series cap and dropped/oversized samples.
+    entries = [
+        e for e in raw_result if isinstance(e, dict) and isinstance(e.get("metric"), dict)
+    ]
+    entries.sort(key=lambda e: _label_sort_key(e["metric"]))
 
     series: list[dict[str, Any]] = []
     any_label_truncation = False
     for entry in entries[:MAX_SERIES_RETURNED]:
-        metric, labels_truncated = _bounded_labels(entry.get("metric") or {})
+        metric, labels_truncated = _bounded_labels(entry["metric"])
         sample, value_truncated = _normalize_sample(entry.get("value"))
         any_label_truncation = any_label_truncation or labels_truncated or value_truncated
         if sample is None:
@@ -314,23 +345,36 @@ def _normalize_vector(raw_result: list[Any]) -> tuple[list[dict[str, Any]], bool
     return series, truncated
 
 
-def _normalize_matrix(raw_result: list[Any]) -> tuple[list[dict[str, Any]], bool]:
+def _normalize_matrix(raw_result: Any) -> tuple[list[dict[str, Any]], bool]:
     """Normalize a range ``matrix`` result's series list — same
-    deterministic ordering as :func:`_normalize_vector`, plus a
-    per-series sample cap (:data:`MAX_SAMPLES_PER_SERIES`) and a global
-    total-sample budget (:data:`MAX_TOTAL_SAMPLES`) shared across every
-    returned series. Sample order within a series is preserved exactly
-    as Prometheus returned it (already chronological)."""
-    entries = [e for e in raw_result if isinstance(e, dict)]
-    entries.sort(key=lambda e: _label_sort_key(e.get("metric") or {}))
-    raw_count = len(entries)
+    deterministic ordering, container-shape validation, and
+    malformed-entry handling as :func:`_normalize_vector` (see its
+    docstring), plus a per-series sample cap
+    (:data:`MAX_SAMPLES_PER_SERIES`) and a global total-sample budget
+    (:data:`MAX_TOTAL_SAMPLES`) shared across every returned series.
+    Sample order within a series is preserved exactly as Prometheus
+    returned it (already chronological). A matrix entry is also
+    dropped (as malformed) if its ``values`` field isn't a list."""
+    if not isinstance(raw_result, list):
+        raise MalformedResultError(
+            f"expected a list for a matrix result, got {type(raw_result).__name__}"
+        )
+    raw_count = len(raw_result)
+    entries = [
+        e
+        for e in raw_result
+        if isinstance(e, dict)
+        and isinstance(e.get("metric"), dict)
+        and isinstance(e.get("values"), list)
+    ]
+    entries.sort(key=lambda e: _label_sort_key(e["metric"]))
 
     series: list[dict[str, Any]] = []
     any_truncation = False
     total_samples_used = 0
     for entry in entries[:MAX_SERIES_RETURNED]:
-        metric, labels_truncated = _bounded_labels(entry.get("metric") or {})
-        raw_values = entry.get("values") or []
+        metric, labels_truncated = _bounded_labels(entry["metric"])
+        raw_values = entry["values"]
         raw_sample_count = len(raw_values)
 
         remaining_global_budget = max(0, MAX_TOTAL_SAMPLES - total_samples_used)
@@ -440,11 +484,36 @@ def _shape_result(response: PrometheusAPIResponse, *, query_section: dict[str, A
     truncated = warnings_truncated
     observation_time: str | None = None
 
-    if result_type == "vector":
-        series, series_truncated = _normalize_vector(response.result or [])
-        truncated = truncated or series_truncated
-    elif result_type == "matrix":
-        series, series_truncated = _normalize_matrix(response.result or [])
+    if result_type in ("vector", "matrix"):
+        # A missing "result" key (None) is treated as "no data" (a
+        # valid, if unusual, empty response) -- but anything else that
+        # isn't a list (a dict, string, number, ...) is a genuine shape
+        # mismatch against the declared resultType, not empty evidence.
+        # See MalformedResultError's docstring: an empty vector already
+        # has its own real meaning ("no matching series") that must
+        # never be confused with "the response shape didn't make sense".
+        raw = response.result if response.result is not None else []
+        normalize = _normalize_vector if result_type == "vector" else _normalize_matrix
+        try:
+            series, series_truncated = normalize(raw)
+        except MalformedResultError as exc:
+            meta = QueryMeta(
+                source_system="prometheus",
+                truncated=True,
+                derived_fields=list(DERIVED_RESULT_FIELDS),
+            )
+            return {
+                "meta": meta.to_dict(),
+                "query": query_section,
+                "result_type": result_type,
+                "series": [],
+                "value": None,
+                "warnings": warnings,
+                "query_error": {
+                    "type": "malformed_result",
+                    "message": _bounded_str(str(exc), MAX_WARNING_CHARS),
+                },
+            }
         truncated = truncated or series_truncated
     elif result_type in ("scalar", "string"):
         value, value_truncated = _normalize_sample(response.result)

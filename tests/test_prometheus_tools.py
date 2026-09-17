@@ -522,6 +522,137 @@ def test_malformed_sample_data_is_skipped_not_fatal(prom_client):
     assert result["meta"]["truncated"] is True
 
 
+@respx.mock
+def test_non_dict_vector_entry_mixed_with_a_valid_one_marks_truncated(prom_client):
+    # Regression test (PR #76 review, round 3): raw_count used to be
+    # computed *after* filtering out non-dict entries, so a malformed
+    # entry alongside a valid one was silently dropped without ever
+    # affecting meta.truncated -- exactly the evidence-completeness
+    # violation #9 forbids.
+    entries = [123, _vector_entry("up", "a:9100", "1")]
+    respx.get("https://prom.example.test/api/v1/query").mock(
+        return_value=httpx.Response(200, json=_success("vector", entries))
+    )
+
+    result = prometheus_query("up", _client=prom_client)
+
+    assert len(result["series"]) == 1
+    assert result["series"][0]["metric"]["instance"] == "a:9100"
+    assert result["meta"]["truncated"] is True
+
+
+@respx.mock
+def test_non_dict_matrix_entry_mixed_with_a_valid_one_marks_truncated(prom_client):
+    entries = ["garbage", _matrix_entry("up", "a:9100", [[1700000000.0, "1"]])]
+    respx.get("https://prom.example.test/api/v1/query_range").mock(
+        return_value=httpx.Response(200, json=_success("matrix", entries))
+    )
+
+    result = prometheus_query_range("up", 1700000000, 1700000060, 60, _client=prom_client)
+
+    assert len(result["series"]) == 1
+    assert result["meta"]["truncated"] is True
+
+
+@respx.mock
+def test_matrix_entry_with_non_list_values_is_dropped_as_malformed(prom_client):
+    entries = [
+        {"metric": {"__name__": "up", "instance": "a:9100"}, "values": "not-a-list"},
+        _matrix_entry("up", "b:9100", [[1700000000.0, "1"]]),
+    ]
+    respx.get("https://prom.example.test/api/v1/query_range").mock(
+        return_value=httpx.Response(200, json=_success("matrix", entries))
+    )
+
+    result = prometheus_query_range("up", 1700000000, 1700000060, 60, _client=prom_client)
+
+    assert len(result["series"]) == 1
+    assert result["series"][0]["metric"]["instance"] == "b:9100"
+    assert result["meta"]["truncated"] is True
+
+
+@respx.mock
+def test_non_mapping_metric_object_is_dropped_as_malformed_not_a_crash(prom_client):
+    # Regression test: _label_sort_key/_bounded_labels assume "metric"
+    # is a dict -- a string or list there must not raise, it must be
+    # treated as a malformed (dropped) entry like any other.
+    entries = [
+        {"metric": "not-a-dict", "value": [1700000000.0, "1"]},
+        {"metric": ["also", "not", "a", "dict"], "value": [1700000000.0, "1"]},
+        _vector_entry("up", "b:9100", "1"),
+    ]
+    respx.get("https://prom.example.test/api/v1/query").mock(
+        return_value=httpx.Response(200, json=_success("vector", entries))
+    )
+
+    result = prometheus_query("up", _client=prom_client)
+
+    assert len(result["series"]) == 1
+    assert result["series"][0]["metric"]["instance"] == "b:9100"
+    assert result["meta"]["truncated"] is True
+
+
+@respx.mock
+def test_malformed_vector_result_container_is_not_a_valid_empty_result(prom_client):
+    # Regression test (PR #76 review, round 3): a "result" that isn't a
+    # list at all (resultType claims "vector" but the container is a
+    # dict) must not be silently iterated into an empty, apparently-
+    # valid series list -- an empty vector already has its own real
+    # meaning ("no matching series") that must never be confused with
+    # "the response shape didn't make sense".
+    respx.get("https://prom.example.test/api/v1/query").mock(
+        return_value=httpx.Response(
+            200,
+            json={
+                "status": "success",
+                "data": {"resultType": "vector", "result": {"unexpected": "object"}},
+            },
+        )
+    )
+
+    result = prometheus_query("up", _client=prom_client)
+
+    assert result["query_error"] is not None
+    assert result["query_error"]["type"] == "malformed_result"
+    assert result["series"] == []
+    assert result["meta"]["truncated"] is True
+
+
+@respx.mock
+def test_malformed_matrix_result_container_is_not_a_valid_empty_result(prom_client):
+    respx.get("https://prom.example.test/api/v1/query_range").mock(
+        return_value=httpx.Response(
+            200,
+            json={
+                "status": "success",
+                "data": {"resultType": "matrix", "result": "not-a-list"},
+            },
+        )
+    )
+
+    result = prometheus_query_range("up", 1700000000, 1700000060, 60, _client=prom_client)
+
+    assert result["query_error"]["type"] == "malformed_result"
+    assert result["series"] == []
+    assert result["meta"]["truncated"] is True
+
+
+@respx.mock
+def test_missing_result_key_is_still_a_valid_empty_result_not_malformed(prom_client):
+    # A missing "result" key entirely (as opposed to one present but
+    # the wrong type) is treated as "no data" -- distinct from a
+    # genuine shape mismatch.
+    respx.get("https://prom.example.test/api/v1/query").mock(
+        return_value=httpx.Response(200, json={"status": "success", "data": {"resultType": "vector"}})
+    )
+
+    result = prometheus_query("up", _client=prom_client)
+
+    assert result["query_error"] is None
+    assert result["series"] == []
+    assert result["meta"]["truncated"] is False
+
+
 # ---------------------------------------------------------------------------
 # Range query result shaping
 # ---------------------------------------------------------------------------
