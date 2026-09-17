@@ -245,23 +245,43 @@ evidence is incomplete relative to what Prometheus reported.
 
 ### Malformed result containers are not empty results
 
-`resultType="vector"`/`"matrix"` promises `"result"` is a list of
-series. If it's something else entirely — a `"result": []`-shaped
-promise fulfilled instead as `"result": {"unexpected": "object"}`, say
-— that is not the same thing as a genuinely empty result. An empty
-vector already has real meaning ("no matching series exist right now");
-silently iterating a malformed container into what looks like an empty
-list would let a broken response masquerade as that meaning. Instead,
-`_normalize_vector`/`_normalize_matrix` raise
-`mantis.tools.prometheus.MalformedResultError` when the container isn't
-a list at all (a missing `"result"` key entirely is still treated as
-"no data" — the distinction is *present but wrong shape* vs. *absent*),
-and `_shape_result()` turns that into
-`query_error: {"type": "malformed_result", "message": ...}` — a third
-`query_error.type` alongside `"invalid_input"` (a Mantis-side rejection
-of the model's input) and Prometheus's own `errorType` values: this one
-means Prometheus reported success but its own response didn't match
-its declared shape. `meta.truncated` is always `true` in this case —
+`_shape_result()` enforces the result contract Prometheus's own API
+documents for every `resultType`:
+
+- `"vector"`/`"matrix"` — `"result"` must be a list of series.
+- `"scalar"`/`"string"` — `"result"` must be a valid
+  `[timestamp, value]` pair.
+- Anything else — including an unrecognized `resultType`, or a missing
+  `resultType` entirely — doesn't match any shape Prometheus documents.
+
+A response that violates its own contract is not the same thing as a
+genuinely empty result. For example, a `"result": []`-shaped promise
+fulfilled instead as `"result": {"unexpected": "object"}` is not an
+empty vector — an empty vector already has real meaning ("no matching
+series exist right now"), and silently iterating a malformed container
+into what looks like an empty list would let a broken response
+masquerade as that meaning. The same reasoning applies to a **missing**
+`"result"` key: it is not treated as "no data" either, because
+Prometheus's contract for a successful response always includes
+`"result"` — only a `"result"` that is actually present, and actually
+list-shaped, and actually empty (`"result": []`) counts as genuine
+empty evidence. A scalar/string result has no "empty" case at all in
+Prometheus's contract, so any value that isn't a valid
+`[timestamp, value]` pair is malformed by definition, never normalized
+to `value: null` as if the query had simply returned nothing.
+
+Concretely: `_normalize_vector`/`_normalize_matrix` raise
+`mantis.tools.prometheus.MalformedResultError` whenever `"result"`
+isn't a list (including when it's absent), and `_normalize_sample`
+returns a `None` sample for a scalar/string `"result"` that isn't a
+valid pair. `_shape_result()` turns every one of these cases —
+plus an unrecognized/missing `resultType` — into
+`query_error: {"type": "malformed_result", "message": ...}` via the
+shared `_malformed_result_response()` helper — a third `query_error.type`
+alongside `"invalid_input"` (a Mantis-side rejection of the model's
+input) and Prometheus's own `errorType` values: this one means
+Prometheus reported success but its own response didn't match its
+declared shape. `meta.truncated` is always `true` in this case —
 completeness can't be claimed when the container itself couldn't be
 interpreted.
 
@@ -382,14 +402,15 @@ A malformed envelope — non-JSON, missing/unrecognized `status`, or a
 unclassified. See `mantis.integrations.prometheus._parse_envelope`.
 
 A third, narrower case sits between these two: the envelope itself
-parses fine (`status="success"`, a real `resultType`) but `"result"`
-doesn't match that `resultType`'s expected shape (e.g. `resultType:
-"vector"` with `"result": {"unexpected": "object"}}`). This is
-represented as `query_error: {"type": "malformed_result", ...}` — see
-"Malformed result containers are not empty results" above — rather than
-either a `PrometheusError` (the transport layer got a perfectly good
-response) or silently becoming an empty result (which has its own
-distinct meaning).
+parses fine (`status="success"`) but `"result"` doesn't match what its
+`resultType` promises (e.g. `resultType: "vector"` with `"result":
+{"unexpected": "object"}}`, a missing `"result"` key, an invalid
+scalar/string pair, or an unrecognized/missing `resultType` itself).
+This is represented as `query_error: {"type": "malformed_result", ...}`
+— see "Malformed result containers are not empty results" above —
+rather than either a `PrometheusError` (the transport layer got a
+perfectly good response) or silently becoming an empty result (which
+has its own distinct meaning).
 
 Note that Prometheus sometimes uses HTTP 503 for a query timeout
 specifically — this module deliberately does **not** special-case that

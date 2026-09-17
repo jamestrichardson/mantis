@@ -638,12 +638,32 @@ def test_malformed_matrix_result_container_is_not_a_valid_empty_result(prom_clie
 
 
 @respx.mock
-def test_missing_result_key_is_still_a_valid_empty_result_not_malformed(prom_client):
-    # A missing "result" key entirely (as opposed to one present but
-    # the wrong type) is treated as "no data" -- distinct from a
-    # genuine shape mismatch.
+def test_missing_result_key_is_malformed_not_a_valid_empty_result(prom_client):
+    # Regression test (PR #76 review, round 4): a missing "result" key
+    # entirely is NOT the same thing as a genuinely empty "result": [].
+    # The former means the response didn't actually satisfy its own
+    # declared resultType and must be reported as malformed; only the
+    # latter is real evidence ("no matching series").
     respx.get("https://prom.example.test/api/v1/query").mock(
         return_value=httpx.Response(200, json={"status": "success", "data": {"resultType": "vector"}})
+    )
+
+    result = prometheus_query("up", _client=prom_client)
+
+    assert result["query_error"] is not None
+    assert result["query_error"]["type"] == "malformed_result"
+    assert result["series"] == []
+    assert result["meta"]["truncated"] is True
+
+
+@respx.mock
+def test_empty_vector_result_list_is_still_valid_empty_evidence(prom_client):
+    # A literal "result": [] must remain valid, non-malformed evidence
+    # -- only a missing/wrong-shaped "result" is malformed.
+    respx.get("https://prom.example.test/api/v1/query").mock(
+        return_value=httpx.Response(
+            200, json={"status": "success", "data": {"resultType": "vector", "result": []}}
+        )
     )
 
     result = prometheus_query("up", _client=prom_client)
@@ -651,6 +671,85 @@ def test_missing_result_key_is_still_a_valid_empty_result_not_malformed(prom_cli
     assert result["query_error"] is None
     assert result["series"] == []
     assert result["meta"]["truncated"] is False
+
+
+@respx.mock
+def test_malformed_scalar_result_is_a_query_error_not_a_null_value(prom_client):
+    # Regression test (PR #76 review, round 4): a scalar result that
+    # isn't a valid [timestamp, value] pair must not masquerade as a
+    # successful query that simply returned no value.
+    respx.get("https://prom.example.test/api/v1/query").mock(
+        return_value=httpx.Response(
+            200, json={"status": "success", "data": {"resultType": "scalar", "result": {"oops": "bad"}}}
+        )
+    )
+
+    result = prometheus_query("scalar(up)", _client=prom_client)
+
+    assert result["query_error"] is not None
+    assert result["query_error"]["type"] == "malformed_result"
+    assert result["value"] is None
+    assert result["meta"]["truncated"] is True
+
+
+@respx.mock
+def test_missing_scalar_result_is_a_query_error(prom_client):
+    respx.get("https://prom.example.test/api/v1/query").mock(
+        return_value=httpx.Response(200, json={"status": "success", "data": {"resultType": "scalar"}})
+    )
+
+    result = prometheus_query("scalar(up)", _client=prom_client)
+
+    assert result["query_error"]["type"] == "malformed_result"
+    assert result["value"] is None
+    assert result["meta"]["truncated"] is True
+
+
+@respx.mock
+def test_malformed_string_result_is_a_query_error_not_a_null_value(prom_client):
+    respx.get("https://prom.example.test/api/v1/query").mock(
+        return_value=httpx.Response(
+            200, json={"status": "success", "data": {"resultType": "string", "result": "not-a-pair"}}
+        )
+    )
+
+    result = prometheus_query("up", _client=prom_client)
+
+    assert result["query_error"]["type"] == "malformed_result"
+    assert result["value"] is None
+    assert result["meta"]["truncated"] is True
+
+
+@respx.mock
+def test_unrecognized_result_type_is_a_query_error(prom_client):
+    # An unexpected resultType (anything outside Prometheus's own
+    # documented vector/matrix/scalar/string set) must not be silently
+    # normalized as empty evidence.
+    respx.get("https://prom.example.test/api/v1/query").mock(
+        return_value=httpx.Response(
+            200, json={"status": "success", "data": {"resultType": "surprise", "result": []}}
+        )
+    )
+
+    result = prometheus_query("up", _client=prom_client)
+
+    assert result["query_error"] is not None
+    assert result["query_error"]["type"] == "malformed_result"
+    assert result["series"] == []
+    assert result["value"] is None
+    assert result["meta"]["truncated"] is True
+
+
+@respx.mock
+def test_missing_result_type_is_a_query_error(prom_client):
+    respx.get("https://prom.example.test/api/v1/query").mock(
+        return_value=httpx.Response(200, json={"status": "success", "data": {"result": []}})
+    )
+
+    result = prometheus_query("up", _client=prom_client)
+
+    assert result["query_error"]["type"] == "malformed_result"
+    assert result["meta"]["truncated"] is True
 
 
 # ---------------------------------------------------------------------------

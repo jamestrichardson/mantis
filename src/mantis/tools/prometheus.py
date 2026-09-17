@@ -453,7 +453,47 @@ def _bound_warnings(raw_warnings: list[Any]) -> tuple[list[str], bool]:
     return bounded, truncated
 
 
+def _malformed_result_response(
+    *, query_section: dict[str, Any], warnings: list[str], result_type: Any, message: str
+) -> dict[str, Any]:
+    """Build the result for a response whose ``result`` doesn't match
+    what its own ``resultType`` promises — see :class:`MalformedResultError`.
+    ``truncated`` is always ``true``: completeness can't be claimed when
+    the container itself couldn't be interpreted."""
+    meta = QueryMeta(source_system="prometheus", truncated=True, derived_fields=list(DERIVED_RESULT_FIELDS))
+    return {
+        "meta": meta.to_dict(),
+        "query": query_section,
+        "result_type": result_type,
+        "series": [],
+        "value": None,
+        "warnings": warnings,
+        "query_error": {"type": "malformed_result", "message": _bounded_str(message, MAX_WARNING_CHARS)},
+    }
+
+
 def _shape_result(response: PrometheusAPIResponse, *, query_section: dict[str, Any]) -> dict[str, Any]:
+    """Shape a successful or error :class:`PrometheusAPIResponse` into
+    the tool-facing result, enforcing the result contract for every
+    ``resultType`` Prometheus documents:
+
+    - ``vector``/``matrix``: ``result`` must be a list (an empty list is
+      genuine evidence — "no matching series exist"; anything that
+      *isn't* a list, including a missing/``None`` ``result`` entirely,
+      is malformed API output, not the same thing).
+    - ``scalar``/``string``: ``result`` must be a valid
+      ``[timestamp, value]`` pair — there is no "empty" scalar/string
+      result in Prometheus's own contract, so any failure to parse one
+      is malformed, never silently normalized to ``value: None`` as if
+      it had merely returned nothing.
+    - Anything else (an unrecognized or missing ``resultType``) is
+      malformed by definition.
+
+    Every one of these malformed cases is reported as
+    ``query_error.type == "malformed_result"`` (see
+    :func:`_malformed_result_response`) rather than ever being allowed
+    to look like ordinary empty-but-valid evidence.
+    """
     warnings, warnings_truncated = _bound_warnings(response.warnings)
 
     if response.status == "error":
@@ -479,67 +519,67 @@ def _shape_result(response: PrometheusAPIResponse, *, query_section: dict[str, A
         }
 
     result_type = response.result_type
-    series: list[dict[str, Any]] = []
-    value: dict[str, Any] | None = None
-    truncated = warnings_truncated
-    observation_time: str | None = None
 
     if result_type in ("vector", "matrix"):
-        # A missing "result" key (None) is treated as "no data" (a
-        # valid, if unusual, empty response) -- but anything else that
-        # isn't a list (a dict, string, number, ...) is a genuine shape
-        # mismatch against the declared resultType, not empty evidence.
-        # See MalformedResultError's docstring: an empty vector already
-        # has its own real meaning ("no matching series") that must
-        # never be confused with "the response shape didn't make sense".
-        raw = response.result if response.result is not None else []
         normalize = _normalize_vector if result_type == "vector" else _normalize_matrix
         try:
-            series, series_truncated = normalize(raw)
+            series, series_truncated = normalize(response.result)
         except MalformedResultError as exc:
-            meta = QueryMeta(
-                source_system="prometheus",
-                truncated=True,
-                derived_fields=list(DERIVED_RESULT_FIELDS),
+            return _malformed_result_response(
+                query_section=query_section, warnings=warnings, result_type=result_type, message=str(exc)
             )
-            return {
-                "meta": meta.to_dict(),
-                "query": query_section,
-                "result_type": result_type,
-                "series": [],
-                "value": None,
-                "warnings": warnings,
-                "query_error": {
-                    "type": "malformed_result",
-                    "message": _bounded_str(str(exc), MAX_WARNING_CHARS),
-                },
-            }
-        truncated = truncated or series_truncated
-    elif result_type in ("scalar", "string"):
+        meta = QueryMeta(
+            source_system="prometheus",
+            truncated=warnings_truncated or series_truncated,
+            derived_fields=list(DERIVED_RESULT_FIELDS),
+        )
+        return {
+            "meta": meta.to_dict(),
+            "query": query_section,
+            "result_type": result_type,
+            "series": series,
+            "value": None,
+            "warnings": warnings,
+            "query_error": None,
+        }
+
+    if result_type in ("scalar", "string"):
         value, value_truncated = _normalize_sample(response.result)
-        truncated = truncated or value_truncated
-        if value is not None:
-            observation_time = value["timestamp"]
-    # Any other result_type is unexpected per Prometheus's own API
-    # contract; normalized as empty evidence (no series/value) rather
-    # than crashing -- this should not occur against a real Prometheus.
+        if value is None:
+            return _malformed_result_response(
+                query_section=query_section,
+                warnings=warnings,
+                result_type=result_type,
+                message=(
+                    f"expected a valid [timestamp, value] pair for a {result_type} "
+                    f"result, got {response.result!r}"
+                ),
+            )
+        meta = QueryMeta(
+            source_system="prometheus",
+            observation_time=value["timestamp"],
+            truncated=warnings_truncated or value_truncated,
+            derived_fields=list(DERIVED_RESULT_FIELDS),
+        )
+        return {
+            "meta": meta.to_dict(),
+            "query": query_section,
+            "result_type": result_type,
+            "series": [],
+            "value": value,
+            "warnings": warnings,
+            "query_error": None,
+        }
 
-    meta = QueryMeta(
-        source_system="prometheus",
-        observation_time=observation_time,
-        truncated=truncated,
-        derived_fields=list(DERIVED_RESULT_FIELDS),
+    # An unrecognized (or missing/None) result_type doesn't match any
+    # shape Prometheus documents -- never silently normalized as if it
+    # were valid (empty) evidence.
+    return _malformed_result_response(
+        query_section=query_section,
+        warnings=warnings,
+        result_type=result_type,
+        message=f"unrecognized or missing result type: {result_type!r}",
     )
-
-    return {
-        "meta": meta.to_dict(),
-        "query": query_section,
-        "result_type": result_type,
-        "series": series,
-        "value": value,
-        "warnings": warnings,
-        "query_error": None,
-    }
 
 
 def prometheus_query(
