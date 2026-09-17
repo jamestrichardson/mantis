@@ -17,7 +17,7 @@ from mantis.eval.scenarios import Scenario
 from mantis.eval.scoring import Evaluation, evaluate_result
 from mantis.observability import metrics
 from mantis.observability.logging import log_event
-from mantis.runtime import AgentRuntime, RuntimeError_
+from mantis.runtime import DEFAULT_MAX_ITERATIONS, AgentRuntime, RuntimeError_
 
 logger = logging.getLogger(__name__)
 
@@ -68,6 +68,11 @@ def run_scenario(
         registry=registry,
         tool_call_budget=scenario.tool_call_budget,
         temperature=scenario.temperature,
+        max_iterations=(
+            scenario.max_iterations
+            if scenario.max_iterations is not None
+            else DEFAULT_MAX_ITERATIONS
+        ),
     )
 
     started_at = _utc_now_iso()

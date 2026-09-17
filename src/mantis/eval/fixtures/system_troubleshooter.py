@@ -1,6 +1,6 @@
 """Golden scenarios for the System Troubleshooter agent (#11), reusing
-the exact production ``ALLOWED_TOOLS``/``SYSTEM_PROMPT``/``TOOL_CALL_BUDGET``
-from ``mantis.agents.system_troubleshooter`` -- the same convention
+the exact production ``ALLOWED_TOOLS``/``SYSTEM_PROMPT``/``TOOL_CALL_BUDGET``/
+``MAX_ITERATIONS`` from ``mantis.agents.system_troubleshooter`` -- the same convention
 ``awx-no-route`` established for the AWX Troubleshooter (see
 ``mantis.eval.fixtures.awx``): a scenario qualifies models against
 exactly what production runs, not a parallel approximation of it.
@@ -36,7 +36,12 @@ Three scenarios, matching #11's acceptance criteria:
 
 from __future__ import annotations
 
-from mantis.agents.system_troubleshooter import ALLOWED_TOOLS, SYSTEM_PROMPT, TOOL_CALL_BUDGET
+from mantis.agents.system_troubleshooter import (
+    ALLOWED_TOOLS,
+    MAX_ITERATIONS,
+    SYSTEM_PROMPT,
+    TOOL_CALL_BUDGET,
+)
 from mantis.eval.expectations import (
     ForbiddenAnswerPattern,
     HypothesisLabeled,
@@ -120,6 +125,7 @@ _RUNTIME_TUNING = dict(
     system_prompt=SYSTEM_PROMPT,
     agent_tools=ALLOWED_TOOLS,
     tool_call_budget=TOOL_CALL_BUDGET,
+    max_iterations=MAX_ITERATIONS,
     temperature=0.1,
 )
 

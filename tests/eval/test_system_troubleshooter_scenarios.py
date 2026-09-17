@@ -1,7 +1,7 @@
 """Deterministic good/bad-answer scoring tests for the #11 System
 Troubleshooter golden scenarios (mantis.eval.fixtures.system_troubleshooter),
 which reuse the real production agent's ALLOWED_TOOLS/SYSTEM_PROMPT/
-TOOL_CALL_BUDGET and combine #28's historical AWX evidence, #9's
+TOOL_CALL_BUDGET/MAX_ITERATIONS and combine #28's historical AWX evidence, #9's
 time-series Prometheus evidence, #8's current-state TCP evidence, and
 #10's Loki log evidence.
 """
@@ -83,13 +83,19 @@ def _score(scenario_name: str, *, loki_outcome: str = "ok"):
 
 def test_all_three_scenarios_are_registered_with_the_real_agent_wiring():
     _load()
-    from mantis.agents.system_troubleshooter import ALLOWED_TOOLS, SYSTEM_PROMPT, TOOL_CALL_BUDGET
+    from mantis.agents.system_troubleshooter import (
+        ALLOWED_TOOLS,
+        MAX_ITERATIONS,
+        SYSTEM_PROMPT,
+        TOOL_CALL_BUDGET,
+    )
 
     for name in (_FULL_INVESTIGATION, _RETRIEVAL_FAILURE, _CONTRADICTORY_SIGNALS):
         scenario = default_scenarios.get(name)
         assert scenario.agent_tools == ALLOWED_TOOLS
         assert scenario.system_prompt == SYSTEM_PROMPT
         assert scenario.tool_call_budget == TOOL_CALL_BUDGET
+        assert scenario.max_iterations == MAX_ITERATIONS
         assert scenario.expectations
 
 
