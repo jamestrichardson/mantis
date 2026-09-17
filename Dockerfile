@@ -20,6 +20,13 @@ RUN useradd --create-home --uid 1000 --shell /usr/sbin/nologin mantis
 
 COPY --from=builder /install /usr/local
 
+# Service/container-mode default (see docs/observability.md): expose the
+# Prometheus /metrics endpoint without requiring extra configuration at
+# deploy time. A local one-shot `mantis <agent> "prompt"` invocation
+# outside a container is unaffected unless this same env var is set.
+ENV MANTIS_METRICS_ENABLED=true
+EXPOSE 9108
+
 USER mantis
 WORKDIR /home/mantis
 

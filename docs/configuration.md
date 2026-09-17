@@ -70,6 +70,19 @@ as the basis for a differently-named environment (e.g. `cp .env.example
 | `AWX_TOKEN`      | yes      | —       | AWX API token. Use a read-only service-account token where possible — see [docs/security.md](security.md). |
 | `AWX_VERIFY_SSL` | no       | `true`  | Whether to verify TLS certificates when talking to AWX. Accepts `true`/`false`/`1`/`0`/`yes`/`no`/`on`/`off` (case-insensitive). Only disable for local/dev testing against a self-signed endpoint. |
 
+## Observability
+
+See [docs/observability.md](observability.md) for the full event schema
+and metrics catalog.
+
+| Variable                 | Required | Default    | Description |
+|--------------------------|----------|------------|--------------|
+| `MANTIS_LOG_LEVEL`       | no       | `INFO`     | Log level for the structured JSON logs `mantis.cli.main` configures at startup. |
+| `MANTIS_ENVIRONMENT`     | no       | `local`    | Value of the `environment` label on every metric (e.g. `production`, `staging`). Purely a metrics label — unrelated to `MANTIS_ENV`'s `.env.*` file selection below. |
+| `MANTIS_METRICS_ENABLED` | no       | `false`\* | Starts the Prometheus `/metrics` HTTP server at process startup. \*The Dockerfile sets this `true` by default for container/service mode; a local one-shot CLI run defaults to `false`. |
+| `MANTIS_METRICS_PORT`    | no       | `9108`     | Port the metrics server binds. |
+| `MANTIS_METRICS_ADDR`    | no       | `0.0.0.0`  | Address the metrics server binds. |
+
 ## Other
 
 | Variable     | Required | Default | Description |

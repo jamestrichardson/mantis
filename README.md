@@ -206,4 +206,5 @@ as (for example) a proven firewall misconfiguration.
 - [docs/security.md](docs/security.md) — least privilege, credentials, future mutation gates
 - [docs/development.md](docs/development.md) — contributor workflow: tests, adding integrations/tools/agents, style
 - [docs/evaluation.md](docs/evaluation.md) — model qualification/evaluation harness: running scenarios, adding a new one
+- [docs/observability.md](docs/observability.md) — structured JSON log event schema, Prometheus metrics catalog, LogQL/PromQL examples
 - [docs/release.md](docs/release.md) — conventional commits, SemVer policy, how release-please cuts a release

@@ -9,7 +9,11 @@ not a UI layer, just a convenience wrapper so agents can be run as
 
 from __future__ import annotations
 
+import os
 import sys
+
+from mantis.observability.logging import configure_logging
+from mantis.observability.metrics import start_metrics_server
 
 AGENTS = {
     "awx-troubleshooter": "mantis.agents.awx_troubleshooter",
@@ -22,7 +26,22 @@ SUBCOMMANDS = {
 }
 
 
+def _getenv_bool(name: str, default: bool) -> bool:
+    raw = os.environ.get(name)
+    if raw is None:
+        return default
+    return raw.strip().lower() in ("1", "true", "yes", "on")
+
+
 def main(argv: list[str] | None = None) -> int:
+    # Wired centrally here — the single `mantis` entry point — rather than
+    # in each agent module, so log level/format and the metrics endpoint
+    # are configurable without touching any agent implementation. Every
+    # agent and `mantis eval ...` invocation goes through this function.
+    configure_logging()
+    if _getenv_bool("MANTIS_METRICS_ENABLED", False):
+        start_metrics_server()
+
     argv = sys.argv[1:] if argv is None else argv
 
     if not argv or argv[0] in ("-h", "--help"):

@@ -7,12 +7,14 @@ tests exercise only the runtime's dispatch/loop logic.
 from __future__ import annotations
 
 import json
+import logging
 from dataclasses import dataclass
 from typing import Any
 
 import pytest
 
 from mantis.config import LiteLLMConfig, Secret
+from mantis.observability import metrics
 from mantis.registry import Tool, ToolRegistry
 from mantis.runtime import AgentRuntime, MaxIterationsExceededError
 
@@ -462,3 +464,137 @@ def test_diagnostic_raw_message_captured_when_answer_is_whitespace_only():
 
     assert result == "   \n"
     assert runtime.diagnostic_raw_message is not None
+
+
+# ---------------------------------------------------------------------------
+# Observability: structured log events and metrics (#38 / #39)
+# ---------------------------------------------------------------------------
+
+
+def test_run_emits_run_started_and_completed_events_sharing_one_run_id(caplog):
+    caplog.set_level(logging.INFO, logger="mantis.runtime")
+    runtime = _build_runtime([_final_message_response("hello there")])
+
+    runtime.run("hi")
+
+    events = {r.event: r for r in caplog.records if hasattr(r, "event")}
+    assert "mantis_run_started" in events
+    assert "mantis_run_completed" in events
+    assert events["mantis_run_started"].run_id == runtime.last_run_id
+    assert events["mantis_run_completed"].run_id == runtime.last_run_id
+    assert events["mantis_run_completed"].outcome == "ok"
+    assert events["mantis_run_completed"].duration_seconds >= 0
+
+
+def test_run_generates_a_fresh_run_id_on_each_call():
+    runtime = _build_runtime(
+        [_final_message_response("first"), _final_message_response("second")]
+    )
+
+    runtime.run("hi")
+    first_run_id = runtime.last_run_id
+    runtime.run("hi again")
+    second_run_id = runtime.last_run_id
+
+    assert first_run_id != second_run_id
+
+
+def test_run_emits_a_model_call_event_per_iteration(caplog):
+    caplog.set_level(logging.INFO, logger="mantis.runtime")
+    registry = ToolRegistry()
+    registry.register(_echo_tool(handler=lambda **kw: {"ok": True}))
+    responses = [
+        _tool_call_response(_tool_call("call_1", "echo", {})),
+        _final_message_response("done"),
+    ]
+    runtime = _build_runtime(responses, tools=["echo"], registry=registry)
+
+    runtime.run("do the thing")
+
+    model_call_events = [r for r in caplog.records if getattr(r, "event", None) == "mantis_model_call"]
+    assert len(model_call_events) == 2
+    assert [r.iteration for r in model_call_events] == [1, 2]
+    assert all(r.run_id == runtime.last_run_id for r in model_call_events)
+    assert all(r.tokens is None for r in model_call_events)  # these fixtures set no usage
+
+
+def test_run_emits_a_tool_call_event_with_bounded_redacted_fields(caplog):
+    caplog.set_level(logging.INFO, logger="mantis.runtime")
+    registry = ToolRegistry()
+    registry.register(_echo_tool(handler=lambda **kw: {"ok": True, "api_key": "sekrit"}))
+    responses = [
+        _tool_call_response(_tool_call("call_1", "echo", {"x": 1})),
+        _final_message_response("done"),
+    ]
+    runtime = _build_runtime(responses, tools=["echo"], registry=registry)
+
+    runtime.run("do the thing")
+
+    tool_events = [r for r in caplog.records if getattr(r, "event", None) == "mantis_tool_call"]
+    assert len(tool_events) == 1
+    event = tool_events[0]
+    assert event.tool == "echo"
+    assert event.outcome == "ok"
+    assert event.run_id == runtime.last_run_id
+    assert event.bound_arguments == {"x": 1}
+    assert event.bound_result == {"ok": True, "api_key": "***"}  # redacted, not the raw secret
+
+
+def test_run_records_runs_total_and_duration_metric():
+    labels = dict(agent="test-agent", model_alias="m", result="ok", environment=metrics.environment())
+    before = metrics.RUNS_TOTAL.labels(**labels)._value.get()
+
+    runtime = _build_runtime([_final_message_response("hello")])
+    runtime.run("hi")
+
+    after = metrics.RUNS_TOTAL.labels(**labels)._value.get()
+    assert after == before + 1
+
+
+def test_run_failure_emits_run_failed_event_and_records_error_metric(caplog):
+    caplog.set_level(logging.INFO, logger="mantis.runtime")
+    labels = dict(
+        agent="test-agent", model_alias="m", result="max_iterations", environment=metrics.environment()
+    )
+    before = metrics.RUNS_TOTAL.labels(**labels)._value.get()
+
+    registry = ToolRegistry()
+    registry.register(_echo_tool(handler=lambda **kw: {"ok": True}))
+    # Every response asks for another tool call, so the loop never
+    # produces a final answer and exceeds max_iterations=1.
+    responses = [_tool_call_response(_tool_call(f"call_{i}", "echo", {})) for i in range(5)]
+    runtime = _build_runtime(responses, tools=["echo"], registry=registry, max_iterations=1)
+
+    with pytest.raises(MaxIterationsExceededError):
+        runtime.run("do the thing")
+
+    after = metrics.RUNS_TOTAL.labels(**labels)._value.get()
+    assert after == before + 1
+
+    failed_events = [r for r in caplog.records if getattr(r, "event", None) == "mantis_run_failed"]
+    assert len(failed_events) == 1
+    assert failed_events[0].outcome == "max_iterations"
+    assert failed_events[0].error_kind == "MaxIterationsExceededError"
+
+
+def test_tool_call_error_records_tool_errors_total_metric():
+    labels = dict(
+        agent="test-agent", tool="echo", error_kind="RuntimeError", environment=metrics.environment()
+    )
+    before = metrics.TOOL_ERRORS_TOTAL.labels(**labels)._value.get()
+
+    def boom(**kwargs):
+        raise RuntimeError("integration exploded")
+
+    registry = ToolRegistry()
+    registry.register(_echo_tool(handler=boom))
+    responses = [
+        _tool_call_response(_tool_call("call_1", "echo", {})),
+        _final_message_response("recovered"),
+    ]
+    runtime = _build_runtime(responses, tools=["echo"], registry=registry)
+
+    runtime.run("do the thing")
+
+    after = metrics.TOOL_ERRORS_TOTAL.labels(**labels)._value.get()
+    assert after == before + 1

@@ -6,6 +6,7 @@ runner orchestration with a mocked model client" (#34) requires.
 from __future__ import annotations
 
 import json
+import logging
 from dataclasses import dataclass
 from typing import Any
 
@@ -17,6 +18,7 @@ import mantis.runtime as runtime_module
 from mantis.config import LiteLLMConfig, Secret
 from mantis.eval.runner import run_comparison, run_scenario
 from mantis.eval.scenarios import Scenario
+from mantis.observability import metrics
 from mantis.registry import Tool, ToolRegistry
 
 
@@ -390,3 +392,111 @@ def test_run_comparison_supports_a_single_model(monkeypatch):
 
     assert len(results) == 1
     assert results[0].model == "only-model"
+
+
+# ---------------------------------------------------------------------------
+# Observability: eval-specific events/metrics reuse the runtime's registry
+# and run_id (#38 / #39)
+# ---------------------------------------------------------------------------
+
+
+def test_run_scenario_emits_eval_result_event_sharing_the_run_id(monkeypatch, caplog):
+    caplog.set_level(logging.INFO, logger="mantis.eval.runner")
+    from mantis.eval.expectations import RequiredAnswerPattern
+
+    _patch_openai(monkeypatch, {"model-a": [_final("mentions host03")]})
+    scenario = _echo_scenario(expectations=[RequiredAnswerPattern("host03")])
+
+    result = run_scenario(scenario, "model-a", base_model_config=_base_config())
+
+    eval_result_events = [r for r in caplog.records if getattr(r, "event", None) == "mantis_eval_result"]
+    assert len(eval_result_events) == 1
+    event = eval_result_events[0]
+    assert event.scenario == "echo-scenario"
+    assert event.model_alias == "model-a"
+    assert event.outcome == "pass"
+    assert event.score == 1
+    assert event.max_score == 1
+    # Same run_id AgentRuntime generated for this run — proves eval events
+    # are correlated with the underlying runtime/tool/model events, not a
+    # parallel, disconnected identifier.
+    run_id_events = [r for r in caplog.records if hasattr(r, "run_id") and r.run_id]
+    assert len({r.run_id for r in run_id_events}) == 1
+    assert result.evaluation["passed"] is True
+
+
+def test_run_scenario_emits_eval_check_event_per_check(monkeypatch, caplog):
+    caplog.set_level(logging.INFO, logger="mantis.eval.runner")
+    from mantis.eval.expectations import ForbiddenAnswerPattern, RequiredAnswerPattern
+
+    _patch_openai(monkeypatch, {"model-a": [_final("mentions host03 only")]})
+    scenario = _echo_scenario(
+        expectations=[
+            RequiredAnswerPattern("host03", name="cites_host"),
+            ForbiddenAnswerPattern("firewall caused", name="no_blame"),
+        ]
+    )
+
+    run_scenario(scenario, "model-a", base_model_config=_base_config())
+
+    check_events = [r for r in caplog.records if getattr(r, "event", None) == "mantis_eval_check"]
+    assert {r.check_name for r in check_events} == {"cites_host", "no_blame"}
+    assert all(r.outcome == "pass" for r in check_events)
+
+
+def test_run_scenario_records_eval_runs_total_and_score_ratio(monkeypatch):
+    from mantis.eval.expectations import RequiredAnswerPattern
+
+    labels = dict(scenario="echo-scenario", model_alias="model-a", environment=metrics.environment())
+    before = metrics.EVAL_RUNS_TOTAL.labels(result="pass", **labels)._value.get()
+    score_before = metrics.EVAL_SCORE_RATIO.labels(**labels)._sum.get()
+
+    _patch_openai(monkeypatch, {"model-a": [_final("mentions host03")]})
+    scenario = _echo_scenario(expectations=[RequiredAnswerPattern("host03")])
+    run_scenario(scenario, "model-a", base_model_config=_base_config())
+
+    after = metrics.EVAL_RUNS_TOTAL.labels(result="pass", **labels)._value.get()
+    score_after = metrics.EVAL_SCORE_RATIO.labels(**labels)._sum.get()
+    assert after == before + 1
+    assert score_after == pytest.approx(score_before + 1.0)  # 1/1 checks passed
+
+
+def test_run_scenario_records_hard_failures_metric(monkeypatch):
+    from mantis.eval.expectations import ForbiddenAnswerPattern
+
+    labels = dict(scenario="echo-scenario", model_alias="model-a", environment=metrics.environment())
+    before = metrics.EVAL_HARD_FAILURES_TOTAL.labels(**labels)._value.get()
+
+    _patch_openai(monkeypatch, {"model-a": [_final("the firewall caused it")]})
+    scenario = _echo_scenario(
+        expectations=[ForbiddenAnswerPattern("firewall caused", hard=True)]
+    )
+    run_scenario(scenario, "model-a", base_model_config=_base_config())
+
+    after = metrics.EVAL_HARD_FAILURES_TOTAL.labels(**labels)._value.get()
+    assert after == before + 1
+
+
+def test_run_scenario_without_expectations_records_unscored_and_skips_score_ratio(monkeypatch):
+    labels = dict(scenario="echo-scenario", model_alias="model-a", environment=metrics.environment())
+    before = metrics.EVAL_RUNS_TOTAL.labels(result="unscored", **labels)._value.get()
+
+    _patch_openai(monkeypatch, {"model-a": [_final("no expectations on this scenario")]})
+    scenario = _echo_scenario()  # no expectations
+    run_scenario(scenario, "model-a", base_model_config=_base_config())
+
+    after = metrics.EVAL_RUNS_TOTAL.labels(result="unscored", **labels)._value.get()
+    assert after == before + 1
+
+
+def test_run_scenario_backend_failure_records_error_result(monkeypatch):
+    labels = dict(scenario="echo-scenario", model_alias="model-a", environment=metrics.environment())
+    before = metrics.EVAL_RUNS_TOTAL.labels(result="error", **labels)._value.get()
+
+    _patch_openai(monkeypatch, {"model-a": [_backend_error()]})
+    scenario = _echo_scenario()
+    result = run_scenario(scenario, "model-a", base_model_config=_base_config())
+
+    after = metrics.EVAL_RUNS_TOTAL.labels(result="error", **labels)._value.get()
+    assert after == before + 1
+    assert result.outcome == "error"
