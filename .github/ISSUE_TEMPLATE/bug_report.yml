@@ -1,0 +1,81 @@
+name: Bug report
+description: Report a reproducible problem in Mantis
+title: "[BUG] "
+labels: []
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for reporting a bug. Please avoid including credentials, private keys, access tokens, or sensitive infrastructure details.
+
+  - type: textarea
+    id: summary
+    attributes:
+      label: Summary
+      description: What went wrong?
+      placeholder: A concise description of the problem.
+    validations:
+      required: true
+
+  - type: textarea
+    id: reproduce
+    attributes:
+      label: Steps to reproduce
+      description: Provide the smallest reliable reproduction you can.
+      placeholder: |
+        1. Configure ...
+        2. Run ...
+        3. Observe ...
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behavior
+      description: What did you expect to happen?
+    validations:
+      required: true
+
+  - type: textarea
+    id: actual
+    attributes:
+      label: Actual behavior
+      description: What happened instead? Include bounded, redacted logs or errors when useful.
+    validations:
+      required: true
+
+  - type: input
+    id: version
+    attributes:
+      label: Mantis version or image tag
+      description: For example, a SemVer release, PR tag, or commit SHA.
+      placeholder: "1.2.3 / pr-123 / abcdef0"
+
+  - type: dropdown
+    id: environment
+    attributes:
+      label: Environment
+      options:
+        - Local Python environment
+        - Docker / standalone host
+        - CI / GitHub Actions
+        - Other
+    validations:
+      required: true
+
+  - type: textarea
+    id: context
+    attributes:
+      label: Additional context
+      description: Add any relevant configuration or diagnostic details, with secrets and sensitive infrastructure data redacted.
+
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Checklist
+      options:
+        - label: I searched existing issues for the same problem.
+          required: true
+        - label: I removed credentials, tokens, private keys, and other secrets from this report.
+          required: true
