@@ -1,5 +1,13 @@
 # Changelog
 
+## [1.3.0](https://github.com/jamestrichardson/mantis/compare/mantis-v1.2.0...mantis-v1.3.0) (2026-09-17)
+
+
+### Features
+
+* **observability:** structured JSON logging and Prometheus metrics ([2a3d3ff](https://github.com/jamestrichardson/mantis/commit/2a3d3ff9333b57212e8021854ac6d7efaa452721))
+* **observability:** structured JSON logging and Prometheus metrics ([#38](https://github.com/jamestrichardson/mantis/issues/38), [#39](https://github.com/jamestrichardson/mantis/issues/39)) ([08c50ab](https://github.com/jamestrichardson/mantis/commit/08c50abd938bb1a0437c55d93344dace494dec59))
+
 ## [1.2.0](https://github.com/jamestrichardson/mantis/compare/mantis-v1.1.0...mantis-v1.2.0) (2026-09-16)
 
 
