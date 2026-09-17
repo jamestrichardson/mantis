@@ -18,6 +18,7 @@ class Tool:
     category: str = "general"
     mutating: bool = False
     description: str = ""
+    contains_untrusted_text: bool = True
 ```
 
 - `name` must match `schema["function"]["name"]` exactly (enforced at
@@ -25,10 +26,22 @@ class Tool:
 - `handler` is a plain Python callable. Its keyword arguments must match
   the schema's `parameters`. It should return data structures (dicts,
   lists, primitives) that serialize cleanly to JSON — this is what the
-  model sees.
+  model sees. `AgentRuntime` runs every successful result through
+  `mantis.security.make_model_safe()` before it reaches the model
+  (redaction, size bounding, untrusted-evidence marking) — a tool never
+  needs to implement its own prompt-injection defense, only its own
+  domain-aware preprocessing/bounding on top. See
+  [docs/security.md](security.md).
 - `mutating` defaults to `False`. Every tool in this milestone is
   read-only; see [docs/security.md](security.md) for how mutating
   tools will be handled later.
+- `contains_untrusted_text` defaults to `True`: does this tool's output
+  potentially contain arbitrary external text Mantis doesn't control
+  (AWX stdout, a Loki log line, Git content, a Kubernetes event
+  message)? Leave the default alone unless a tool's result is something
+  Mantis fully constructs itself (a small fixed status object, say) —
+  external operational evidence should always default safely. See
+  [docs/security.md](security.md).
 
 Tools should be **semantic**, not raw API pass-throughs: they decide what
 data actually matters to an agent and preprocess it accordingly (see "AWX
@@ -103,7 +116,9 @@ services, changes DNS, applies infrastructure changes, etc.
    `description` — this is the model's *only* information about when and
    how to call the tool.
 4. Register it: `default_registry.register(Tool(name=..., schema=...,
-   handler=..., category=..., mutating=...))`.
+   handler=..., category=..., mutating=..., contains_untrusted_text=...))`.
+   Leave `contains_untrusted_text` at its default (`True`) for any tool
+   returning external evidence — which, so far, is every tool.
 5. Add the tool's name to any agent's `ALLOWED_TOOLS` that should use it.
 6. Write unit tests that mock the integration's HTTP layer (see
    `tests/test_awx_tools.py`) — never require a live external system.

@@ -20,6 +20,8 @@ a model gateway that sits beside (not inside) the stack.
 │   - calls the model via LiteLLM (OpenAI-compatible)              │
 │   - supplies only the agent's allowed tool schemas               │
 │   - dispatches tool calls, detects duplicates, enforces limits   │
+│   - runs every result through the untrusted-evidence trust       │
+│     boundary before the model sees it (mantis.security)          │
 │   - logs iterations and tool activity                            │
 │   - returns the model's final answer                             │
 └───────────────────────────────────┬─────────────────────────────┘
@@ -28,7 +30,8 @@ a model gateway that sits beside (not inside) the stack.
 ┌───────────────────────────────────────────────────────────────┐
 │                          Tool Registry                          │
 │   mantis.registry.ToolRegistry / default_registry               │
-│   name -> Tool(schema, handler, category, mutating, description) │
+│   name -> Tool(schema, handler, category, mutating,             │
+│                contains_untrusted_text, description)             │
 └───────────────────────────────────┬─────────────────────────────┘
                                      │ registered at import time by
                                      ▼
@@ -67,7 +70,7 @@ User prompt
    │
    ▼
 AgentRuntime.run()
-   │  messages = [system_prompt, user_prompt]
+   │  messages = [system_prompt + UNTRUSTED_TOOL_OUTPUT_POLICY, user_prompt]
    │  tools = registry.schemas_for(["awx_recent_failed_jobs"])
    ▼
 LiteLLM chat.completions.create(messages, tools)
@@ -84,6 +87,10 @@ mantis.tools.awx.awx_recent_failed_jobs(limit=5)
    │    - list_jobs(status="failed", order_by="-finished")
    │    - get_job_stdout(job_id) for each   (txt -> txt_download fallback)
    │  preprocesses stdout -> failure_excerpt + stdout_tail
+   ▼
+mantis.security.make_model_safe(result, contains_untrusted_text=True)
+   │  redact credentials -> bound to MODEL_TOOL_RESULT_MAX_CHARS
+   │  -> mark "untrusted_evidence": true   (see docs/security.md)
    ▼
 Structured JSON result appended to the conversation as a tool message
    │

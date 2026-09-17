@@ -47,6 +47,7 @@ from mantis.config import LiteLLMConfig
 from mantis.observability import metrics
 from mantis.observability.logging import bound_for_log, log_event, new_run_id
 from mantis.registry import Tool, ToolRegistry, default_registry
+from mantis.security import UNTRUSTED_TOOL_OUTPUT_POLICY, make_model_safe
 
 logger = logging.getLogger(__name__)
 
@@ -273,8 +274,13 @@ class AgentRuntime:
         return final_answer
 
     def _run_loop(self, user_prompt: str, *, run_id: str) -> str:
+        # The trust-boundary instruction is appended here, at the runtime
+        # level, rather than requiring every agent to include it in its
+        # own SYSTEM_PROMPT — see mantis.security's module docstring and
+        # docs/security.md. self.system_prompt itself is never mutated.
+        system_content = f"{self.system_prompt}\n\n{UNTRUSTED_TOOL_OUTPUT_POLICY}"
         messages: list[dict[str, Any]] = [
-            {"role": "system", "content": self.system_prompt},
+            {"role": "system", "content": system_content},
             {"role": "user", "content": user_prompt},
         ]
         # Cache of successful tool results by (tool_name, sorted-json-args).
@@ -504,6 +510,15 @@ class AgentRuntime:
             # here instead of the real data starves it of evidence and, in
             # practice, causes it to give up and echo the error back as its
             # "final answer" rather than ever producing a real summary.
+            #
+            # The cached value is the tool's raw result — a duplicate reply
+            # must go through the exact same model-input safety pipeline as
+            # a fresh call, not reintroduce it unprotected.
+            duplicate_tool = self._resolved_tools[tool_name]
+            safe_result = make_model_safe(
+                tool_result_cache[dedupe_key],
+                contains_untrusted_text=duplicate_tool.contains_untrusted_text,
+            )
             payload = {
                 "note": (
                     "You already called this tool with these exact "
@@ -511,7 +526,7 @@ class AgentRuntime:
                     "not change on another call. Use this data now to write "
                     "your final answer instead of calling this tool again."
                 ),
-                "result": tool_result_cache[dedupe_key],
+                "result": safe_result,
             }
             return json.dumps(payload, default=str), False
 
@@ -546,9 +561,14 @@ class AgentRuntime:
             return json.dumps({"error": detail}), False
 
         handler_duration = time.perf_counter() - handler_start
+        # The cache and call_log keep the tool's raw result — internal
+        # diagnostics/eval-log fidelity — but the value actually
+        # serialized into the model-facing tool message must go through
+        # the safety pipeline first, same as a duplicate-call replay.
         tool_result_cache[dedupe_key] = result
         self.call_log.append(
             ToolCallLogEntry(iteration, tool_name, arguments, "ok", result=result)
         )
         emit("ok", arguments=arguments, result=result, duration=handler_duration)
-        return json.dumps(result, default=str), True
+        safe_result = make_model_safe(result, contains_untrusted_text=tool.contains_untrusted_text)
+        return json.dumps(safe_result, default=str), True

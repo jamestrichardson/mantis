@@ -424,3 +424,16 @@ def test_awx_recent_failed_jobs_contract_adoption_keeps_every_prior_field():
         "failure_excerpt",
         "stdout_tail",
     }
+
+
+def test_awx_recent_failed_jobs_tool_is_registered_as_containing_untrusted_text():
+    # AWX stdout/job-event text is external, Mantis-uncontrolled evidence
+    # — the runtime's model-input safety pipeline (mantis.security) must
+    # see this tool as untrusted so results get marked accordingly. See
+    # docs/security.md.
+    from mantis.registry import default_registry
+
+    import mantis.tools  # noqa: F401 — registers built-in tools as a side effect
+
+    tool = default_registry.get("awx_recent_failed_jobs")
+    assert tool.contains_untrusted_text is True
