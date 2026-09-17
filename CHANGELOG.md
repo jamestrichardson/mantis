@@ -1,5 +1,36 @@
 # Changelog
 
+## [1.5.0](https://github.com/jamestrichardson/mantis/compare/mantis-v1.4.0...mantis-v1.5.0) (2026-09-17)
+
+
+### Features
+
+* **awx:** add structured job-event failure inspection tool ([db9d026](https://github.com/jamestrichardson/mantis/commit/db9d026b89b9ec7fad33c282787d12a674a48d8b))
+* **awx:** add structured job-event failure inspection tool ([3712d30](https://github.com/jamestrichardson/mantis/commit/3712d309be97034de1688081a6994ac896d927ec)), closes [#28](https://github.com/jamestrichardson/mantis/issues/28)
+* **loki:** add Loki integration and bounded log-query tool ([bb80de7](https://github.com/jamestrichardson/mantis/commit/bb80de7539539c43f91ab3769ce54f2955a25141))
+* **loki:** add Loki integration and bounded log-query tool ([2d707b1](https://github.com/jamestrichardson/mantis/commit/2d707b16b61c7bb6936195f6ab1da19ea2412e5e))
+* **network:** add reusable host reachability and TCP connectivity tools ([491149e](https://github.com/jamestrichardson/mantis/commit/491149e59532828dbf2788b2a642e60629423992))
+* **network:** add reusable host reachability and TCP connectivity tools ([0e88b97](https://github.com/jamestrichardson/mantis/commit/0e88b974a32e4f23ee9e639f076d8a67232c3dc3)), closes [#8](https://github.com/jamestrichardson/mantis/issues/8)
+* **prometheus:** add Prometheus integration and query tool ([9cf51df](https://github.com/jamestrichardson/mantis/commit/9cf51df908d58f1528a5322f0c6249fb568f752a))
+* **prometheus:** add Prometheus integration and query tool ([4d42c1e](https://github.com/jamestrichardson/mantis/commit/4d42c1eeda6010d958d7372ba9d356b1da7c8963)), closes [#9](https://github.com/jamestrichardson/mantis/issues/9)
+* **reliability:** establish bounded timeouts, retries, failure taxonomy, and run budgets ([0fe484e](https://github.com/jamestrichardson/mantis/commit/0fe484e70dd67107370acecb18a43bd09af4471a))
+* **reliability:** establish bounded timeouts, retries, failure taxonomy, and run budgets ([6933fef](https://github.com/jamestrichardson/mantis/commit/6933fefa9f6d0e3cec20c83f8710bd2aa34bfe7b)), closes [#15](https://github.com/jamestrichardson/mantis/issues/15)
+
+
+### Bug Fixes
+
+* **awx:** correct truncation/inspection-cap semantics, wire tool into AWX Troubleshooter ([b85a294](https://github.com/jamestrichardson/mantis/commit/b85a294f194a559d260b3331054b988f8b34f008))
+* **loki:** narrow start/end schema to RFC3339-only, reject unrepresentable timestamps before HTTP ([0ab2a12](https://github.com/jamestrichardson/mantis/commit/0ab2a12e3713e33f86691c9e794334f692991948))
+* **loki:** reflect malformed warnings shape in meta.truncated ([01d5d3e](https://github.com/jamestrichardson/mantis/commit/01d5d3eaff1d3e82f1d309453993fcb4810b153c))
+* **loki:** source-side limit sentinel for truthful truncation, guard malformed warnings shape ([3fde36d](https://github.com/jamestrichardson/mantis/commit/3fde36d690c5d70e56a22b0633bf7017d4befa93))
+* **network:** report budget_exceeded when deadline stops remaining candidates after a partial failure ([37d4edc](https://github.com/jamestrichardson/mantis/commit/37d4edcbb6a6b43b48bdeeb6b08abf412ce14c4a))
+* **prometheus:** bound invalid-input echo and sample values, fix query-error truncation truthfulness ([606c1a5](https://github.com/jamestrichardson/mantis/commit/606c1a519b3010bbc1d04cbe09b962206a61b734))
+* **prometheus:** fix raw-count-before-filtering bug and malformed result-container masquerading as empty ([d014229](https://github.com/jamestrichardson/mantis/commit/d01422976089ac4815e9c72d7723c0573980f462))
+* **prometheus:** fix raw-count-before-filtering bug and malformed result-container masquerading as empty ([fd4e257](https://github.com/jamestrichardson/mantis/commit/fd4e25711006c2aa16f8e8115565ad583716cd29))
+* **prometheus:** fix truncation blind spots, warning-count cap, and non-finite input validation ([d859435](https://github.com/jamestrichardson/mantis/commit/d859435154b2eea19da465179c15730da9996383))
+* **reliability:** close breaker blind spot and harden config validation ([e922d5f](https://github.com/jamestrichardson/mantis/commit/e922d5f578d2bce924bf5d9dae2689b9ea0fd688))
+* **reliability:** stop within-call hammering once the breaker opens, reject non-finite config, fix docs claim ([a53c57f](https://github.com/jamestrichardson/mantis/commit/a53c57fde3f68fb9e085a9e626f08c2d8d68e71d))
+
 ## [1.4.0](https://github.com/jamestrichardson/mantis/compare/mantis-v1.3.1...mantis-v1.4.0) (2026-09-17)
 
 
