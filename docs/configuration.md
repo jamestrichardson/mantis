@@ -79,7 +79,7 @@ and metrics catalog.
 |--------------------------|----------|------------|--------------|
 | `MANTIS_LOG_LEVEL`       | no       | `INFO`     | Log level for the structured JSON logs `mantis.cli.main` configures at startup. |
 | `MANTIS_ENVIRONMENT`     | no       | `local`    | Value of the `environment` label on every metric (e.g. `production`, `staging`). Purely a metrics label — unrelated to `MANTIS_ENV`'s `.env.*` file selection below. |
-| `MANTIS_METRICS_ENABLED` | no       | `false`\* | Starts the Prometheus `/metrics` HTTP server at process startup. \*The Dockerfile sets this `true` by default for container/service mode; a local one-shot CLI run defaults to `false`. |
+| `MANTIS_METRICS_ENABLED` | no       | `false`    | Starts the Prometheus `/metrics` HTTP server at process startup. Off by default everywhere, including the Docker image — each Mantis CLI invocation is a short-lived process, so a default-on server would bind `:9108` (and contend for it under concurrent invocations) for a window that closes when the command exits. Set explicitly for local/manual testing of the endpoint. See [docs/observability.md](observability.md#current-status-of-metrics). |
 | `MANTIS_METRICS_PORT`    | no       | `9108`     | Port the metrics server binds. |
 | `MANTIS_METRICS_ADDR`    | no       | `0.0.0.0`  | Address the metrics server binds. |
 

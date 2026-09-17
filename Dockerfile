@@ -20,11 +20,14 @@ RUN useradd --create-home --uid 1000 --shell /usr/sbin/nologin mantis
 
 COPY --from=builder /install /usr/local
 
-# Service/container-mode default (see docs/observability.md): expose the
-# Prometheus /metrics endpoint without requiring extra configuration at
-# deploy time. A local one-shot `mantis <agent> "prompt"` invocation
-# outside a container is unaffected unless this same env var is set.
-ENV MANTIS_METRICS_ENABLED=true
+# Documents the metrics port this image is prepared to serve on, but
+# does NOT start the metrics server by default: Mantis today runs as a
+# short-lived CLI process per invocation (`docker compose exec mantis
+# mantis ...`), not a resident service, so a default-on metrics server
+# would bind 9108 (and contend for it under concurrent invocations) for
+# a window that closes the moment the command exits. See
+# docs/observability.md. Set MANTIS_METRICS_ENABLED=true explicitly for
+# local/manual testing of the endpoint itself.
 EXPOSE 9108
 
 USER mantis
