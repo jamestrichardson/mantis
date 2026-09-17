@@ -1,5 +1,18 @@
 # Changelog
 
+## [1.4.0](https://github.com/jamestrichardson/mantis/compare/mantis-v1.3.1...mantis-v1.4.0) (2026-09-17)
+
+
+### Features
+
+* **security:** establish untrusted tool-output trust boundary ([be789ef](https://github.com/jamestrichardson/mantis/commit/be789eff11423544144b64a49f32dc2afb7d2e96))
+* **security:** establish untrusted tool-output trust boundary ([#14](https://github.com/jamestrichardson/mantis/issues/14)) ([594df4a](https://github.com/jamestrichardson/mantis/commit/594df4a616d8f3bd111cd4295a54dd5d064080b2))
+
+
+### Bug Fixes
+
+* **security:** make MODEL_TOOL_RESULT_MAX_CHARS a true ceiling, guarantee serializable output ([012dd81](https://github.com/jamestrichardson/mantis/commit/012dd812b9f98e414ed178466c72460d1377d868))
+
 ## [1.3.1](https://github.com/jamestrichardson/mantis/compare/mantis-v1.3.0...mantis-v1.3.1) (2026-09-17)
 
 
