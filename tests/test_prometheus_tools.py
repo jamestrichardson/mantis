@@ -28,6 +28,7 @@ from mantis.tools.prometheus import (
     MAX_SERIES_RETURNED,
     MAX_TOTAL_SAMPLES,
     MAX_WARNING_CHARS,
+    MAX_WARNINGS_RETURNED,
     PromQLValidationError,
     RangeValidationError,
     TimeValidationError,
@@ -130,6 +131,16 @@ def test_parse_time_input_rejects_other_types():
         _parse_time_input([1, 2, 3])
 
 
+@pytest.mark.parametrize("value", [float("nan"), float("inf"), float("-inf")])
+def test_parse_time_input_rejects_non_finite_numbers(value):
+    # Regression test (PR #76 review): a bare numeric-type check lets
+    # NaN/inf through, which would later corrupt range-window/point-
+    # density arithmetic or blow up timestamp formatting rather than
+    # failing cleanly here.
+    with pytest.raises(TimeValidationError, match="finite"):
+        _parse_time_input(value)
+
+
 # ---------------------------------------------------------------------------
 # Range validation
 # ---------------------------------------------------------------------------
@@ -145,6 +156,15 @@ def test_validate_step_rejects_zero_or_negative():
         _validate_step(0)
     with pytest.raises(RangeValidationError):
         _validate_step(-5)
+
+
+@pytest.mark.parametrize("value", [float("nan"), float("inf"), float("-inf")])
+def test_validate_step_rejects_non_finite_numbers(value):
+    # Regression test (PR #76 review): "step < MIN_RANGE_STEP_SECONDS"
+    # alone silently passes NaN through, since every comparison with
+    # NaN is False.
+    with pytest.raises(RangeValidationError, match="finite"):
+        _validate_step(value)
 
 
 def test_validate_range_rejects_start_equal_end():
@@ -186,6 +206,30 @@ def test_range_validation_failure_makes_zero_http_calls(prom_client):
     )
 
     result = prometheus_query_range("up", 0, 3600, 1, _client=prom_client)
+
+    assert route.call_count == 0
+    assert result["query_error"]["type"] == "invalid_input"
+
+
+@respx.mock
+def test_nan_step_rejected_end_to_end_with_zero_http_calls(prom_client):
+    route = respx.get("https://prom.example.test/api/v1/query_range").mock(
+        return_value=httpx.Response(200, json=_success("matrix", []))
+    )
+
+    result = prometheus_query_range("up", 0, 3600, float("nan"), _client=prom_client)
+
+    assert route.call_count == 0
+    assert result["query_error"]["type"] == "invalid_input"
+
+
+@respx.mock
+def test_infinite_start_time_rejected_end_to_end_with_zero_http_calls(prom_client):
+    route = respx.get("https://prom.example.test/api/v1/query_range").mock(
+        return_value=httpx.Response(200, json=_success("matrix", []))
+    )
+
+    result = prometheus_query_range("up", float("inf"), 3600, 60, _client=prom_client)
 
     assert route.call_count == 0
     assert result["query_error"]["type"] == "invalid_input"
@@ -476,6 +520,48 @@ def test_oversized_label_key_and_value_are_bounded(prom_client):
 
 
 @respx.mock
+def test_oversized_label_value_marks_truncated(prom_client):
+    # Regression test (PR #76 review): shortening an oversized label
+    # key/value is itself omitted evidence -- it must set
+    # meta.truncated=true even when the series/label *count* never hit
+    # any cap.
+    huge_value = "v" * 1000
+    entry = {"metric": {"__name__": "up", "instance": huge_value}, "value": [1700000000.0, "1"]}
+    respx.get("https://prom.example.test/api/v1/query").mock(
+        return_value=httpx.Response(200, json=_success("vector", [entry]))
+    )
+
+    result = prometheus_query("up", _client=prom_client)
+
+    assert result["meta"]["truncated"] is True
+
+
+@respx.mock
+def test_oversized_label_key_marks_truncated(prom_client):
+    huge_key = "k" * 1000
+    entry = {"metric": {"__name__": "up", huge_key: "x"}, "value": [1700000000.0, "1"]}
+    respx.get("https://prom.example.test/api/v1/query").mock(
+        return_value=httpx.Response(200, json=_success("vector", [entry]))
+    )
+
+    result = prometheus_query("up", _client=prom_client)
+
+    assert result["meta"]["truncated"] is True
+
+
+@respx.mock
+def test_labels_within_bounds_do_not_mark_truncated(prom_client):
+    entry = {"metric": {"__name__": "up", "instance": "ferros-c01:9100"}, "value": [1700000000.0, "1"]}
+    respx.get("https://prom.example.test/api/v1/query").mock(
+        return_value=httpx.Response(200, json=_success("vector", [entry]))
+    )
+
+    result = prometheus_query("up", _client=prom_client)
+
+    assert result["meta"]["truncated"] is False
+
+
+@respx.mock
 def test_maximum_label_count_is_enforced(prom_client):
     metric = {f"label{i}": "x" for i in range(MAX_LABELS_PER_SERIES + 10)}
     metric["__name__"] = "up"
@@ -518,6 +604,50 @@ def test_warning_strings_are_bounded(prom_client):
     result = prometheus_query("up", _client=prom_client)
 
     assert len(result["warnings"][0]) <= MAX_WARNING_CHARS + len("...")
+
+
+@respx.mock
+def test_warning_count_is_bounded(prom_client):
+    # Regression test (PR #76 review): each warning string being bounded
+    # is not enough on its own -- the number of warnings must also be
+    # capped, or a response with thousands of warnings hands the model
+    # thousands of bounded strings, defeating the cardinality contract.
+    payload = _success("vector", [_vector_entry("up", "a:9100", "1")])
+    payload["warnings"] = [f"warning {i}" for i in range(MAX_WARNINGS_RETURNED + 50)]
+    respx.get("https://prom.example.test/api/v1/query").mock(return_value=httpx.Response(200, json=payload))
+
+    result = prometheus_query("up", _client=prom_client)
+
+    assert len(result["warnings"]) == MAX_WARNINGS_RETURNED
+    assert result["meta"]["truncated"] is True
+
+
+@respx.mock
+def test_warning_count_exactly_at_cap_does_not_mark_truncated(prom_client):
+    payload = _success("vector", [_vector_entry("up", "a:9100", "1")])
+    payload["warnings"] = [f"warning {i}" for i in range(MAX_WARNINGS_RETURNED)]
+    respx.get("https://prom.example.test/api/v1/query").mock(return_value=httpx.Response(200, json=payload))
+
+    result = prometheus_query("up", _client=prom_client)
+
+    assert len(result["warnings"]) == MAX_WARNINGS_RETURNED
+    assert result["meta"]["truncated"] is False
+
+
+@respx.mock
+def test_warning_count_is_bounded_on_a_query_error_response(prom_client):
+    payload = {
+        "status": "error",
+        "errorType": "bad_data",
+        "error": "bad query",
+        "warnings": [f"warning {i}" for i in range(MAX_WARNINGS_RETURNED + 5)],
+    }
+    respx.get("https://prom.example.test/api/v1/query").mock(return_value=httpx.Response(400, json=payload))
+
+    result = prometheus_query("up{", _client=prom_client)
+
+    assert len(result["warnings"]) == MAX_WARNINGS_RETURNED
+    assert result["meta"]["truncated"] is True
 
 
 @respx.mock

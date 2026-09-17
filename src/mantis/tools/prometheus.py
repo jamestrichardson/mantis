@@ -25,6 +25,7 @@ Adopts the shared result contract from ``mantis.contracts`` (``meta`` /
 from __future__ import annotations
 
 import logging
+import math
 from datetime import datetime, timezone
 from typing import Any
 
@@ -66,6 +67,12 @@ MAX_LABEL_VALUE_CHARS = 256
 MAX_WARNING_CHARS = 500
 """Bounds on individual label keys/values and Prometheus warning
 strings — never a raw, unbounded string reaching the model."""
+
+MAX_WARNINGS_RETURNED = 20
+"""Cap on the *number* of Prometheus warning strings returned, separate
+from :data:`MAX_WARNING_CHARS` (which only bounds each string's
+length) — a response with thousands of warnings must not hand the
+model thousands of bounded strings either."""
 
 MIN_RANGE_STEP_SECONDS = 1.0
 """Smallest allowed range-query step, in seconds."""
@@ -138,7 +145,10 @@ def _parse_time_input(value: Any) -> float:
     if isinstance(value, bool):
         raise TimeValidationError("time value must be a string or number, not a boolean")
     if isinstance(value, (int, float)):
-        return float(value)
+        value = float(value)
+        if not math.isfinite(value):
+            raise TimeValidationError(f"time value must be a finite number, got {value!r}")
+        return value
     if isinstance(value, str):
         try:
             parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
@@ -155,9 +165,17 @@ def _parse_time_input(value: Any) -> float:
 def _validate_step(step: Any) -> float:
     if isinstance(step, bool) or not isinstance(step, (int, float)):
         raise RangeValidationError(f"step must be a number of seconds, got {type(step).__name__}")
-    if step < MIN_RANGE_STEP_SECONDS:
-        raise RangeValidationError(f"step must be >= {MIN_RANGE_STEP_SECONDS} seconds, got {step}")
-    return float(step)
+    step = float(step)
+    # math.isfinite() rejects both NaN and +/-inf explicitly -- a bare
+    # "step < MIN_RANGE_STEP_SECONDS" comparison silently passes NaN
+    # through (every comparison with NaN is False), and +inf would
+    # later blow up range/point-density arithmetic and timestamp
+    # formatting rather than failing cleanly here.
+    if not math.isfinite(step) or step < MIN_RANGE_STEP_SECONDS:
+        raise RangeValidationError(
+            f"step must be a finite number >= {MIN_RANGE_STEP_SECONDS} seconds, got {step!r}"
+        )
+    return step
 
 
 def _validate_range(start: float, end: float, step: float) -> None:
@@ -187,6 +205,16 @@ def _bounded_str(text: Any, max_chars: int) -> str:
     return text[:max_chars] + "..."
 
 
+def _bounded_str_with_flag(text: Any, max_chars: int) -> tuple[str, bool]:
+    """Same as :func:`_bounded_str`, but also reports whether shortening
+    actually happened — callers that feed this into ``truncated`` need
+    to know when evidence was omitted, not just the bounded value."""
+    text = str(text)
+    if len(text) <= max_chars:
+        return text, False
+    return text[:max_chars] + "...", True
+
+
 def _label_sort_key(metric: dict[str, Any]) -> tuple:
     """A deterministic ordering key for one series, based on its
     normalized label set — never upstream response order or Python
@@ -199,13 +227,21 @@ def _bounded_labels(metric: dict[str, Any]) -> tuple[dict[str, str], bool]:
     """Bound a series' label set: at most :data:`MAX_LABELS_PER_SERIES`
     labels, each key/value bounded to
     :data:`MAX_LABEL_KEY_CHARS`/:data:`MAX_LABEL_VALUE_CHARS`. Returns
-    ``(bounded_labels, labels_were_truncated)``."""
+    ``(bounded_labels, labels_were_truncated)`` — the flag is set both
+    when labels were dropped for exceeding the count cap *and* when any
+    individual key/value was itself shortened, since either one means
+    the returned labels no longer fully represent what Prometheus
+    reported (see #9 item 12 / #28's and #8's review history on
+    truncation correctness — this must not silently omit evidence while
+    claiming nothing was truncated)."""
     items = sorted(metric.items())
     labels_truncated = len(items) > MAX_LABELS_PER_SERIES
-    bounded = {
-        _bounded_str(k, MAX_LABEL_KEY_CHARS): _bounded_str(v, MAX_LABEL_VALUE_CHARS)
-        for k, v in items[:MAX_LABELS_PER_SERIES]
-    }
+    bounded: dict[str, str] = {}
+    for k, v in items[:MAX_LABELS_PER_SERIES]:
+        bounded_key, key_truncated = _bounded_str_with_flag(k, MAX_LABEL_KEY_CHARS)
+        bounded_value, value_truncated = _bounded_str_with_flag(v, MAX_LABEL_VALUE_CHARS)
+        labels_truncated = labels_truncated or key_truncated or value_truncated
+        bounded[bounded_key] = bounded_value
     return bounded, labels_truncated
 
 
@@ -318,11 +354,30 @@ def _invalid_input_result(
     }
 
 
+def _bound_warnings(raw_warnings: list[Any]) -> tuple[list[str], bool]:
+    """Bound both the *number* of warnings (:data:`MAX_WARNINGS_RETURNED`)
+    and each individual warning string's length
+    (:data:`MAX_WARNING_CHARS`) — a response with thousands of warnings
+    must not reach the model as thousands of bounded strings. Returns
+    ``(bounded_warnings, warnings_were_truncated)``."""
+    truncated = len(raw_warnings) > MAX_WARNINGS_RETURNED
+    bounded: list[str] = []
+    for w in raw_warnings[:MAX_WARNINGS_RETURNED]:
+        bounded_w, was_shortened = _bounded_str_with_flag(w, MAX_WARNING_CHARS)
+        bounded.append(bounded_w)
+        truncated = truncated or was_shortened
+    return bounded, truncated
+
+
 def _shape_result(response: PrometheusAPIResponse, *, query_section: dict[str, Any]) -> dict[str, Any]:
-    warnings = [_bounded_str(w, MAX_WARNING_CHARS) for w in response.warnings]
+    warnings, warnings_truncated = _bound_warnings(response.warnings)
 
     if response.status == "error":
-        meta = QueryMeta(source_system="prometheus", derived_fields=list(DERIVED_RESULT_FIELDS))
+        meta = QueryMeta(
+            source_system="prometheus",
+            truncated=warnings_truncated,
+            derived_fields=list(DERIVED_RESULT_FIELDS),
+        )
         return {
             "meta": meta.to_dict(),
             "query": query_section,
@@ -339,13 +394,15 @@ def _shape_result(response: PrometheusAPIResponse, *, query_section: dict[str, A
     result_type = response.result_type
     series: list[dict[str, Any]] = []
     value: dict[str, Any] | None = None
-    truncated = False
+    truncated = warnings_truncated
     observation_time: str | None = None
 
     if result_type == "vector":
-        series, truncated = _normalize_vector(response.result or [])
+        series, series_truncated = _normalize_vector(response.result or [])
+        truncated = truncated or series_truncated
     elif result_type == "matrix":
-        series, truncated = _normalize_matrix(response.result or [])
+        series, series_truncated = _normalize_matrix(response.result or [])
+        truncated = truncated or series_truncated
     elif result_type in ("scalar", "string"):
         value = _normalize_sample(response.result)
         if value is not None:

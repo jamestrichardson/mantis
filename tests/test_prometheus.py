@@ -208,6 +208,34 @@ def test_malformed_success_envelope_raises_prometheus_error(prom_client):
 
 
 @respx.mock
+def test_success_envelope_with_non_object_data_raises_prometheus_error_not_attribute_error(prom_client):
+    # Regression test (PR #76 review): "data" being a list (or any
+    # non-object) previously reached data.get(...) directly and raised
+    # an unclassified AttributeError instead of a clean PrometheusError.
+    respx.get("https://prom.example.test/api/v1/query").mock(
+        return_value=httpx.Response(200, json={"status": "success", "data": []})
+    )
+
+    with pytest.raises(PrometheusError) as excinfo:
+        prom_client.query("up")
+
+    assert excinfo.value.kind == IntegrationErrorKind.UNKNOWN
+
+
+@respx.mock
+def test_success_envelope_with_missing_data_defaults_to_empty(prom_client):
+    respx.get("https://prom.example.test/api/v1/query").mock(
+        return_value=httpx.Response(200, json={"status": "success"})
+    )
+
+    response = prom_client.query("up")
+
+    assert response.status == "success"
+    assert response.result is None
+    assert response.result_type is None
+
+
+@respx.mock
 def test_non_json_response_raises_prometheus_error(prom_client):
     respx.get("https://prom.example.test/api/v1/query").mock(
         return_value=httpx.Response(200, text="not json")

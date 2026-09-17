@@ -162,7 +162,16 @@ def _parse_envelope(response: httpx.Response, *, action: str) -> PrometheusAPIRe
     warnings = [str(w) for w in (payload.get("warnings") or [])]
 
     if status == "success":
-        data = payload.get("data") or {}
+        data = payload.get("data")
+        if data is None:
+            data = {}
+        if not isinstance(data, dict):
+            raise PrometheusError(
+                f"Prometheus returned a malformed API envelope for {action} "
+                f"('data' was a {type(data).__name__}, not an object)",
+                kind=IntegrationErrorKind.UNKNOWN,
+                status_code=response.status_code,
+            )
         return PrometheusAPIResponse(
             status="success",
             result_type=data.get("resultType"),

@@ -114,6 +114,14 @@ range validation simple and unambiguous. The normalized requested
 window is always reported back in the result's `query` section as
 RFC3339, regardless of which input form was used.
 
+A numeric `time`/`start`/`end`/`step` must be finite — `float("nan")`
+and `+inf`/`-inf` are rejected explicitly (`math.isfinite()`), not just
+checked against zero/negative. A bare range comparison alone isn't
+enough: every comparison against NaN is `False`, so a NaN step would
+otherwise silently pass a `step < MIN_RANGE_STEP_SECONDS` check and
+later corrupt the range-window/point-density arithmetic, or blow up
+timestamp formatting.
+
 ## PromQL validation
 
 `mantis.tools.prometheus.validate_promql` does **not** parse PromQL
@@ -158,6 +166,7 @@ bound is a named constant in `mantis.tools.prometheus`:
 | `MAX_LABEL_KEY_CHARS` | 128 | Per label key. |
 | `MAX_LABEL_VALUE_CHARS` | 256 | Per label value. |
 | `MAX_WARNING_CHARS` | 500 | Per Prometheus warning string. |
+| `MAX_WARNINGS_RETURNED` | 20 | Number of warning strings — separate from `MAX_WARNING_CHARS`, which only bounds each string's length. |
 
 These bounds are applied deterministically *before* #14's global
 model-input size ceiling — #14's bound is a final safety backstop, not
@@ -178,13 +187,21 @@ actually kept after bounding:
 - Exactly `MAX_SAMPLES_PER_SERIES` samples exist for a series →
   `truncated = false`.
 - One more than that → `truncated = true`.
+- Exactly `MAX_WARNINGS_RETURNED` warnings exist → `truncated = false`.
+- One more than that → `truncated = true`.
 
-The same logic covers malformed entries dropped during normalization
-(see "Malformed data" below) and label truncation — any of these
-reduce the returned count below the raw count, which is exactly what
-`truncated` tracks. See `mantis.tools.prometheus._normalize_vector`/
-`_normalize_matrix` and `tests/test_prometheus_tools.py`'s exact-cap
-vs. over-cap tests for the direct proof.
+This also covers **shortening**, not just dropping: a label key or
+value, or a warning string, that gets cut down to its character limit
+is evidence being reduced just as much as an omitted series — so
+`_bounded_labels()`/`_bound_warnings()` set the truncation flag on that
+basis too, not only on count. The same applies to malformed entries
+dropped during normalization (see "Malformed data" below) — any of
+these reduce the returned count/content below what Prometheus actually
+reported, which is exactly what `truncated` tracks. See
+`mantis.tools.prometheus._normalize_vector`/`_normalize_matrix`/
+`_bounded_labels`/`_bound_warnings` and `tests/test_prometheus_tools.py`'s
+exact-cap-vs-over-cap and oversized-key/value tests for the direct
+proof.
 
 ### Deterministic ordering
 
@@ -312,6 +329,13 @@ Kept strictly separate:
   contributing to the run-local breaker, never silently flattened
   together with a query error into one generic "Prometheus failed."
 
+A malformed envelope — non-JSON, missing/unrecognized `status`, or a
+`"data"` value that isn't itself an object (`"data": []` rather than
+`"data": {"resultType": ..., "result": ...}`) — also raises a classified
+`PrometheusError` rather than letting an unrelated Python exception
+(e.g. `AttributeError` from calling `.get()` on a list) leak out
+unclassified. See `mantis.integrations.prometheus._parse_envelope`.
+
 Note that Prometheus sometimes uses HTTP 503 for a query timeout
 specifically — this module deliberately does **not** special-case that
 into a query error. #15's reliability contract treats 503 as a
@@ -323,9 +347,12 @@ contract for one specific status code. See
 ## Warnings
 
 Prometheus may return `warnings` alongside a successful result (e.g. a
-query that hit an internal sample limit). Preserved in bounded form
-(`MAX_WARNING_CHARS` per string) — never discarded silently, never
-turned into a query failure, never dumped unbounded. Warning text is
+query that hit an internal sample limit). Preserved in bounded form —
+both the length of each string (`MAX_WARNING_CHARS`) and the number of
+warnings returned (`MAX_WARNINGS_RETURNED`) are capped, so a response
+with thousands of warnings never reaches the model as thousands of
+bounded strings. Never discarded silently, never turned into a query
+failure, never dumped unbounded. Warning text is
 untrusted external data and flows through the same #14 pipeline as
 everything else here.
 
