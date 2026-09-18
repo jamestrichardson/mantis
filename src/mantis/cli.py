@@ -17,6 +17,7 @@ from mantis.observability.metrics import start_metrics_server
 
 AGENTS = {
     "awx-troubleshooter": "mantis.agents.awx_troubleshooter",
+    "system-troubleshooter": "mantis.agents.system_troubleshooter",
 }
 
 # Subcommands that aren't agents — dispatched to their own CLI module

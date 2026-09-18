@@ -11,9 +11,16 @@ just by convention.
   `AgentRuntime` only ever sends the model schemas for that resolved set
   — an agent cannot invoke a tool it wasn't given, regardless of what the
   model is prompted or tricked into requesting.
-- The AWX Troubleshooter's toolset is `["awx_recent_failed_jobs"]`: one
-  read-only operation. It has no path to launching, cancelling, or
-  modifying anything in AWX.
+- The AWX Troubleshooter's toolset is `["awx_recent_failed_jobs",
+  "awx_get_job_failure"]`: two read-only operations. It has no path to
+  launching, cancelling, or modifying anything in AWX.
+- The System Troubleshooter (#11) has a broader toolset —
+  `awx_recent_failed_jobs`, `awx_get_job_failure`,
+  `check_tcp_connectivity`, `prometheus_query`, `prometheus_query_range`,
+  `loki_query` — but the same principle holds at that larger scale:
+  every one is explicitly named, every one is read-only, and the agent
+  has no path to any tool, mutating or otherwise, that isn't in that
+  list. See [docs/system-troubleshooter.md](system-troubleshooter.md).
 - Credentials used by integrations (AWX token, LiteLLM key) should
   themselves be scoped as narrowly as the underlying system allows — see
   below.

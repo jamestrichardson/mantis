@@ -104,7 +104,8 @@ src/mantis/
 │   ├── loki.py                  # loki_query (semantic tool)
 │   └── kubernetes.py            # kubernetes_list_pods/_deployments/_nodes/_events (semantic tools)
 ├── agents/
-│   └── awx_troubleshooter.py  # AWX Troubleshooting Agent
+│   ├── awx_troubleshooter.py     # AWX Troubleshooting Agent
+│   └── system_troubleshooter.py  # System Troubleshooter Agent — see docs/system-troubleshooter.md
 ├── observability/              # structured logs + Prometheus metrics — see docs/observability.md
 │   ├── logging.py             # JSONFormatter, log_event(), bound_for_log(), configure_logging()
 │   └── metrics.py             # shared CollectorRegistry, metric definitions, start_metrics_server()
@@ -116,11 +117,12 @@ src/mantis/
     ├── results.py             # EvalResult, ToolCallSummary
     ├── cli.py                 # `mantis eval run|list-scenarios|list-models`
     └── fixtures/
-        ├── awx.py             # FixtureAWXClient + golden AWX scenarios
-        ├── network.py         # fixture-backed check_tcp_connectivity + combined AWX+TCP scenarios
-        ├── prometheus.py      # fixture-backed prometheus_query_range + combined AWX+TCP+Prometheus scenarios
-        ├── loki.py            # fixture-backed loki_query + the all-four-sources incident-correlation scenario
-        └── kubernetes.py      # fixture-backed kubernetes_list_pods + the pod-restart/scrape-gap scenario
+        ├── awx.py                    # FixtureAWXClient + golden AWX scenarios
+        ├── network.py                # fixture-backed check_tcp_connectivity + combined AWX+TCP scenarios
+        ├── prometheus.py             # fixture-backed prometheus_query/_range + combined AWX+TCP+Prometheus scenarios
+        ├── loki.py                   # fixture-backed loki_query + the all-four-sources incident-correlation scenario
+        ├── kubernetes.py             # fixture-backed kubernetes_list_pods + the pod-restart/scrape-gap scenario
+        └── system_troubleshooter.py  # the real System Troubleshooter's three golden scenarios — see docs/system-troubleshooter.md
 ```
 
 See [docs/evaluation.md](evaluation.md) for the evaluation harness itself

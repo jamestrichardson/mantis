@@ -106,9 +106,10 @@ Model produces a final answer (no tool_calls) -> returned to the user
 
 ## Why tools are separated from agents
 
-If tool logic lived inside `mantis.agents.awx_troubleshooter`, a future
-System Troubleshooting Agent that also needs "recent failed AWX jobs"
-would have to duplicate (and inevitably drift from) that logic. Keeping
+If tool logic lived inside `mantis.agents.awx_troubleshooter`, the
+System Troubleshooter Agent (#11), which also needs "recent failed AWX
+jobs," would have had to duplicate (and inevitably drift from) that
+logic. Keeping
 tools in `mantis.tools`, registered once in a shared registry, means:
 
 - The AWX stdout-fallback and preprocessing behavior is implemented and
@@ -133,23 +134,26 @@ prompted.
 
 Adding a new agent (see [docs/agents.md](agents.md)) never requires
 touching `mantis.tools` or `mantis.integrations` unless genuinely new
-capability is needed. For example, the planned System Troubleshooting
-Agent's toolset is expected to be:
+capability is needed. The System Troubleshooter Agent's (#11) toolset is
+the proof: every one of its tools already existed before #11 started,
+and #11 added zero lines to any of them:
 
 ```python
+# mantis/agents/system_troubleshooter.py
 ALLOWED_TOOLS = [
-    "awx_recent_failed_jobs",     # already implemented, reused as-is
-    "awx_get_job_failure",        # already implemented, reused as-is
-    "check_tcp_connectivity",     # already implemented, reused as-is
-    "prometheus_query",           # already implemented, reused as-is
-    "prometheus_query_range",     # already implemented, reused as-is
-    "loki_query",                 # already implemented, reused as-is
+    "awx_recent_failed_jobs",     # #28, reused as-is
+    "awx_get_job_failure",        # #28, reused as-is
+    "check_tcp_connectivity",     # #8, reused as-is
+    "prometheus_query",           # #9, reused as-is
+    "prometheus_query_range",     # #9, reused as-is
+    "loki_query",                 # #10, reused as-is
 ]
 ```
 
-Every one of these tools requires zero changes to support this — each
-is simply named in a second agent's `ALLOWED_TOOLS` list. See
-[docs/agents.md](agents.md) for the full envisioned agent list.
+Each is simply named in a second agent's `ALLOWED_TOOLS` list — see
+[docs/system-troubleshooter.md](system-troubleshooter.md) for the full
+agent and [docs/agents.md](agents.md) for the envisioned agent list
+beyond it.
 
 ## Why AWX stdout and failure detection are handled the way they are
 

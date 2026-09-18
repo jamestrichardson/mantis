@@ -49,10 +49,11 @@ mantis.eval
 ├── expectations.py  # Deterministic check vocabulary (RequiredToolCall, ...)
 ├── scoring.py       # evaluate_result(): expectations -> Evaluation
 ├── fixtures/        # Fixture-backed Tool builders, one module per system
-│   ├── awx.py         # FixtureAWXClient(s) + eight golden AWX scenarios
-│   ├── network.py     # check_tcp_connectivity fixture + two combined AWX+network scenarios
-│   ├── prometheus.py  # FixturePrometheusClient + two combined AWX+network+Prometheus scenarios
-│   └── loki.py        # FixtureLokiClient + one combined AWX+network+Prometheus+Loki scenario
+│   ├── awx.py                    # FixtureAWXClient(s) + eight golden AWX scenarios
+│   ├── network.py                # check_tcp_connectivity fixture + two combined AWX+network scenarios
+│   ├── prometheus.py             # FixturePrometheusClient + two combined AWX+network+Prometheus scenarios
+│   ├── loki.py                   # FixtureLokiClient + one combined AWX+network+Prometheus+Loki scenario
+│   └── system_troubleshooter.py  # the real System Troubleshooter agent's three golden scenarios
 ├── runner.py        # run_scenario() / run_comparison()
 ├── results.py       # EvalResult / ToolCallSummary (the result record)
 └── cli.py           # `mantis eval run|list-scenarios|list-models`
@@ -407,6 +408,40 @@ sources — `awx_get_job_failure` (#28, historical), `prometheus_query_range`
 See [docs/loki.md](loki.md) for the full tool design and
 `tests/eval/test_loki_scenarios.py` for the deterministic scoring tests.
 
+### The System Troubleshooter's golden scenarios (#11)
+
+Three live in `mantis/eval/fixtures/system_troubleshooter.py`, and are
+the first eval scenarios to reuse a real production agent's exact
+`ALLOWED_TOOLS`/`SYSTEM_PROMPT`/`TOOL_CALL_BUDGET` for a *multi-tool*
+agent (imported directly from `mantis.agents.system_troubleshooter`,
+the same `awx-no-route` convention the AWX Troubleshooter established):
+
+| Scenario | Tests |
+|---|---|
+| `system-troubleshooter-full-investigation` | AWX + TCP + Prometheus + Loki are all required and all agree (historical failure, current success, recovered metrics, logs showing the outage and recovery). Golden behavior correlates all four with correct temporal framing, without an unsupported specific cause or a permanent-fix claim. |
+| `system-troubleshooter-retrieval-failure` | Identical AWX/TCP/Prometheus evidence, but `loki_query` raises a real `LokiError` (transport failure) — exercising `AgentRuntime`'s actual integration-error handling path, not a hand-faked failure result. Golden behavior still attempts the Loki call (a hard `RequiredToolAttempt` check — distinct from `RequiredToolCall`, which only counts a successful outcome and could never be satisfied here), reports that source as unavailable, and never converts the retrieval failure into a claim about the target system (a hard `NoRetrievalErrorMisattribution` check, extended to also recognize a whole-call `outcome="integration_error"`, not just an embedded `ToolError` dict — see that expectation's docstring). |
+| `system-troubleshooter-contradictory-signals` | AWX historically failed, Prometheus and TCP both show recovery, but the most recent Loki log line — timestamped *after* the metrics recovery point — still shows an authentication timeout. Golden behavior reports this disagreement rather than forcing a "fully resolved" or "still completely down" narrative (both directions are hard checks here, since dropping either half of the disagreement is exactly the failure mode this scenario exists to catch). |
+
+Every fixture-backed tool here is reused directly from #28/#8/#9/#10's
+own fixture modules (`build_awx_get_job_failure_tool`,
+`build_check_tcp_connectivity_tool`, `build_prometheus_query_range_tool`,
+`build_loki_query_tool`, plus the newly-added
+`build_prometheus_query_tool` for the instant-query tool and
+`build_awx_recent_failed_jobs_tool` for the list tool — both needed
+because `ALLOWED_TOOLS` names all six real tools, and `AgentRuntime`
+requires every named tool to resolve against the scenario's registry
+even when a given scenario's golden path doesn't require calling it).
+`FixtureLokiClient.query_range_response` can be either a canned
+`LokiAPIResponse` or an `Exception` instance to raise — the same
+established convention as
+`mantis.eval.fixtures.awx.FixtureAWXClient.stdout_by_job_id` — which is
+what lets the retrieval-failure scenario exercise a *real* `LokiError`.
+
+See [docs/system-troubleshooter.md](system-troubleshooter.md) for the
+full agent design and a worked example, and
+`tests/eval/test_system_troubleshooter_scenarios.py` for the
+deterministic scoring tests.
+
 ### Scoring is computed once, at run time, and persisted
 
 `run_scenario` computes `evaluate_result(scenario.expectations, result)`
@@ -477,16 +512,19 @@ is deliberately not a database — see "Non-goals".
 - **Not every possible golden scenario.** Eight AWX scenarios, two
   combined AWX+network scenarios (#8), two combined
   AWX+network+Prometheus scenarios (#9), one combined
-  AWX+network+Prometheus+Loki scenario (#10), and one combined
+  AWX+network+Prometheus+Loki scenario (#10), three scenarios exercising
+  the real System Troubleshooter agent (#11), and one combined
   Kubernetes+Prometheus scenario (#18) prove the execution path and
   scoring both work end to end across a real spread of behaviors
   (grounding, count-acknowledgment, error-source attribution, ambiguity,
   truncation, stopping behavior, structured-event grounding,
   historical-vs-current-state grounding, multi-signal timeline
   correlation, prompt-injection-resistant log evidence handling,
-  pod-restart/scrape-gap temporal correlation without unsupported causal
-  direction); Git scenarios are follow-on work under #13, reusing this
-  same expectation vocabulary and the fixture pattern documented above.
+  retrieval-failure vs. target-system-state attribution,
+  contradictory-signal preservation, pod-restart/scrape-gap temporal
+  correlation without unsupported causal direction); Git scenarios are
+  follow-on work under #13, reusing this same expectation vocabulary and
+  the fixture pattern documented above.
 - **No cross-run regression tracking / trend dashboards.** Each JSONL
   file is self-contained and comparable to others by hand; automated
   "did this get worse since last week" tooling is a later Track 1

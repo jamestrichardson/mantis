@@ -48,6 +48,11 @@ class Scenario:
             same rationale as ``tool_call_budget`` — a scenario should
             reproduce the real agent's tuning, not evaluate a model under
             different conditions than production actually uses.
+        max_iterations: Optional ``AgentRuntime(max_iterations=...)``
+            passthrough, same rationale as ``tool_call_budget``. ``None``
+            (default) leaves ``AgentRuntime``'s own default in place —
+            only set this when a scenario claims to reproduce a specific
+            agent's run-budget contract.
         expectations: Deterministic, non-LLM-judged checks against a
             completed run — see ``mantis.eval.expectations`` for the
             vocabulary (required/max tool calls, required evidence,
@@ -67,6 +72,7 @@ class Scenario:
     build_registry: Callable[[], ToolRegistry]
     tool_call_budget: int | None = None
     temperature: float | None = None
+    max_iterations: int | None = None
     expectations: list["Expectation"] = field(default_factory=list)
 
 
