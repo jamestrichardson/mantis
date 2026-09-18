@@ -1,5 +1,21 @@
 # Changelog
 
+## [1.6.0](https://github.com/jamestrichardson/mantis/compare/mantis-v1.5.0...mantis-v1.6.0) (2026-09-18)
+
+
+### Features
+
+* **agent:** add System Troubleshooter multi-source investigation agent ([00a1443](https://github.com/jamestrichardson/mantis/commit/00a144316d44613efa40caf54d04e9aea6deb6fe))
+* **agent:** add System Troubleshooter multi-source investigation agent ([f67c527](https://github.com/jamestrichardson/mantis/commit/f67c5273fa1e028343180c9f198975b6351456d6))
+* **kubernetes:** add read-only Kubernetes inspection tools ([5cfbefa](https://github.com/jamestrichardson/mantis/commit/5cfbefa04f154674ac07bca6cf3cd86264b2c104))
+* **kubernetes:** add read-only Kubernetes inspection tools ([a73a84d](https://github.com/jamestrichardson/mantis/commit/a73a84dd73bf506315f02ee0632660ea20ed7a83))
+
+
+### Bug Fixes
+
+* **agent:** small eval/config consistency fix ([2983bca](https://github.com/jamestrichardson/mantis/commit/2983bca15106db975cb68d5ab14e3e0a189c4831))
+* **kubernetes:** propagate nested truncation, classify auth failures ([a54b222](https://github.com/jamestrichardson/mantis/commit/a54b222aea7780bdb64b66ed7fc360f4f3341812))
+
 ## [1.5.0](https://github.com/jamestrichardson/mantis/compare/mantis-v1.4.0...mantis-v1.5.0) (2026-09-17)
 
 
