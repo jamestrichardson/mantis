@@ -16,10 +16,17 @@ import sys
 # Importing mantis.tools registers all built-in tools (including AWX) into
 # the shared default_registry as a side effect.
 import mantis.tools  # noqa: F401
-from mantis.config import ConfigurationError
+from mantis.config import ConfigurationError, LiteLLMConfig
 from mantis.runtime import AgentRuntime, MaxIterationsExceededError
 
 AGENT_NAME = "awx-troubleshooter"
+
+MODEL_ENV = "MANTIS_AWX_TROUBLESHOOTER_MODEL"
+"""Optional agent-specific model override (a minimal precursor to #16's
+full routing/escalation policy — see `LiteLLMConfig.from_env`'s
+`model_env` parameter). Falls back to `LITELLM_MODEL`, then the
+built-in default, when unset — existing deployments setting only
+`LITELLM_MODEL` are unaffected."""
 
 DEFAULT_PROMPT = "Show me the last 5 failed AWX jobs and summarize them."
 
@@ -115,6 +122,10 @@ def build_runtime() -> AgentRuntime:
     ``temperature=0.1``: keeps a smaller local model's output focused and
     consistently formatted rather than prone to rambling or malformed tool
     calls.
+
+    ``model_config``: resolved via ``LiteLLMConfig.from_env(model_env=MODEL_ENV)``,
+    so ``MANTIS_AWX_TROUBLESHOOTER_MODEL`` overrides ``LITELLM_MODEL`` for
+    this agent specifically when set — see ``LiteLLMConfig.from_env``.
     """
     return AgentRuntime(
         name=AGENT_NAME,
@@ -122,6 +133,7 @@ def build_runtime() -> AgentRuntime:
         tools=ALLOWED_TOOLS,
         tool_call_budget=1,
         temperature=0.1,
+        model_config=LiteLLMConfig.from_env(model_env=MODEL_ENV),
     )
 
 

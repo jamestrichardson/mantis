@@ -20,10 +20,12 @@ from mantis.agents.system_troubleshooter import (
     ALLOWED_TOOLS,
     DEFAULT_PROMPT,
     MAX_ITERATIONS,
+    MODEL_ENV,
     SYSTEM_PROMPT,
     TOOL_CALL_BUDGET,
     build_runtime,
 )
+from mantis.config import LiteLLMConfig
 from mantis.registry import Tool, ToolRegistry
 from mantis.runtime import AgentRuntime
 
@@ -145,16 +147,45 @@ def test_build_runtime_uses_the_shared_default_registry():
     assert runtime.registry is default_registry
 
 
-def test_build_runtime_does_not_pin_a_specific_model_config():
+def test_build_runtime_does_not_pin_a_hardcoded_model_config(monkeypatch):
     # Model selection must be configuration-driven (a configured LiteLLM
-    # alias via LITELLM_MODEL), never a provider-specific model ID
-    # hardcoded in the agent -- see mantis.config.LiteLLMConfig.from_env
-    # and this agent's build_runtime docstring.
+    # alias via LITELLM_MODEL, optionally overridden per-agent via
+    # MODEL_ENV), never a provider-specific model ID hardcoded in the
+    # agent -- see mantis.config.LiteLLMConfig.from_env and this agent's
+    # build_runtime docstring.
+    monkeypatch.delenv("MANTIS_SYSTEM_TROUBLESHOOTER_MODEL", raising=False)
+
     runtime = build_runtime()
 
-    from mantis.config import LiteLLMConfig
-
     assert runtime.model_config == LiteLLMConfig.from_env()
+
+
+# ---------------------------------------------------------------------------
+# Per-agent model override (#16 precursor) -- see
+# mantis.config.LiteLLMConfig.from_env's model_env parameter.
+# ---------------------------------------------------------------------------
+
+
+def test_model_env_constant_is_the_documented_variable_name():
+    assert MODEL_ENV == "MANTIS_SYSTEM_TROUBLESHOOTER_MODEL"
+
+
+def test_build_runtime_uses_the_agent_specific_model_override_when_set(monkeypatch):
+    monkeypatch.setenv("LITELLM_MODEL", "global-model")
+    monkeypatch.setenv("MANTIS_SYSTEM_TROUBLESHOOTER_MODEL", "system-specific-model")
+
+    runtime = build_runtime()
+
+    assert runtime.model_config.model == "system-specific-model"
+
+
+def test_build_runtime_falls_back_to_litellm_model_when_override_unset(monkeypatch):
+    monkeypatch.setenv("LITELLM_MODEL", "global-model")
+    monkeypatch.delenv("MANTIS_SYSTEM_TROUBLESHOOTER_MODEL", raising=False)
+
+    runtime = build_runtime()
+
+    assert runtime.model_config.model == "global-model"
 
 
 def test_agent_cannot_call_a_tool_outside_its_allowlist():

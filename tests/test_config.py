@@ -39,6 +39,73 @@ def test_litellm_model_uses_explicit_value_when_set(monkeypatch):
     assert cfg.model == "some-other-model"
 
 
+# ---------------------------------------------------------------------------
+# Per-agent model override (a minimal precursor to #16's full routing/
+# escalation policy -- see LiteLLMConfig.from_env's model_env parameter).
+# Precedence: model_env (if given and set/non-empty) -> LITELLM_MODEL ->
+# DEFAULT_LITELLM_MODEL.
+# ---------------------------------------------------------------------------
+
+
+def test_model_env_override_wins_over_litellm_model(monkeypatch):
+    monkeypatch.setenv("LITELLM_MODEL", "global-model")
+    monkeypatch.setenv("MANTIS_SYSTEM_TROUBLESHOOTER_MODEL", "agent-specific-model")
+
+    cfg = LiteLLMConfig.from_env(model_env="MANTIS_SYSTEM_TROUBLESHOOTER_MODEL")
+
+    assert cfg.model == "agent-specific-model"
+
+
+def test_model_env_falls_back_to_litellm_model_when_unset(monkeypatch):
+    monkeypatch.setenv("LITELLM_MODEL", "global-model")
+    monkeypatch.delenv("MANTIS_SYSTEM_TROUBLESHOOTER_MODEL", raising=False)
+
+    cfg = LiteLLMConfig.from_env(model_env="MANTIS_SYSTEM_TROUBLESHOOTER_MODEL")
+
+    assert cfg.model == "global-model"
+
+
+def test_model_env_falls_back_to_litellm_model_when_set_but_empty(monkeypatch):
+    # An empty string is treated the same as unset -- never resolved to
+    # a literal empty model alias.
+    monkeypatch.setenv("LITELLM_MODEL", "global-model")
+    monkeypatch.setenv("MANTIS_SYSTEM_TROUBLESHOOTER_MODEL", "")
+
+    cfg = LiteLLMConfig.from_env(model_env="MANTIS_SYSTEM_TROUBLESHOOTER_MODEL")
+
+    assert cfg.model == "global-model"
+
+
+def test_model_env_falls_back_to_built_in_default_when_both_absent(monkeypatch):
+    monkeypatch.delenv("LITELLM_MODEL", raising=False)
+    monkeypatch.delenv("MANTIS_SYSTEM_TROUBLESHOOTER_MODEL", raising=False)
+
+    cfg = LiteLLMConfig.from_env(model_env="MANTIS_SYSTEM_TROUBLESHOOTER_MODEL")
+
+    assert cfg.model == DEFAULT_LITELLM_MODEL
+
+
+def test_model_env_omitted_preserves_prior_litellm_model_only_behavior(monkeypatch):
+    # Existing deployments that only ever set LITELLM_MODEL (never any
+    # agent-specific override) must resolve exactly as before -- calling
+    # from_env() with no model_env at all is unaffected by this feature.
+    monkeypatch.setenv("LITELLM_MODEL", "global-model")
+    monkeypatch.setenv("MANTIS_SYSTEM_TROUBLESHOOTER_MODEL", "should-be-ignored")
+
+    cfg = LiteLLMConfig.from_env()
+
+    assert cfg.model == "global-model"
+
+
+def test_model_env_does_not_affect_url_or_api_key(monkeypatch):
+    monkeypatch.setenv("MANTIS_SYSTEM_TROUBLESHOOTER_MODEL", "agent-specific-model")
+
+    cfg = LiteLLMConfig.from_env(model_env="MANTIS_SYSTEM_TROUBLESHOOTER_MODEL")
+
+    assert cfg.url == "http://localhost:4000"
+    assert cfg.api_key.get_secret_value() == "test-key"
+
+
 def test_load_env_files_most_specific_file_wins(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
     monkeypatch.setenv("MANTIS_ENV", "myenv")

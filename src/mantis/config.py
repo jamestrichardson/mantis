@@ -173,11 +173,34 @@ class LiteLLMConfig:
     model: str
 
     @classmethod
-    def from_env(cls) -> "LiteLLMConfig":
+    def from_env(cls, *, model_env: str | None = None) -> "LiteLLMConfig":
+        """Resolve LiteLLM connection settings, with an optional
+        agent-specific model override.
+
+        ``model_env``, when given, names an environment variable an
+        individual agent's ``build_runtime()`` can use to pin its own
+        model alias (e.g. ``MANTIS_SYSTEM_TROUBLESHOOTER_MODEL`` for
+        one agent, ``MANTIS_AWX_TROUBLESHOOTER_MODEL`` for another) —
+        this is a minimal precursor to #16's full routing/escalation
+        policy, not that policy itself: no fallback, retry, or
+        escalation across models happens here, and this stays entirely
+        server-side (never a caller-supplied field on the API/CLI).
+
+        Resolution precedence: ``model_env`` (if given and set/non-empty)
+        -> ``LITELLM_MODEL`` -> :data:`DEFAULT_LITELLM_MODEL`. With
+        ``model_env`` omitted or unset, this is exactly the prior
+        ``LITELLM_MODEL``-or-default behavior — existing deployments
+        that only set ``LITELLM_MODEL`` are unaffected.
+        """
+        model = None
+        if model_env is not None:
+            model = os.environ.get(model_env) or None
+        if model is None:
+            model = os.environ.get("LITELLM_MODEL") or DEFAULT_LITELLM_MODEL
         return cls(
             url=_require("LITELLM_URL"),
             api_key=_require_secret("LITELLM_API_KEY"),
-            model=os.environ.get("LITELLM_MODEL") or DEFAULT_LITELLM_MODEL,
+            model=model,
         )
 
 

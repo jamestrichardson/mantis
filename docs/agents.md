@@ -101,8 +101,16 @@ Agents specialize primarily through:
 1. **System prompt** — domain framing, evidentiary standards, output
    shape.
 2. **Allowed tools** — what it can actually observe/do.
-3. **Model configuration** — which model/settings to use (defaults to
-   `LiteLLMConfig.from_env()`, but can be overridden per-agent if needed).
+3. **Model configuration** — which model/settings to use. Both current
+   agents resolve their `model_config` via
+   `LiteLLMConfig.from_env(model_env="MANTIS_<AGENT>_MODEL")`, so an
+   optional agent-specific environment variable (e.g.
+   `MANTIS_AWX_TROUBLESHOOTER_MODEL`) can pin that agent to a different
+   LiteLLM alias than the global `LITELLM_MODEL` default — see
+   [docs/configuration.md](configuration.md#per-agent-model-overrides).
+   This is a minimal precursor to #16's full model routing/escalation
+   policy, not that policy itself, and stays entirely server-side
+   configuration — never a field a caller sets through the API or CLI.
 
 Agents should *not* specialize by embedding tool or integration logic
 directly in the agent module.
