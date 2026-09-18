@@ -60,7 +60,32 @@ as the basis for a differently-named environment (e.g. `cp .env.example
 |-------------------|----------|---------|--------------|
 | `LITELLM_URL`     | yes      | —       | Base URL of your LiteLLM gateway, e.g. `http://bespin.cosprings.teknofile.net:4000/v1`. `AgentRuntime` appends `/v1` if not already present, so either form works. |
 | `LITELLM_API_KEY` | yes      | —       | LiteLLM virtual key. Use a scoped virtual key, not a raw upstream provider key — see [docs/security.md](security.md). |
-| `LITELLM_MODEL`   | no       | `qwen3-opencode:latest` | Model name/alias as registered in LiteLLM. |
+| `LITELLM_MODEL`   | no       | `qwen3-opencode:latest` | Default model name/alias as registered in LiteLLM — used by any agent with no per-agent override set below. |
+| `MANTIS_AWX_TROUBLESHOOTER_MODEL` | no | — (falls back to `LITELLM_MODEL`) | Model alias for the AWX Troubleshooter agent specifically. See [Per-agent model overrides](#per-agent-model-overrides) below. |
+| `MANTIS_SYSTEM_TROUBLESHOOTER_MODEL` | no | — (falls back to `LITELLM_MODEL`) | Model alias for the System Troubleshooter agent specifically. See [Per-agent model overrides](#per-agent-model-overrides) below. |
+
+### Per-agent model overrides
+
+Each agent resolves its model independently, via
+`LiteLLMConfig.from_env(model_env=...)`: the agent's own env var (if set
+to a non-empty value) wins, otherwise `LITELLM_MODEL` is used, otherwise
+the built-in default (`qwen3-opencode:latest`). `LITELLM_URL`/
+`LITELLM_API_KEY` are unaffected — every agent still talks to the same
+LiteLLM gateway with the same credential, only the model *alias* sent in
+each request can differ.
+
+This is a minimal precursor to **#16**'s full model routing/escalation
+policy, not that policy itself: there is no fallback, retry, or
+escalation across models, no per-model budget, and no adaptive
+selection — each agent simply resolves one fixed model alias at
+`build_runtime()` time. Model selection also remains entirely
+server-side configuration: it is not, and must never become, a field on
+`POST /api/v1/runs` or a CLI argument — see
+[docs/api.md](api.md#invoking-an-agent).
+
+Existing deployments that only set `LITELLM_MODEL` are unaffected — both
+agents simply keep resolving that same value, exactly as before this
+existed.
 
 ## AWX
 

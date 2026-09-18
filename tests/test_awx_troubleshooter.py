@@ -18,7 +18,8 @@ from typing import Any
 import httpx
 import respx
 
-from mantis.agents.awx_troubleshooter import ALLOWED_TOOLS, SYSTEM_PROMPT, build_runtime
+from mantis.agents.awx_troubleshooter import ALLOWED_TOOLS, MODEL_ENV, SYSTEM_PROMPT, build_runtime
+from mantis.config import LiteLLMConfig
 
 
 @dataclass
@@ -100,6 +101,35 @@ def test_build_runtime_resolves_both_tools_against_the_default_registry():
 
 def test_system_prompt_explains_when_to_use_the_job_failure_tool():
     assert "awx_get_job_failure" in SYSTEM_PROMPT
+
+
+# ---------------------------------------------------------------------------
+# Per-agent model override (#16 precursor) -- see
+# mantis.config.LiteLLMConfig.from_env's model_env parameter.
+# ---------------------------------------------------------------------------
+
+
+def test_model_env_constant_is_the_documented_variable_name():
+    assert MODEL_ENV == "MANTIS_AWX_TROUBLESHOOTER_MODEL"
+
+
+def test_build_runtime_uses_the_agent_specific_model_override_when_set(monkeypatch):
+    monkeypatch.setenv("LITELLM_MODEL", "global-model")
+    monkeypatch.setenv("MANTIS_AWX_TROUBLESHOOTER_MODEL", "awx-specific-model")
+
+    runtime = build_runtime()
+
+    assert runtime.model_config.model == "awx-specific-model"
+
+
+def test_build_runtime_falls_back_to_litellm_model_when_override_unset(monkeypatch):
+    monkeypatch.setenv("LITELLM_MODEL", "global-model")
+    monkeypatch.delenv("MANTIS_AWX_TROUBLESHOOTER_MODEL", raising=False)
+
+    runtime = build_runtime()
+
+    assert runtime.model_config.model == "global-model"
+    assert runtime.model_config == LiteLLMConfig.from_env()
 
 
 @respx.mock
