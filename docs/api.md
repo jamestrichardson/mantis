@@ -307,7 +307,9 @@ Three distinct timeouts, easy to conflate:
 1. **Your HTTP client's own request timeout** — how long *you're*
    willing to wait for a response. Set this generously: a real
    multi-tool investigation can legitimately take tens of seconds. The
-   official CLI defaults to `MANTIS_API_CLIENT_READ_TIMEOUT_SECONDS=300`.
+   official CLI defaults to `MANTIS_API_CLIENT_READ_TIMEOUT_SECONDS=340`
+   — deliberately *above* the server's own run deadline below, so the
+   client never gives up before the server itself would.
 2. **The Mantis run deadline** (`MANTIS_RUN_TIMEOUT_SECONDS`, #15,
    default `300`) — how long the *server* lets one agent run continue
    before giving up. Exceeding it produces `outcome="error"`,

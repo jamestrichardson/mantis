@@ -31,9 +31,7 @@ from mantis.api_client import (
     ApiUnavailableError,
     MantisApiClient,
 )
-from mantis.config import get_metrics_enabled
 from mantis.observability.logging import configure_logging
-from mantis.observability.metrics import start_metrics_server
 
 T = TypeVar("T")
 
@@ -139,12 +137,18 @@ def _print_usage() -> None:
 
 def main(argv: list[str] | None = None) -> int:
     # Wired centrally here — the single `mantis` entry point — rather
-    # than in each subcommand, so log level/format and the metrics
-    # endpoint are configurable without touching any subcommand's
-    # implementation. Every invocation goes through this function.
+    # than in each subcommand, so log level/format is configurable
+    # without touching any subcommand's implementation. Every
+    # invocation goes through this function. Metrics-server ownership
+    # is deliberately *not* handled here: it belongs to whichever
+    # subcommand actually owns a metrics lifecycle (`mantis serve` in
+    # mantis.api.server.run_server, `mantis eval` in
+    # mantis.eval.cli.main) — starting it generically here would let
+    # `mantis serve` bind :9108 twice (once here, once in
+    # run_server), and would start a listener in the `mantis
+    # agents`/`mantis run` HTTP-client commands, which never touch the
+    # metrics registry at all. See docs/observability.md.
     configure_logging()
-    if get_metrics_enabled(default=False):
-        start_metrics_server()
 
     argv = sys.argv[1:] if argv is None else argv
 

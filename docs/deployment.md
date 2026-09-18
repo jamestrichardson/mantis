@@ -157,7 +157,7 @@ The Compose health check performs a real, bounded HTTP probe of `/readyz` (see [
 MANTIS_HEALTH_URL=http://127.0.0.1:8080/readyz
 ```
 
-This is the default in `deploy.env.example` — `/readyz` reports `not_ready` only while mandatory local startup is still in progress or shutdown has begun, never because of an AWX/LiteLLM/Kubernetes/Prometheus/Loki outage (see [docs/api.md](api.md#health-and-readiness) for the full contract). `mantis-deploy` polls the resulting Docker health status; `MANTIS_HEALTH_TIMEOUT_SECONDS`/`MANTIS_HEALTH_INTERVAL_SECONDS` control how long it waits.
+This is the default in `deploy.env.example` — `/readyz` reports `not_ready` only while mandatory local startup is still in progress or shutdown has begun, never because of an AWX/LiteLLM/Kubernetes/Prometheus/Loki outage (see [docs/api.md](api.md#health-and-readiness) for the full contract). `mantis-deploy` polls the resulting Docker health status; `MANTIS_HEALTH_TIMEOUT_SECONDS`/`MANTIS_HEALTH_INTERVAL_SECONDS` control how long it waits. Only a Docker-reported `healthy` status promotes a deployment — a container with no healthcheck metadata at all (`docker inspect` reports `none`, e.g. from a missing or misconfigured `healthcheck:` stanza) fails closed: it simply runs out the poll timeout and the deployment is reported as failed, exactly like a container that never passes its healthcheck. It is never treated as an acceptable substitute for a proven `/readyz` result.
 
 ## Graceful shutdown
 

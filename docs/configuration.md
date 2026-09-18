@@ -199,7 +199,7 @@ by the server.
 | `MANTIS_API_URL` | no | `http://localhost:8080` | Base URL of the Mantis API to call. |
 | `MANTIS_API_TOKEN` | only if the server requires auth | — | The bearer token to send. Same variable name as the server's own setting above — they're read by different processes; a client only ever needs this one credential, never the integration credentials. |
 | `MANTIS_API_CLIENT_CONNECT_TIMEOUT_SECONDS` | no | `5.0` | HTTP connect timeout for CLI-to-API requests. |
-| `MANTIS_API_CLIENT_READ_TIMEOUT_SECONDS` | no | `300.0` | HTTP read timeout for CLI-to-API requests — generous, since a real multi-tool agent run can legitimately take a while. |
+| `MANTIS_API_CLIENT_READ_TIMEOUT_SECONDS` | no | `340.0` | HTTP read timeout for CLI-to-API requests — deliberately above `MANTIS_RUN_TIMEOUT_SECONDS`'s own default (`300.0`) below, so the client never gives up on a run before the server itself would. |
 
 ## Observability
 
@@ -210,7 +210,7 @@ and metrics catalog.
 |--------------------------|----------|------------|--------------|
 | `MANTIS_LOG_LEVEL`       | no       | `INFO`     | Log level for the structured JSON logs `mantis.cli.main` configures at startup. |
 | `MANTIS_ENVIRONMENT`     | no       | `local`    | Value of the `environment` label on every metric (e.g. `production`, `staging`). Purely a metrics label — unrelated to `MANTIS_ENV`'s `.env.*` file selection below. |
-| `MANTIS_METRICS_ENABLED` | no       | `false` for `mantis <agent>`/`mantis eval`, `true` for `mantis serve` | Starts the Prometheus `/metrics` HTTP server at process startup. A one-shot CLI invocation defaults it off (a default-on server would bind `:9108`, and contend for it under concurrent invocations, for a window that closes when the command exits); `mantis serve` is the persistent process #66 gives metrics a real, continuously-held-open home in, so it defaults on there. Either default can be overridden explicitly. See [docs/observability.md](observability.md#prometheus-metrics). |
+| `MANTIS_METRICS_ENABLED` | no       | `false` for `mantis eval`, `true` for `mantis serve` | Starts the Prometheus `/metrics` HTTP server at process startup. Each owning subcommand reads this independently — `mantis serve` (`mantis.api.server.run_server`) defaults it *on*, since it's the one persistent process #66 gives metrics a real, continuously-held-open home in; `mantis eval` (`mantis.eval.cli.main`) defaults it *off*, since a one-shot local process has no such home and a default-on server would contend for `:9108` across concurrent invocations. `mantis agents`/`mantis run`/the per-agent convenience commands are pure HTTP clients (#83) and never start a metrics server at all — this variable has no effect on them, regardless of its value. Either owning subcommand's default can be overridden explicitly. See [docs/observability.md](observability.md#prometheus-metrics). |
 | `MANTIS_METRICS_PORT`    | no       | `9108`     | Port the metrics server binds. |
 | `MANTIS_METRICS_ADDR`    | no       | `0.0.0.0`  | Address the metrics server binds. |
 

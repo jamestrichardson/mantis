@@ -1,12 +1,20 @@
-"""Tests for mantis.cli.main(): the metrics-server opt-in gate, and the
-HTTP-client-only dispatch for agent invocation (#83).
+"""Tests for mantis.cli.main(): that it never owns metrics-server
+startup itself, and the HTTP-client-only dispatch for agent invocation
+(#83).
 
-Mantis runs as a short-lived CLI process per invocation — the metrics
-HTTP server must never start unless MANTIS_METRICS_ENABLED is explicitly
-set, in any environment, including inside the Docker image (see
-docs/observability.md and tests/test_dockerfile.py). Structured logging
-has no such gate — it's always configured, since every invocation,
-however short, should emit its event sequence.
+Metrics-server ownership belongs entirely to whichever subcommand
+actually has a metrics lifecycle to manage: `mantis serve`
+(mantis.api.server.run_server, always on by default -- see
+tests/test_api_server.py) and `mantis eval`
+(mantis.eval.cli.main, opt-in -- see tests/eval/test_cli.py). A single
+top-level gate in this module previously double-started the listener
+for `mantis serve` (once here, once in run_server) and started one for
+the HTTP-client-only commands below, which never touch the metrics
+registry at all -- this file now asserts the opposite: cli.main() has
+no metrics-server code path at all, and MANTIS_METRICS_ENABLED=true
+never causes `mantis agents`/`mantis run`/a convenience command to bind
+:9108. Structured logging has no such gate — it's always configured,
+since every invocation, however short, should emit its event sequence.
 
 Agent invocation (`mantis agents`/`mantis run <agent> <prompt>`/the
 per-agent convenience commands) is HTTP-only: this file asserts the CLI
@@ -21,6 +29,7 @@ from __future__ import annotations
 
 import pytest
 
+import mantis.observability.metrics as metrics_module
 from mantis import cli as cli_module
 from mantis.api_client import (
     AgentInfo,
@@ -34,43 +43,60 @@ from mantis.api_client import (
 
 
 @pytest.fixture
-def patched_metrics_server(monkeypatch):
-    calls: list[None] = []
-    monkeypatch.setattr(cli_module, "start_metrics_server", lambda *a, **kw: calls.append(None))
-    return calls
-
-
-@pytest.fixture
 def patched_configure_logging(monkeypatch):
     calls: list[None] = []
     monkeypatch.setattr(cli_module, "configure_logging", lambda *a, **kw: calls.append(None))
     return calls
 
 
-def test_main_does_not_start_metrics_server_by_default(monkeypatch, patched_metrics_server):
-    monkeypatch.delenv("MANTIS_METRICS_ENABLED", raising=False)
+@pytest.fixture
+def patched_start_metrics_server(monkeypatch):
+    calls: list[None] = []
+    monkeypatch.setattr(metrics_module, "start_metrics_server", lambda *a, **kw: calls.append(None))
+    return calls
 
-    cli_module.main(["--help"])
 
-    assert patched_metrics_server == []
+def test_main_has_no_metrics_server_code_path_of_its_own():
+    # Regression guard: cli.main() must not re-acquire a reference to
+    # start_metrics_server/get_metrics_enabled -- that ownership moved
+    # to mantis.api.server.run_server and mantis.eval.cli.main.
+    assert not hasattr(cli_module, "start_metrics_server")
+    assert not hasattr(cli_module, "get_metrics_enabled")
 
 
 @pytest.mark.parametrize("value", ["true", "1", "yes", "on", "True", "ON"])
-def test_main_starts_metrics_server_when_explicitly_enabled(monkeypatch, patched_metrics_server, value):
+def test_agents_command_never_starts_a_metrics_server_even_when_enabled(
+    monkeypatch, patched_start_metrics_server, value
+):
     monkeypatch.setenv("MANTIS_METRICS_ENABLED", value)
+    _client_returning(monkeypatch, "list_agents", return_value=[])
 
-    cli_module.main(["--help"])
+    cli_module.main(["agents"])
 
-    assert len(patched_metrics_server) == 1
+    assert patched_start_metrics_server == []
 
 
-@pytest.mark.parametrize("value", ["false", "0", "no", "off", ""])
-def test_main_does_not_start_metrics_server_for_falsy_values(monkeypatch, patched_metrics_server, value):
+@pytest.mark.parametrize("value", ["true", "1", "yes", "on", "True", "ON"])
+def test_run_command_never_starts_a_metrics_server_even_when_enabled(
+    monkeypatch, patched_start_metrics_server, value
+):
     monkeypatch.setenv("MANTIS_METRICS_ENABLED", value)
+    result = RunResult(
+        run_id="x",
+        agent="system-troubleshooter",
+        outcome="success",
+        output="ok",
+        error_kind=None,
+        error_message=None,
+        started_at="t0",
+        finished_at="t1",
+        duration_ms=1,
+    )
+    _client_returning(monkeypatch, "create_run", return_value=result)
 
-    cli_module.main(["--help"])
+    cli_module.main(["run", "system-troubleshooter", "prompt"])
 
-    assert patched_metrics_server == []
+    assert patched_start_metrics_server == []
 
 
 def test_main_always_configures_logging_regardless_of_metrics_setting(
@@ -296,6 +322,25 @@ def test_api_request_error_includes_error_type(monkeypatch, capsys):
 
     assert exit_code == 1
     assert "unknown_agent" in capsys.readouterr().err
+
+
+def test_not_ready_503_is_reported_distinctly_from_a_generic_server_error(monkeypatch, capsys):
+    # A well-formed 503/not_ready response (MantisApiClient raises it as
+    # ApiRequestError, not ApiServerError -- see tests/test_api_client.py)
+    # must surface through the same error-type-aware path as any other
+    # rejection, not the generic "Mantis API error" ApiServerError message.
+    _client_returning(
+        monkeypatch,
+        "create_run",
+        exc=ApiRequestError(503, "not_ready", "The service is not currently accepting new runs."),
+    )
+
+    exit_code = cli_module.main(["run", "system-troubleshooter", "prompt"])
+
+    assert exit_code == 1
+    err = capsys.readouterr().err
+    assert "not_ready" in err
+    assert "Mantis API error" not in err
 
 
 def test_overload_error_displays_the_servers_run_id(monkeypatch, capsys):

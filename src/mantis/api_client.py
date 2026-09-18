@@ -43,8 +43,12 @@ class ApiAuthError(ApiClientError):
 
 class ApiRequestError(ApiClientError):
     """The API returned a well-formed rejection (HTTP 4xx other than
-    401) — carries the parsed, safe error type/message from the
-    response body (see ``mantis.api.schemas.ErrorResponse``).
+    401), or a well-formed ``503``/``not_ready`` response — carries the
+    parsed, safe error type/message from the response body (see
+    ``mantis.api.schemas.ErrorResponse``). A ``503`` while the service
+    is starting up or shutting down (#21) is a normal, documented API
+    state, not an unexpected server failure — see :class:`ApiServerError`
+    below for the one that is.
 
     ``run_id`` is set when the server had already assigned one before
     rejecting the request (e.g. a 429 overload rejection — see
@@ -61,8 +65,10 @@ class ApiRequestError(ApiClientError):
 
 
 class ApiServerError(ApiClientError):
-    """The API returned an HTTP 5xx, or a response this client could not
-    parse as the expected shape."""
+    """The API returned an HTTP 5xx this client cannot attribute to a
+    known, documented API state (see :class:`ApiRequestError` for the
+    ``503``/``not_ready`` case that is one), or a response this client
+    could not parse as the expected shape."""
 
 
 @dataclass(frozen=True)
@@ -166,6 +172,18 @@ class MantisApiClient:
         if 400 <= response.status_code < 500:
             error_type, message, run_id = _parse_error_body(response)
             raise ApiRequestError(response.status_code, error_type, message, run_id=run_id)
+        if response.status_code == 503:
+            # A well-formed {"error": {"type": "not_ready", ...}} 503 is
+            # the service deliberately reporting it isn't accepting new
+            # runs right now (#21's readiness contract) -- a normal API
+            # state, not a server failure. _parse_error_body() falls back
+            # to "request_error" for anything that doesn't parse as that
+            # exact shape (a proxy/gateway's own bodyless or malformed
+            # 503, say), so only a genuine not_ready envelope takes this
+            # branch; anything else still falls through to ApiServerError.
+            error_type, message, run_id = _parse_error_body(response)
+            if error_type == "not_ready":
+                raise ApiRequestError(response.status_code, error_type, message, run_id=run_id)
         if response.status_code >= 500:
             raise ApiServerError(
                 f"The Mantis API returned an unexpected server error (HTTP {response.status_code})."

@@ -228,6 +228,38 @@ def test_server_error_raises_api_server_error(client):
 
 
 @respx.mock
+def test_well_formed_not_ready_503_raises_api_request_error_not_server_error(client):
+    # A 503 while the service is starting up/shutting down (#21) is a
+    # normal, documented API state -- must not be indistinguishable
+    # from an actual unexpected server failure.
+    respx.post("https://mantis.example.test/api/v1/runs").mock(
+        return_value=httpx.Response(
+            503,
+            json={"error": {"type": "not_ready", "message": "not accepting new runs", "run_id": None}},
+        )
+    )
+
+    with pytest.raises(ApiRequestError) as exc_info:
+        client.create_run("agent", "prompt")
+
+    assert exc_info.value.status_code == 503
+    assert exc_info.value.error_type == "not_ready"
+    assert exc_info.value.run_id is None
+
+
+@respx.mock
+def test_bodyless_503_from_a_proxy_still_raises_api_server_error(client):
+    # A 503 from something that isn't the real Mantis app (a reverse
+    # proxy/gateway failure, say) has no well-formed not_ready envelope
+    # -- it must stay classified as an unexpected server error, not be
+    # misread as a legitimate readiness state.
+    respx.post("https://mantis.example.test/api/v1/runs").mock(return_value=httpx.Response(503))
+
+    with pytest.raises(ApiServerError):
+        client.create_run("agent", "prompt")
+
+
+@respx.mock
 def test_malformed_success_body_raises_api_server_error(client):
     respx.get("https://mantis.example.test/api/v1/agents").mock(return_value=httpx.Response(200, json={}))
 

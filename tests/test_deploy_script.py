@@ -31,6 +31,7 @@ case "$cmd" in
       *pr-59) digest=aaa ;;
       *pr-60) digest=bbb ;;
       *bad) digest=bad ;;
+      *no-healthcheck) digest=nohealthcheck ;;
       *) digest=ccc ;;
     esac
     echo "${repo}@sha256:${digest}"
@@ -55,6 +56,12 @@ case "$cmd" in
         echo running > "$S/container-state"
         if [[ "$ref" == *sha256:bad ]]; then
           echo unhealthy > "$S/health"
+        elif [[ "$ref" == *sha256:nohealthcheck ]]; then
+          # Simulates a container with no Docker healthcheck metadata
+          # at all (a missing/misconfigured `healthcheck:` stanza) --
+          # `docker inspect` reports "none" for this, forever, never
+          # "healthy" or "unhealthy".
+          rm -f "$S/health"
         else
           echo healthy > "$S/health"
         fi
@@ -158,6 +165,23 @@ def test_failed_health_check_restores_previous_known_good_digest(tmp_path: Path)
     assert (root / "state/current-tag").read_text().strip() == "pr-59"
     assert (root / "state/current-ref").read_text().strip().endswith("@sha256:aaa")
     assert "MANTIS_IMAGE_REF=ghcr.io/jamestrichardson/mantis@sha256:aaa" in (root / "deploy.env").read_text()
+
+
+def test_missing_healthcheck_cannot_promote_a_deployment(tmp_path: Path) -> None:
+    # A container reporting Docker health="none" (no healthcheck
+    # metadata at all -- e.g. a misconfigured or missing
+    # `healthcheck:` stanza) must fail closed, not be silently promoted
+    # as if it had proven readiness. See mantis-deploy's
+    # wait_for_health() -- only "healthy" may return success.
+    env, root = _deployment(tmp_path)
+
+    assert _run(env, "pr-59").returncode == 0
+    failed = _run(env, "no-healthcheck")
+
+    assert failed.returncode == 1
+    assert "Rolling back automatically to pr-59" in failed.stdout
+    assert (root / "state/current-tag").read_text().strip() == "pr-59"
+    assert (root / "state/current-ref").read_text().strip().endswith("@sha256:aaa")
 
 
 def test_latest_is_refused(tmp_path: Path) -> None:

@@ -119,10 +119,14 @@ layer adds its own `mantis_api_*` events (request/run lifecycle, see
 
 ## Prometheus metrics
 
-`/metrics` is served by `mantis.observability.metrics.start_metrics_server()`,
-started by `mantis.cli.main()` only when `MANTIS_METRICS_ENABLED` is
-explicitly set — **not** on by default, in the Docker image or anywhere
-else (see [Current status of `/metrics`](#current-status-of-metrics)
+`/metrics` is served by `mantis.observability.metrics.start_metrics_server()`.
+`mantis.cli.main()` — the shared entry point `mantis agents`/`mantis
+run`/the convenience commands go through — has no metrics code path at
+all and never starts it. Ownership belongs entirely to the subcommand
+that actually has a metrics lifecycle: `mantis serve`
+(`mantis.api.server.run_server`, on by default) and `mantis eval`
+(`mantis.eval.cli.main`, opt-in via `MANTIS_METRICS_ENABLED`, not on by
+default — see [Current status of `/metrics`](#current-status-of-metrics)
 for why). See [docs/configuration.md](configuration.md) for
 `MANTIS_METRICS_PORT`/`MANTIS_METRICS_ADDR`, default `:9108`.
 

@@ -18,8 +18,9 @@ import time
 import httpx
 import pytest
 
+import mantis.api.server as server_module
 import mantis.runtime as runtime_module
-from mantis.api.server import build_server
+from mantis.api.server import build_server, run_server
 from mantis.config import ApiServerConfig
 
 
@@ -94,6 +95,54 @@ def test_build_server_uses_the_configured_shutdown_grace_period():
     server = build_server(config)
 
     assert server.config.timeout_graceful_shutdown == 12
+
+
+def test_build_server_preserves_fractional_shutdown_grace_period():
+    # uvicorn's own timeout_graceful_shutdown hands this straight to
+    # asyncio.wait_for(timeout=...), which accepts a float -- this must
+    # not be silently int()-truncated, losing part of the configured
+    # grace period.
+    config = ApiServerConfig(auth_mode="disabled", port=0, shutdown_grace_period_seconds=12.5)
+
+    server = build_server(config)
+
+    assert server.config.timeout_graceful_shutdown == 12.5
+
+
+# ---------------------------------------------------------------------------
+# Metrics ownership: `mantis serve` (run_server) is the sole owner of the
+# persistent metrics listener -- unlike mantis.cli's HTTP-client-only
+# commands, which never touch it at all (see tests/test_cli.py). Uses a
+# fake server object so this exercises exactly run_server()'s own
+# metrics-gating decision, not a real bind/listen.
+# ---------------------------------------------------------------------------
+
+
+class _FakeServer:
+    def run(self) -> None:
+        pass
+
+
+def test_run_server_starts_metrics_by_default(monkeypatch):
+    monkeypatch.delenv("MANTIS_METRICS_ENABLED", raising=False)
+    calls: list[None] = []
+    monkeypatch.setattr(server_module, "start_metrics_server", lambda *a, **kw: calls.append(None))
+    monkeypatch.setattr(server_module, "build_server", lambda config: _FakeServer())
+
+    run_server(config=ApiServerConfig(auth_mode="disabled", port=0))
+
+    assert len(calls) == 1
+
+
+def test_run_server_does_not_start_metrics_when_explicitly_disabled(monkeypatch):
+    monkeypatch.setenv("MANTIS_METRICS_ENABLED", "false")
+    calls: list[None] = []
+    monkeypatch.setattr(server_module, "start_metrics_server", lambda *a, **kw: calls.append(None))
+    monkeypatch.setattr(server_module, "build_server", lambda config: _FakeServer())
+
+    run_server(config=ApiServerConfig(auth_mode="disabled", port=0))
+
+    assert calls == []
 
 
 # ---------------------------------------------------------------------------

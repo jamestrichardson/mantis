@@ -96,7 +96,13 @@ def build_server(config: ApiServerConfig) -> uvicorn.Server:
         app,
         host=config.host,
         port=config.port,
-        timeout_graceful_shutdown=int(config.shutdown_grace_period_seconds),
+        # uvicorn's own type hint says `int`, but it only ever hands this
+        # straight to asyncio.wait_for(timeout=...), which accepts a
+        # float natively -- passed through as configured rather than
+        # int()-truncated, so a fractional MANTIS_API_SHUTDOWN_GRACE_PERIOD_SECONDS
+        # (e.g. 12.5) doesn't silently lose part of its configured grace
+        # period.
+        timeout_graceful_shutdown=config.shutdown_grace_period_seconds,
     )
     return _DrainingAwareServer(uvicorn_config, app)
 
