@@ -177,8 +177,9 @@ These reuse the same runtime and largely the same tools — see
 [docs/architecture.md](architecture.md) for why this composition is
 cheap:
 
-- **Incident Triage Agent** — adds Kubernetes (#18) and git/change-history
-  (#17) tools to correlate a live incident against recent changes.
+- **Incident Triage Agent** — wires the existing Kubernetes (#18) tools
+  and new git/change-history (#17) tools together to correlate a live
+  incident against recent changes.
 - **Daily Operations Digest Agent** — a scheduled, read-only agent that
   summarizes the prior day's AWX activity, alerts, and log anomalies
   using the same shared tools with a digest-oriented prompt.

@@ -19,9 +19,9 @@ investigate real infrastructure, not a generic chatbot wrapper. Concretely:
   evidence-based summary, so a human's time goes to judgment calls, not
   log spelunking.
 - **Build a reusable operational toolset, not one-off scripts.** Every
-  tool (AWX, TCP connectivity, Prometheus, and Loki today; Kubernetes
-  planned) is written once and shared across every agent that needs it —
-  see [Philosophy](#philosophy) below.
+  tool (AWX, TCP connectivity, Prometheus, Loki, and Kubernetes today) is
+  written once and shared across every agent that needs it — see
+  [Philosophy](#philosophy) below.
 - **Stay evidence-based and honest about uncertainty.** Agents are
   instructed to distinguish what a tool actually returned from what they
   are hypothesizing, and to say so explicitly when root cause is
@@ -200,9 +200,10 @@ mantis system-troubleshooter "Investigate why db-primary-02 keeps failing health
 
 ## Roadmap
 
-- **Incident Triage Agent** — adds Kubernetes and git/change history to
-  the System Troubleshooter's evidence sources, correlating a live
-  incident against recent changes.
+- **Incident Triage Agent** — wires the Kubernetes evidence tools (#18,
+  already implemented) and git/change history into the System
+  Troubleshooter's evidence sources, correlating a live incident against
+  recent changes.
 - **Daily Operations Digest Agent** — scheduled summary across the same
   shared tool library.
 - **Mutating tools and an approval/policy layer** — see

@@ -307,3 +307,20 @@ precision, query errors vs. retrieval failures, and why raw log text is
 treated as Mantis's highest-risk untrusted evidence source).
 HTTP/auth/reliability mechanics live in `mantis/integrations/loki.py`;
 semantic shaping in `mantis/tools/loki.py`.
+
+## Kubernetes tool behavior
+
+### `kubernetes_list_pods` / `kubernetes_list_deployments` / `kubernetes_list_nodes` / `kubernetes_list_events` (#18): cluster evidence
+
+Four read-only, bounded Kubernetes evidence tools — pod/workload status,
+Deployment rollout status, node conditions, and recent events — answering
+"what does the cluster API currently report?", distinct from #28's
+historical AWX evidence, #8's current-state TCP evidence, #9's
+time-series Prometheus evidence, and #10's log evidence. See
+[docs/kubernetes.md](kubernetes.md) for the full design (auth modes,
+RBAC guidance, bounding constants, truncation semantics, provenance, and
+what pod/deployment/node/event state does and does not prove). Auth/
+config/API mechanics live in `mantis/integrations/kubernetes.py`;
+semantic shaping in `mantis/tools/kubernetes.py`. Deliberately no
+mutation, `exec`/`attach`/`port-forward`, or generic arbitrary
+Kubernetes API browsing — see #18's non-goals.

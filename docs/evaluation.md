@@ -512,17 +512,19 @@ is deliberately not a database — see "Non-goals".
 - **Not every possible golden scenario.** Eight AWX scenarios, two
   combined AWX+network scenarios (#8), two combined
   AWX+network+Prometheus scenarios (#9), one combined
-  AWX+network+Prometheus+Loki scenario (#10), and three scenarios
-  exercising the real System Troubleshooter agent (#11) prove the
-  execution path and scoring both work end to end across a real spread
-  of behaviors (grounding, count-acknowledgment, error-source
-  attribution, ambiguity, truncation, stopping behavior,
-  structured-event grounding, historical-vs-current-state grounding,
-  multi-signal timeline correlation, prompt-injection-resistant log
-  evidence handling, retrieval-failure vs. target-system-state
-  attribution, contradictory-signal preservation); Git/Kubernetes
-  scenarios are follow-on work under #13, reusing this same expectation
-  vocabulary and the fixture pattern documented above.
+  AWX+network+Prometheus+Loki scenario (#10), three scenarios exercising
+  the real System Troubleshooter agent (#11), and one combined
+  Kubernetes+Prometheus scenario (#18) prove the execution path and
+  scoring both work end to end across a real spread of behaviors
+  (grounding, count-acknowledgment, error-source attribution, ambiguity,
+  truncation, stopping behavior, structured-event grounding,
+  historical-vs-current-state grounding, multi-signal timeline
+  correlation, prompt-injection-resistant log evidence handling,
+  retrieval-failure vs. target-system-state attribution,
+  contradictory-signal preservation, pod-restart/scrape-gap temporal
+  correlation without unsupported causal direction); Git scenarios are
+  follow-on work under #13, reusing this same expectation vocabulary and
+  the fixture pattern documented above.
 - **No cross-run regression tracking / trend dashboards.** Each JSONL
   file is self-contained and comparable to others by hand; automated
   "did this get worse since last week" tooling is a later Track 1
