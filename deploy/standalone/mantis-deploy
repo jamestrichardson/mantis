@@ -101,6 +101,22 @@ compose() {
   docker compose --env-file "$DEPLOY_ENV" -f "$COMPOSE_FILE" "$@"
 }
 
+print_incompatible_rollback_recovery_hint() {
+  # Deliberately never suggests `mantis-deploy <tag>` here: rollback is
+  # digest-based specifically so a moving mutable tag (e.g. a rebuilt
+  # `pr-100`) never changes what "previous known-good" means -- printing
+  # that command as "recovery" would silently reintroduce exactly the
+  # tag-drift problem digest-based rollback exists to prevent. There is
+  # no `mantis-deploy` subcommand that accepts an already-resolved
+  # digest ref directly (a deliberate scope decision, not an oversight,
+  # for this change) -- the guidance below is a manual, one-off bypass
+  # of mantis-deploy's own tracking, not a normal operation.
+  local tag="$1" ref="$2"
+  err "Manual recovery: ${ref} is the exact image last verified good for '${tag}' -- do NOT run 'mantis-deploy ${tag}' to restore it. That re-resolves the mutable tag '${tag}', which may now point at a different digest than ${ref}."
+  err "After separately confirming ${ref} is actually compatible with the currently installed compose.yaml/mantis-deploy (e.g. by restoring a checkout of this tooling recorded under a matching contract), you can restore it directly, bypassing mantis-deploy's own tracking: set MANTIS_IMAGE_REF=${ref} (and MANTIS_DEPLOYED_TAG=${tag}) in ${DEPLOY_ENV}, then run: docker compose --env-file ${DEPLOY_ENV} -f ${COMPOSE_FILE} up -d --force-recreate ${SERVICE_NAME}"
+  err "This bypasses mantis-deploy's health gate and state tracking -- verify readiness yourself, and expect 'mantis-deploy status' to look inconsistent until the next successful 'mantis-deploy <tag>' or 'mantis-deploy rollback' re-establishes state."
+}
+
 container_state() {
   docker inspect --format '{{.State.Status}}' "$CONTAINER_NAME" 2>/dev/null || true
 }
@@ -268,7 +284,7 @@ restore_previous_after_failure() {
     err "Refusing automatic rollback to ${old_tag}: its recorded deployment contract (${old_contract:-unknown}) does not match the currently active contract (${DEPLOYMENT_CONTRACT_VERSION})."
     err "Starting it under the current compose.yaml could repeat exactly the incompatible-lifecycle failure this check exists to prevent (#98) -- refusing to attempt it automatically."
     err "Stopping the failed candidate container; current/previous deployment state is left unchanged."
-    err "Manual recovery: confirm ${old_tag} (${old_ref}) is actually compatible with the currently installed compose.yaml/mantis-deploy, then redeploy it explicitly: mantis-deploy ${old_tag}"
+    print_incompatible_rollback_recovery_hint "$old_tag" "$old_ref"
     emit_event rollback refused_incompatible_contract "$old_tag" "$old_ref"
     compose stop "$SERVICE_NAME" >/dev/null 2>&1 || true
     return 1
@@ -334,8 +350,12 @@ rollback() {
   # previous-contract file (empty here), which is_contract_compatible
   # treats as unknown, not compatible.
   if ! is_contract_compatible "$target_contract"; then
+    err "Refusing rollback to ${target_tag}: its recorded deployment contract (${target_contract:-unknown}) does not match the currently active contract (${DEPLOYMENT_CONTRACT_VERSION})."
+    err "Starting it under the current compose.yaml could repeat an incompatible-lifecycle failure (#98) rather than actually roll back safely."
+    err "The currently running deployment (${current_tag:-unknown}) has NOT been touched."
+    print_incompatible_rollback_recovery_hint "$target_tag" "$target_ref"
     emit_event rollback refused_incompatible_contract "$target_tag" "$target_ref"
-    die "Refusing rollback to ${target_tag}: its recorded deployment contract (${target_contract:-unknown}) does not match the currently active contract (${DEPLOYMENT_CONTRACT_VERSION}). Starting it under the current compose.yaml could repeat an incompatible-lifecycle failure (#98) rather than actually roll back safely. The currently running deployment (${current_tag:-unknown}) has NOT been touched. Manual recovery: confirm ${target_tag} (${target_ref}) is actually compatible with the currently installed compose.yaml/mantis-deploy, then redeploy it explicitly: mantis-deploy ${target_tag}"
+    exit 1
   fi
 
   log "Rolling back ${current_tag:-unknown} -> ${target_tag}"

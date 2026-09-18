@@ -254,6 +254,14 @@ def test_incompatible_contract_refuses_automatic_rollback_before_apply_image(tmp
     # The failed, incompatible-rollback-target candidate is stopped, not
     # left running/restart-looping.
     assert (root / "state/container-state").read_text().strip() == "exited"
+    # The recovery guidance must never *offer* 'mantis-deploy pr-60' as
+    # the way to restore it -- that re-resolves the mutable tag, which
+    # could now point at a different digest than the one actually
+    # verified good. It must instead explicitly warn against that and
+    # name the exact recorded digest.
+    assert "redeploy it explicitly: mantis-deploy pr-60" not in failed.stderr
+    assert "do NOT run 'mantis-deploy pr-60'" in failed.stderr
+    assert "@sha256:bbb" in failed.stderr
 
 
 def test_legacy_state_with_no_recorded_contract_refuses_automatic_rollback(tmp_path: Path) -> None:
@@ -291,6 +299,12 @@ def test_manual_rollback_refuses_incompatible_contract(tmp_path: Path) -> None:
     assert (root / "state/current-tag").read_text().strip() == "pr-60"
     assert (root / "state/previous-tag").read_text().strip() == "pr-59"
     assert (root / "state/previous-contract").read_text().strip() == "0"
+    # Same recovery-guidance property as the automatic path: never
+    # *offer* the mutable tag as the recovery command, always name the
+    # exact recorded digest.
+    assert "redeploy it explicitly: mantis-deploy pr-59" not in result.stderr
+    assert "do NOT run 'mantis-deploy pr-59'" in result.stderr
+    assert "@sha256:aaa" in result.stderr
 
 
 def test_manual_rollback_refuses_legacy_state_with_no_recorded_contract(tmp_path: Path) -> None:
