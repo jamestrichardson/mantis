@@ -1,5 +1,20 @@
 # Changelog
 
+## [1.7.0](https://github.com/jamestrichardson/mantis/compare/mantis-v1.6.0...mantis-v1.7.0) (2026-09-18)
+
+
+### Features
+
+* **api:** add persistent FastAPI service and convert CLI to an HTTP client ([ab33773](https://github.com/jamestrichardson/mantis/commit/ab337730201a271798a6b6d8f0542bfe5998e6f3))
+* **api:** add persistent FastAPI service and convert CLI to an HTTP client ([f0d8f74](https://github.com/jamestrichardson/mantis/commit/f0d8f740bfe800b548bd1faba83239313b5738fd))
+
+
+### Bug Fixes
+
+* **api:** close out PR [#95](https://github.com/jamestrichardson/mantis/issues/95) review findings (graceful shutdown, auth timing, TLS boundary) ([ab62128](https://github.com/jamestrichardson/mantis/commit/ab621289bc09f2ad8347950de9767ae8cbca3a8c))
+* **api:** close out second-pass PR [#95](https://github.com/jamestrichardson/mantis/issues/95) review (metrics ownership, deployment health gate) ([488ad62](https://github.com/jamestrichardson/mantis/commit/488ad62ba13a10d264f36c717fadedd18670ede2))
+* **api:** make 429 run_id actually correlatable, correct timeout docs ([e814b3e](https://github.com/jamestrichardson/mantis/commit/e814b3efbe475d91aa7624b476348da58f6ea1de))
+
 ## [1.6.0](https://github.com/jamestrichardson/mantis/compare/mantis-v1.5.0...mantis-v1.6.0) (2026-09-18)
 
 
