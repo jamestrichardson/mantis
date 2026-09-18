@@ -9,6 +9,18 @@ SERVICE_NAME="${MANTIS_SERVICE_NAME:-mantis}"
 CONTAINER_NAME="${MANTIS_CONTAINER_NAME:-mantis}"
 LOCK_FILE="${DEPLOY_ROOT}/.deploy.lock"
 
+# The lifecycle contract THIS installed compose.yaml/mantis-deploy pair
+# declares -- e.g. "the image's `mantis` CLI has a `serve` subcommand
+# that runs as PID1 and produces the documented /readyz behavior" (#21).
+# Bump this deliberately whenever a future change to compose.yaml's
+# `command`/`healthcheck` (or an equivalent lifecycle-shape change)
+# means an older image can no longer be assumed to work under it (#98).
+# Never inferred from the image's own SemVer tag -- a 1.5.0 image and a
+# 1.7.0 image differ in exactly this way (pre- vs post-#21 `mantis
+# serve`), which SemVer alone doesn't tell you. See "Deployment contract
+# compatibility" in docs/deployment.md.
+DEPLOYMENT_CONTRACT_VERSION="1"
+
 log() { printf '[mantis-deploy] %s\n' "$*"; }
 err() { printf '[mantis-deploy] ERROR: %s\n' "$*" >&2; }
 die() { err "$*"; exit 1; }
@@ -75,6 +87,16 @@ validate_tag() {
   [[ "$tag" =~ ^[A-Za-z0-9_][A-Za-z0-9_.-]{0,127}$ ]] || die "Invalid Docker tag: ${tag}"
 }
 
+is_contract_compatible() {
+  # A recorded deployment's contract is compatible with the currently
+  # installed tooling only on an exact, explicit match -- never inferred
+  # from the image's tag/SemVer, and never assumed for a blank/missing
+  # value (legacy state predating contract tracking, or any other way
+  # this could come back empty) (#98).
+  local recorded_contract="$1"
+  [[ -n "$recorded_contract" && "$recorded_contract" == "$DEPLOYMENT_CONTRACT_VERSION" ]]
+}
+
 compose() {
   docker compose --env-file "$DEPLOY_ENV" -f "$COMPOSE_FILE" "$@"
 }
@@ -137,9 +159,14 @@ resolve_digest_ref() {
 }
 
 emit_event() {
+  # deployment_contract is always this installed tooling's own active
+  # contract version (never the target image's) -- a fixed,
+  # low-cardinality string, never a secret. It tells a reader which
+  # contract regime was in effect for this event, which matters most
+  # for outcome=refused_incompatible_contract (#98).
   local action="$1" outcome="$2" tag="$3" image_ref="$4" timestamp json
   timestamp="$(date -u +'%Y-%m-%dT%H:%M:%SZ')"
-  json="{\"event\":\"mantis_deployment\",\"timestamp\":\"${timestamp}\",\"action\":\"${action}\",\"outcome\":\"${outcome}\",\"requested_tag\":\"${tag}\",\"image_ref\":\"${image_ref}\",\"host\":\"$(hostname -s)\"}"
+  json="{\"event\":\"mantis_deployment\",\"timestamp\":\"${timestamp}\",\"action\":\"${action}\",\"outcome\":\"${outcome}\",\"requested_tag\":\"${tag}\",\"image_ref\":\"${image_ref}\",\"deployment_contract\":\"${DEPLOYMENT_CONTRACT_VERSION}\",\"host\":\"$(hostname -s)\"}"
 
   command -v logger >/dev/null 2>&1 && logger -t mantis-deploy -- "$json" || true
 
@@ -205,22 +232,44 @@ apply_image() {
 }
 
 record_success() {
-  local tag="$1" immutable_ref="$2" old_tag="$3" old_ref="$4"
+  local tag="$1" immutable_ref="$2" old_tag="$3" old_ref="$4" old_contract="$5"
 
   if [[ -n "$old_tag" && -n "$old_ref" ]]; then
     write_state previous-tag "$old_tag"
     write_state previous-ref "$old_ref"
+    if [[ -n "$old_contract" ]]; then
+      write_state previous-contract "$old_contract"
+    else
+      remove_state previous-contract
+    fi
   fi
 
   write_state current-tag "$tag"
   write_state current-ref "$immutable_ref"
+  write_state current-contract "$DEPLOYMENT_CONTRACT_VERSION"
 }
 
 restore_previous_after_failure() {
-  local old_tag="$1" old_ref="$2"
+  local old_tag="$1" old_ref="$2" old_contract="$3"
 
   if [[ -z "$old_tag" || -z "$old_ref" ]]; then
     err "No previous known-good deployment exists; stopping failed container"
+    compose stop "$SERVICE_NAME" >/dev/null 2>&1 || true
+    return 1
+  fi
+
+  # #98: never combine a previous image with the current Compose
+  # lifecycle contract unless that image's own recorded contract is
+  # known to match it. Starting it "to find out" is exactly the failure
+  # mode this check exists to prevent (an old image entering a restart
+  # loop under a `command`/healthcheck it doesn't support) -- so this
+  # refuses *before* any docker pull/compose up for the previous image.
+  if ! is_contract_compatible "$old_contract"; then
+    err "Refusing automatic rollback to ${old_tag}: its recorded deployment contract (${old_contract:-unknown}) does not match the currently active contract (${DEPLOYMENT_CONTRACT_VERSION})."
+    err "Starting it under the current compose.yaml could repeat exactly the incompatible-lifecycle failure this check exists to prevent (#98) -- refusing to attempt it automatically."
+    err "Stopping the failed candidate container; current/previous deployment state is left unchanged."
+    err "Manual recovery: confirm ${old_tag} (${old_ref}) is actually compatible with the currently installed compose.yaml/mantis-deploy, then redeploy it explicitly: mantis-deploy ${old_tag}"
+    emit_event rollback refused_incompatible_contract "$old_tag" "$old_ref"
     compose stop "$SERVICE_NAME" >/dev/null 2>&1 || true
     return 1
   fi
@@ -231,6 +280,7 @@ restore_previous_after_failure() {
   if apply_image "$old_tag" "$old_ref"; then
     write_state current-tag "$old_tag"
     write_state current-ref "$old_ref"
+    write_state current-contract "$old_contract"
     emit_event rollback success "$old_tag" "$old_ref"
     log "Rollback succeeded"
     return 0
@@ -242,12 +292,13 @@ restore_previous_after_failure() {
 }
 
 deploy_tag() {
-  local tag="$1" repository tagged_ref immutable_ref old_tag old_ref
+  local tag="$1" repository tagged_ref immutable_ref old_tag old_ref old_contract
   validate_tag "$tag"
   repository="$(image_repository)"
   tagged_ref="${repository}:${tag}"
   old_tag="$(read_state current-tag || true)"
   old_ref="$(read_state current-ref || true)"
+  old_contract="$(read_state current-contract || true)"
 
   log "Pulling ${tagged_ref}"
   docker pull "$tagged_ref"
@@ -256,23 +307,36 @@ deploy_tag() {
 
   if ! apply_image "$tag" "$immutable_ref"; then
     emit_event deploy failure "$tag" "$immutable_ref"
-    restore_previous_after_failure "$old_tag" "$old_ref" || true
+    restore_previous_after_failure "$old_tag" "$old_ref" "$old_contract" || true
     return 1
   fi
 
-  record_success "$tag" "$immutable_ref" "$old_tag" "$old_ref"
+  record_success "$tag" "$immutable_ref" "$old_tag" "$old_ref" "$old_contract"
   emit_event deploy success "$tag" "$immutable_ref"
   log "Deployed ${tag} (${immutable_ref})"
 }
 
 rollback() {
-  local target_tag target_ref current_tag current_ref
+  local target_tag target_ref target_contract current_tag current_ref current_contract
   target_tag="$(read_state previous-tag || true)"
   target_ref="$(read_state previous-ref || true)"
+  target_contract="$(read_state previous-contract || true)"
   current_tag="$(read_state current-tag || true)"
   current_ref="$(read_state current-ref || true)"
+  current_contract="$(read_state current-contract || true)"
 
   [[ -n "$target_tag" && -n "$target_ref" ]] || die "No previous known-good deployment is recorded"
+
+  # #98: the same compatibility gate as automatic rollback, and for the
+  # same reason -- checked *before* any docker pull/compose up, so an
+  # unsafe rollback never touches the currently running container at
+  # all. Legacy state recorded before contract tracking existed has no
+  # previous-contract file (empty here), which is_contract_compatible
+  # treats as unknown, not compatible.
+  if ! is_contract_compatible "$target_contract"; then
+    emit_event rollback refused_incompatible_contract "$target_tag" "$target_ref"
+    die "Refusing rollback to ${target_tag}: its recorded deployment contract (${target_contract:-unknown}) does not match the currently active contract (${DEPLOYMENT_CONTRACT_VERSION}). Starting it under the current compose.yaml could repeat an incompatible-lifecycle failure (#98) rather than actually roll back safely. The currently running deployment (${current_tag:-unknown}) has NOT been touched. Manual recovery: confirm ${target_tag} (${target_ref}) is actually compatible with the currently installed compose.yaml/mantis-deploy, then redeploy it explicitly: mantis-deploy ${target_tag}"
+  fi
 
   log "Rolling back ${current_tag:-unknown} -> ${target_tag}"
   docker pull "$target_ref" >/dev/null
@@ -284,12 +348,19 @@ rollback() {
 
   write_state current-tag "$target_tag"
   write_state current-ref "$target_ref"
+  write_state current-contract "$target_contract"
   if [[ -n "$current_tag" && -n "$current_ref" ]]; then
     write_state previous-tag "$current_tag"
     write_state previous-ref "$current_ref"
+    if [[ -n "$current_contract" ]]; then
+      write_state previous-contract "$current_contract"
+    else
+      remove_state previous-contract
+    fi
   else
     remove_state previous-tag
     remove_state previous-ref
+    remove_state previous-contract
   fi
 
   emit_event rollback success "$target_tag" "$target_ref"
@@ -297,13 +368,16 @@ rollback() {
 }
 
 status() {
-  local configured_tag configured_ref current_tag current_ref previous_tag previous_ref state health image image_id started
+  local configured_tag configured_ref current_tag current_ref current_contract
+  local previous_tag previous_ref previous_contract state health image image_id started
   configured_tag="$(read_env_value MANTIS_DEPLOYED_TAG "$DEPLOY_ENV" || true)"
   configured_ref="$(read_env_value MANTIS_IMAGE_REF "$DEPLOY_ENV" || true)"
   current_tag="$(read_state current-tag || true)"
   current_ref="$(read_state current-ref || true)"
+  current_contract="$(read_state current-contract || true)"
   previous_tag="$(read_state previous-tag || true)"
   previous_ref="$(read_state previous-ref || true)"
+  previous_contract="$(read_state previous-contract || true)"
   state="$(container_state)"
   health="$(container_health)"
   image="$(running_image_ref)"
@@ -311,17 +385,20 @@ status() {
   started="$(docker inspect --format '{{.State.StartedAt}}' "$CONTAINER_NAME" 2>/dev/null || true)"
 
   cat <<EOF_STATUS
-Configured tag:    ${configured_tag:-unknown}
-Configured image:  ${configured_ref:-unknown}
-Current tag:       ${current_tag:-unknown}
-Current image:     ${current_ref:-unknown}
-Previous tag:      ${previous_tag:-none}
-Previous image:    ${previous_ref:-none}
-Running image:     ${image:-not running}
-Running image ID:  ${image_id:-n/a}
-Container state:   ${state:-not found}
-Container health:  ${health:-n/a}
-Started at:        ${started:-n/a}
+Configured tag:      ${configured_tag:-unknown}
+Configured image:    ${configured_ref:-unknown}
+Active contract:     ${DEPLOYMENT_CONTRACT_VERSION}
+Current tag:         ${current_tag:-unknown}
+Current image:       ${current_ref:-unknown}
+Current contract:    ${current_contract:-unknown}
+Previous tag:        ${previous_tag:-none}
+Previous image:      ${previous_ref:-none}
+Previous contract:   ${previous_contract:-unknown}
+Running image:       ${image:-not running}
+Running image ID:    ${image_id:-n/a}
+Container state:     ${state:-not found}
+Container health:    ${health:-n/a}
+Started at:          ${started:-n/a}
 EOF_STATUS
 }
 
