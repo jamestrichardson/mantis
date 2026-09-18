@@ -61,10 +61,23 @@ See [docs/architecture.md](docs/architecture.md) for the full picture.
 
 ## Architecture overview
 
+Mantis runs as a persistent HTTP service — the CLI (and, later, a
+portal and MCP client) reaches every agent through one versioned API,
+never by executing anything locally:
+
 ```
 ┌─────────────────────────────────────────────────────────┐
+│ CLI / Portal / MCP  (HTTP client only, no local fallback) │
+├─────────────────────────────────────────────────────────┤
+│ FastAPI service     (`mantis serve`, PID1)                 │
+│   /healthz /readyz /api/v1/agents /api/v1/runs             │
+├─────────────────────────────────────────────────────────┤
+│ InvocationService   (run ID, concurrency, safe errors)      │
+├─────────────────────────────────────────────────────────┤
+│ Agent catalog       (id -> real agent build_runtime)        │
+├─────────────────────────────────────────────────────────┤
 │ Agents            (thin: prompt + allowed tools + model) │
-│   awx_troubleshooter                                     │
+│   awx_troubleshooter, system_troubleshooter               │
 ├─────────────────────────────────────────────────────────┤
 │ Agent Runtime     (shared model/tool loop)                │
 │   mantis.runtime.AgentRuntime                             │
@@ -84,8 +97,10 @@ See [docs/architecture.md](docs/architecture.md) for the full picture.
 ```
 
 Model access goes through LiteLLM's OpenAI-compatible API, sitting
-alongside (not inside) this stack — see
-[docs/architecture.md](docs/architecture.md) for the data-flow diagram.
+alongside (not inside) this stack. See
+[docs/api.md](docs/api.md) for the API/CLI guide and
+[docs/architecture.md](docs/architecture.md) for the full data-flow
+diagram.
 
 ## Prerequisites
 
@@ -126,20 +141,30 @@ for the full `.env.*` file convention and every variable. In short:
 | `AWX_URL`         | Base URL of your AWX controller             |
 | `AWX_TOKEN`       | AWX API token (read-only service account)   |
 | `AWX_VERIFY_SSL`  | Verify TLS certs when talking to AWX (default `true`) |
+| `MANTIS_API_TOKEN` | Bearer token the CLI/API share (client-facing, separate from all of the above) |
+
+Mantis runs as a service; start it, then invoke agents through the CLI
+(an HTTP client — see [docs/api.md](docs/api.md)):
+
+```bash
+# terminal 1
+mantis serve
+
+# terminal 2 (MANTIS_API_URL defaults to http://localhost:8080)
+mantis agents
+```
 
 ## Running the AWX Troubleshooter
 
 ```bash
-# Default prompt: "Show me the last 5 failed AWX jobs and summarize them."
-mantis awx-troubleshooter
-
-# Or with an explicit prompt:
 mantis awx-troubleshooter \
   "Show me the last 3 failed AWX jobs and tell me whether they appear related."
 
-# Equivalent module invocation:
-python -m mantis.agents.awx_troubleshooter "Show me the last 5 failed AWX jobs and summarize them."
+# Equivalent, explicit generic form:
+mantis run awx-troubleshooter "Show me the last 3 failed AWX jobs and tell me whether they appear related."
 ```
+
+Both go through the real Mantis API (`mantis serve` must already be running — see [Quickstart](#quickstart) above). There is no supported way to run an agent without it; see [docs/api.md](docs/api.md#cli-relationship).
 
 ### What happens
 
@@ -178,11 +203,10 @@ time-series data, and Loki logs. See
 full design, budgets, and a worked example.
 
 ```bash
-# Default prompt: "Why is ferros-c01 unreachable?"
-mantis system-troubleshooter
-
-# Or with an explicit prompt:
 mantis system-troubleshooter "Investigate why db-primary-02 keeps failing health checks."
+
+# Equivalent, explicit generic form:
+mantis run system-troubleshooter "Investigate why db-primary-02 keeps failing health checks."
 ```
 
 ## Current limitations
@@ -191,8 +215,9 @@ mantis system-troubleshooter "Investigate why db-primary-02 keeps failing health
   other system.
 - Two agents implemented (AWX Troubleshooter, System Troubleshooter); the
   tool/runtime architecture is built to support more (see Roadmap).
-- No persistent storage, database, or web UI — this is a CLI-first
-  foundation.
+- Mantis is a real persistent HTTP service (`mantis serve`) with a
+  versioned, authenticated API, but no persistent run history, database,
+  or web UI yet — see the Roadmap below and [docs/api.md](docs/api.md#whats-deferred).
 - Local models (e.g. Qwen3 via Ollama) can be inconsistent about
   tool-calling discipline; the runtime's duplicate-call detection and
   iteration cap exist specifically to keep that bounded, not to make it
@@ -214,7 +239,9 @@ mantis system-troubleshooter "Investigate why db-primary-02 keeps failing health
 ## Documentation
 
 - [docs/local-development.md](docs/local-development.md) — **start here**: install, configure, run, troubleshoot
+- [docs/api.md](docs/api.md) — the HTTP API: authentication, run semantics, concurrency, CLI relationship, curl examples
 - [docs/architecture.md](docs/architecture.md) — layers, data flow, why the boundaries are where they are
+- [docs/deployment.md](docs/deployment.md) — standalone service deployment, health/readiness, graceful shutdown, rollback
 - [docs/tools.md](docs/tools.md) — what a tool is, how to add one
 - [docs/awx-job-failure.md](docs/awx-job-failure.md) — structured AWX job-event failure evidence: selection rules, bounding/pagination, provenance, stdout fallback
 - [docs/network-tcp-connectivity.md](docs/network-tcp-connectivity.md) — current-state TCP connectivity tool: status vocabulary, IPv4/IPv6 multi-address behavior, deadline handling, SSRF posture

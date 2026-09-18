@@ -1,7 +1,52 @@
 # Architecture
 
-Mantis has four conceptual layers, each with a single responsibility, plus
-a model gateway that sits beside (not inside) the stack.
+Mantis runs as a persistent HTTP service (#21/#83) — the only supported
+way a client (the CLI today; the portal #85 and MCP #93 later) reaches
+an agent:
+
+```
+┌───────────────────────────────────────────────────────────────┐
+│              CLI  /  Portal (#85)  /  MCP (#93)                 │
+│   mantis.api_client.MantisApiClient (CLI today)                 │
+│   HTTP only -- never constructs AgentRuntime, executes a tool,  │
+│   or calls LiteLLM directly. No local-execution fallback.       │
+└───────────────────────────────────┬─────────────────────────────┘
+                                     │ HTTP (bearer auth)
+                                     ▼
+┌───────────────────────────────────────────────────────────────┐
+│                       FastAPI service                           │
+│   mantis.api.app.create_app() -- hosted by `mantis serve`       │
+│   (mantis.api.server, #21), PID1 in the production container    │
+│   GET /healthz, GET /readyz, GET /api/v1/agents,                │
+│   POST /api/v1/runs -- see docs/api.md                          │
+└───────────────────────────────────┬─────────────────────────────┘
+                                     │
+                                     ▼
+┌───────────────────────────────────────────────────────────────┐
+│                      InvocationService                          │
+│   mantis.api.invocation.InvocationService                       │
+│   - resolves the agent from the catalog                         │
+│   - assigns a stable run ID before execution                    │
+│   - enforces bounded process-local concurrency                  │
+│   - invokes the real AgentRuntime, classifies failures safely   │
+└───────────────────────────────────┬─────────────────────────────┘
+                                     │
+                                     ▼
+┌───────────────────────────────────────────────────────────────┐
+│                        Agent catalog                            │
+│   mantis.api.catalog.AgentCatalog                                │
+│   id -> real mantis.agents.<name>.build_runtime/DEFAULT_PROMPT  │
+│   never a copy of an agent's prompt/tool list                   │
+└───────────────────────────────────┬─────────────────────────────┘
+                                     │ entry.build_runtime()
+                                     ▼
+```
+
+Below the catalog, Mantis has four further conceptual layers, each with
+a single responsibility, plus a model gateway that sits beside (not
+inside) the stack — this part of the architecture is unchanged by #21/
+#83, since the API layer above only orchestrates it, never
+reimplements it:
 
 ```
 ┌───────────────────────────────────────────────────────────────┐
@@ -194,11 +239,16 @@ not a runtime-wide one.
 
 ## Future direction (architecture already supports)
 
-- **Incident Triage Agent**: AWX + Prometheus + Loki + Kubernetes +
-  git/change history tools, all pulled from the same registry.
+- **Incident Triage Agent**: AWX + Prometheus + Loki + Kubernetes (#18,
+  already implemented) + git/change history tools, all pulled from the
+  same registry — invokable through the exact same API/catalog once
+  added, with zero route changes required.
 - **Daily Operations Digest Agent**: a read-only, scheduled agent reusing
   existing tools with a summarization-focused prompt.
 - **Mutating tools + approval gate**: mutating tools (`mutating=True` in
   their `Tool` registration) are architecturally distinct today even
   though none exist yet. See [docs/security.md](security.md) for the
   planned investigate → recommend → approve → remediate flow.
+- **Persistent run history (#84), portal (#85), MCP (#93)**: all consume
+  the same `InvocationService`/`AgentCatalog` — see
+  [docs/api.md](api.md#whats-deferred).

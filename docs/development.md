@@ -63,32 +63,48 @@ python -m build                     # same as build-package (needs: pip install 
 docker build -t mantis:local .      # same as docker-build
 ```
 
-## Running agents
+## Running the service and invoking agents
+
+Agents run behind the persistent Mantis API (#21/#83) — start the
+service, then invoke it with the CLI (an HTTP client only, see
+[docs/api.md](api.md)):
 
 ```bash
-mantis awx-troubleshooter
-mantis awx-troubleshooter "Show me the last 3 failed AWX jobs and tell me whether they appear related."
+# terminal 1: the service (needs a reachable LiteLLM gateway and AWX
+# instance, configured via .env.local -- see docs/configuration.md)
+export MANTIS_API_TOKEN=dev-token
+mantis serve
 
-# equivalently:
-python -m mantis.agents.awx_troubleshooter
+# terminal 2: the client
+export MANTIS_API_TOKEN=dev-token   # MANTIS_API_URL defaults to http://localhost:8080
+mantis agents
+mantis awx-troubleshooter "Show me the last 3 failed AWX jobs and tell me whether they appear related."
 ```
 
-Running an agent for real requires a reachable LiteLLM gateway and AWX
-instance, configured via `.env.local` (see
-[docs/configuration.md](configuration.md) for the full `.env.*` file
-convention).
+There is no supported way to run an agent directly in-process anymore —
+`mantis.agents.<name>.build_runtime()`/`.main()` still exist (the
+service imports and calls them), but the CLI itself never does; see
+[docs/api.md](api.md#cli-relationship).
 
 ## Code organization
 
 ```
 src/mantis/
-├── config.py                  # env-var configuration (LiteLLMConfig, AWXConfig)
+├── config.py                  # env-var configuration (LiteLLMConfig, AWXConfig, ApiServerConfig, ApiClientConfig, ...)
 ├── contracts.py               # shared tool-result contract (QueryMeta, ToolError)
 ├── registry.py                # ToolRegistry, Tool, default_registry
 ├── runtime.py                 # AgentRuntime: shared model/tool loop
 ├── security.py                # untrusted tool-output trust boundary — see docs/security.md
 ├── reliability.py             # timeouts, retries, failure taxonomy, deadlines — see docs/reliability.md
-├── cli.py                     # `mantis <agent-name> [prompt]` dispatcher
+├── cli.py                     # `mantis agents|run|serve|<agent-name>|eval` dispatcher — HTTP client only for agent invocation, see docs/api.md
+├── api_client.py              # MantisApiClient: the CLI's only path to the API (#83)
+├── api/                        # the persistent FastAPI service (#21/#83) — see docs/api.md
+│   ├── app.py                    # create_app(): routes, auth wiring, lifespan/readiness
+│   ├── server.py                  # `mantis serve` entry point: uvicorn + graceful shutdown
+│   ├── catalog.py                  # AgentCatalog: the real agent modules, never duplicated metadata
+│   ├── invocation.py                # InvocationService: run ID, concurrency, safe outcome/error shape
+│   ├── auth.py                       # bearer-token dependency
+│   └── schemas.py                     # request/response Pydantic models (OpenAPI-visible)
 ├── integrations/
 │   ├── awx.py                   # AWXClient: raw AWX API access
 │   ├── network.py               # DNS + socket TCP-connect mechanics — see docs/network-tcp-connectivity.md
@@ -169,10 +185,16 @@ OpenAI-compatible schema next to it; register both as a `Tool` in
 ## Adding an agent
 
 See [docs/agents.md](agents.md) for the full guide. Short version: new
-module in `mantis/agents/`, define `SYSTEM_PROMPT` and `ALLOWED_TOOLS`
-(names of already-registered tools), a `build_runtime()` returning an
-`AgentRuntime`, and a `main(argv)` CLI wrapper; register it in
-`mantis/cli.py`'s `AGENTS` dict.
+module in `mantis/agents/`, define `AGENT_NAME`, `SYSTEM_PROMPT`, and
+`ALLOWED_TOOLS` (names of already-registered tools), a `build_runtime()`
+returning an `AgentRuntime`, and `DEFAULT_PROMPT` — then add one
+`AgentCatalogEntry` in `mantis.api.catalog.build_default_catalog()`
+pointing at that module's own `build_runtime`/`AGENT_NAME`/
+`DEFAULT_PROMPT` (never copy its prompt or tool list into the catalog or
+a route). That's what makes it invokable through
+`GET /api/v1/agents`/`POST /api/v1/runs` (see [docs/api.md](api.md)) and,
+if you want the ergonomic top-level command, add its ID to
+`mantis.cli.CONVENIENCE_AGENTS`.
 
 ## Style/quality conventions
 

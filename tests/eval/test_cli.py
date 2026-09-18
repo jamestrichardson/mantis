@@ -256,3 +256,32 @@ def test_run_omits_comparison_table_when_nothing_scored(tmp_path, monkeypatch, c
 
     captured = capsys.readouterr()
     assert "MODEL" not in captured.out
+
+
+# ---------------------------------------------------------------------------
+# Metrics ownership: `mantis eval` owns its own opt-in metrics-server
+# gate directly (default off) rather than relying on mantis.cli's
+# generic entry point, which has no metrics code path at all -- see
+# tests/test_cli.py and tests/test_api_server.py for the other two
+# owners (HTTP-client commands: never; `mantis serve`: on by default).
+# ---------------------------------------------------------------------------
+
+
+def test_main_does_not_start_metrics_server_by_default(monkeypatch):
+    monkeypatch.delenv("MANTIS_METRICS_ENABLED", raising=False)
+    calls: list[None] = []
+    monkeypatch.setattr(eval_cli, "start_metrics_server", lambda *a, **kw: calls.append(None))
+
+    eval_cli.main(["list-scenarios"])
+
+    assert calls == []
+
+
+def test_main_starts_metrics_server_when_explicitly_enabled(monkeypatch):
+    monkeypatch.setenv("MANTIS_METRICS_ENABLED", "true")
+    calls: list[None] = []
+    monkeypatch.setattr(eval_cli, "start_metrics_server", lambda *a, **kw: calls.append(None))
+
+    eval_cli.main(["list-scenarios"])
+
+    assert len(calls) == 1

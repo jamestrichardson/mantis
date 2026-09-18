@@ -96,6 +96,17 @@ running_image_id() {
 }
 
 wait_for_health() {
+  # Only a Docker-reported "healthy" status promotes a deployment.
+  # compose.yaml's healthcheck polls the real /readyz contract (#21),
+  # so "healthy" here means readiness was actually proven, not merely
+  # inferred. "none" -- no healthcheck metadata at all, e.g. a
+  # misconfigured or missing `healthcheck:` stanza -- must fail
+  # closed: it is deliberately *not* treated as success (unlike the
+  # pre-#21 deployment model, where a container with no healthcheck at
+  # all was reasonably treated as merely running). A container stuck
+  # reporting "none" or "starting" simply runs out the clock below and
+  # this function returns 1, exactly like a container that never
+  # passes its healthcheck.
   local timeout="$1" interval="$2" deadline state health
   deadline=$((SECONDS + timeout))
 
@@ -106,9 +117,7 @@ wait_for_health() {
     case "$state" in
       exited|dead|removing) return 1 ;;
       running)
-        if [[ "$health" == "healthy" || "$health" == "none" ]]; then
-          return 0
-        fi
+        [[ "$health" != "healthy" ]] || return 0
         [[ "$health" != "unhealthy" ]] || return 1
         ;;
     esac
@@ -142,7 +151,7 @@ emit_event() {
 }
 
 ensure_layout() {
-  [[ -f "$COMPOSE_FILE" ]] || die "Missing ${COMPOSE_FILE}; install deploy/degobah/compose.yaml first"
+  [[ -f "$COMPOSE_FILE" ]] || die "Missing ${COMPOSE_FILE}; install deploy/standalone/compose.yaml first"
   [[ -f "$DEPLOY_ENV" ]] || die "Missing ${DEPLOY_ENV}; copy deploy.env.example and configure it first"
   mkdir -p "$STATE_DIR"
   touch "$LOCK_FILE"

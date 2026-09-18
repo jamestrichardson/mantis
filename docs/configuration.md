@@ -174,6 +174,33 @@ integration, even though each constructs its own
 | `MANTIS_RUN_TIMEOUT_SECONDS` | no | `300.0` | Overall `AgentRuntime.run()` wall-clock deadline. |
 | `MANTIS_SHORT_CIRCUIT_THRESHOLD` | no | `3` | Consecutive classified-transient failures against one integration, within one run, before that integration fails fast for the rest of the run. |
 
+## API server (`mantis serve`) {#api-server-api}
+
+See [docs/api.md](api.md) for the full guide (authentication, run
+semantics, concurrency/overload, health/readiness, CLI relationship).
+All `mantis.config.ApiServerConfig` fields.
+
+| Variable | Required | Default | Description |
+|---|---|---|---|
+| `MANTIS_API_AUTH_MODE` | no | `bearer_token` | `bearer_token` (secure default) or `disabled` (explicit, logged, development-only — see [docs/api.md](api.md#authentication)). |
+| `MANTIS_API_TOKEN` | only in `bearer_token` mode | — | The API's own client-facing secret. Never reused from/for LITELLM/AWX/Kubernetes/Prometheus/Loki credentials. |
+| `MANTIS_API_HOST` | no | `0.0.0.0` | Bind address. |
+| `MANTIS_API_PORT` | no | `8080` | Bind port. |
+| `MANTIS_API_MAX_CONCURRENT_RUNS` | no | `4` | Bounded, process-local concurrent-run limit — see [docs/api.md](api.md#concurrency-and-overload). |
+| `MANTIS_API_SHUTDOWN_GRACE_PERIOD_SECONDS` | no | `30` | How long an in-flight run is given to finish during graceful shutdown — see [docs/deployment.md](deployment.md#graceful-shutdown). |
+
+## API client (the `mantis` CLI)
+
+All `mantis.config.ApiClientConfig` fields — read only by the CLI, never
+by the server.
+
+| Variable | Required | Default | Description |
+|---|---|---|---|
+| `MANTIS_API_URL` | no | `http://localhost:8080` | Base URL of the Mantis API to call. |
+| `MANTIS_API_TOKEN` | only if the server requires auth | — | The bearer token to send. Same variable name as the server's own setting above — they're read by different processes; a client only ever needs this one credential, never the integration credentials. |
+| `MANTIS_API_CLIENT_CONNECT_TIMEOUT_SECONDS` | no | `5.0` | HTTP connect timeout for CLI-to-API requests. |
+| `MANTIS_API_CLIENT_READ_TIMEOUT_SECONDS` | no | `340.0` | HTTP read timeout for CLI-to-API requests — deliberately above `MANTIS_RUN_TIMEOUT_SECONDS`'s own default (`300.0`) below, so the client never gives up on a run before the server itself would. |
+
 ## Observability
 
 See [docs/observability.md](observability.md) for the full event schema
@@ -183,7 +210,7 @@ and metrics catalog.
 |--------------------------|----------|------------|--------------|
 | `MANTIS_LOG_LEVEL`       | no       | `INFO`     | Log level for the structured JSON logs `mantis.cli.main` configures at startup. |
 | `MANTIS_ENVIRONMENT`     | no       | `local`    | Value of the `environment` label on every metric (e.g. `production`, `staging`). Purely a metrics label — unrelated to `MANTIS_ENV`'s `.env.*` file selection below. |
-| `MANTIS_METRICS_ENABLED` | no       | `false`    | Starts the Prometheus `/metrics` HTTP server at process startup. Off by default everywhere, including the Docker image — each Mantis CLI invocation is a short-lived process, so a default-on server would bind `:9108` (and contend for it under concurrent invocations) for a window that closes when the command exits. Set explicitly for local/manual testing of the endpoint. See [docs/observability.md](observability.md#current-status-of-metrics). |
+| `MANTIS_METRICS_ENABLED` | no       | `false` for `mantis eval`, `true` for `mantis serve` | Starts the Prometheus `/metrics` HTTP server at process startup. Each owning subcommand reads this independently — `mantis serve` (`mantis.api.server.run_server`) defaults it *on*, since it's the one persistent process #66 gives metrics a real, continuously-held-open home in; `mantis eval` (`mantis.eval.cli.main`) defaults it *off*, since a one-shot local process has no such home and a default-on server would contend for `:9108` across concurrent invocations. `mantis agents`/`mantis run`/the per-agent convenience commands are pure HTTP clients (#83) and never start a metrics server at all — this variable has no effect on them, regardless of its value. Either owning subcommand's default can be overridden explicitly. See [docs/observability.md](observability.md#prometheus-metrics). |
 | `MANTIS_METRICS_PORT`    | no       | `9108`     | Port the metrics server binds. |
 | `MANTIS_METRICS_ADDR`    | no       | `0.0.0.0`  | Address the metrics server binds. |
 
@@ -203,6 +230,8 @@ LITELLM_MODEL=qwen3-opencode:latest
 AWX_URL=https://awx.cosprings.teknofile.net
 AWX_TOKEN=eyJhbGciOi...
 AWX_VERIFY_SSL=true
+
+MANTIS_API_TOKEN=a-locally-generated-token
 ```
 
 ## Missing configuration

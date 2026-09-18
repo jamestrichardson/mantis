@@ -49,12 +49,16 @@ for the full precedence rules. The short version for day-to-day use:
 cp .env.local.example .env.local
 ```
 
-Then open `.env.local` and fill in the two credential fields it leaves as
+Then open `.env.local` and fill in the credential fields it leaves as
 placeholders:
 
 - `AWX_TOKEN` — your AWX API token (read-only service account
   recommended; see [security.md](security.md)).
 - `LITELLM_API_KEY` — your LiteLLM virtual key.
+- `MANTIS_API_TOKEN` — a token *you* make up for local use (e.g. `openssl
+  rand -hex 32`), shared between `mantis serve` and the CLI. This is the
+  Mantis API's own credential, entirely separate from the two above —
+  see [api.md](api.md#authentication).
 
 `.env.local.example` is already pointed at this team's local dev
 endpoints (`AWX_URL`, `LITELLM_URL`, `LITELLM_MODEL`), so if those are
@@ -89,25 +93,44 @@ This should print your resolved LiteLLM and AWX settings with no
 environment variable is missing — double check `.env.local` was created
 (not just `.env.local.example`) and that it's in the current directory.
 
-## 4. Run the AWX Troubleshooter
+## 4. Start the service and run the AWX Troubleshooter
+
+Mantis runs as a persistent service; the CLI talks to it over HTTP (see
+[api.md](api.md)) — there is no local/in-process agent execution path.
+Start it in one terminal:
 
 ```bash
-# Default prompt: "Show me the last 5 failed AWX jobs and summarize them."
-mantis awx-troubleshooter
+mantis serve
+```
 
-# With your own prompt:
+Then, in another terminal (`MANTIS_API_URL` defaults to
+`http://localhost:8080`, so nothing to set if you're running both
+locally):
+
+```bash
+mantis agents
+
 mantis awx-troubleshooter \
   "Show me the last 3 failed AWX jobs and tell me whether they appear related."
 
-# Equivalent module invocation (useful for running under a debugger):
-python -m mantis.agents.awx_troubleshooter "Show me the last 5 failed AWX jobs and summarize them."
+# Equivalent, explicit generic form:
+mantis run awx-troubleshooter "Show me the last 3 failed AWX jobs and tell me whether they appear related."
 ```
 
 What you should see: the agent calls out to your AWX instance for recent
 failed jobs, retrieves and preprocesses their stdout, sends that evidence
-to your model via LiteLLM, and prints an evidence-based summary. See the
-[README](../README.md#example) for a worked example of the kind of output
-to expect.
+to your model via LiteLLM, and the CLI prints an evidence-based summary
+plus the run's ID. See the [README](../README.md#example) for a worked
+example of the kind of output to expect.
+
+### Debugging escape hatch: running a module directly
+
+`python -m mantis.agents.awx_troubleshooter "..."` also works, bypassing
+`mantis serve`/the API entirely. This is **not** a supported development
+workflow — it exists only so an agent module can be run under a debugger
+without an HTTP hop in the way. It gets none of the API's authentication,
+request bounds, concurrency limiting, run ID, or (once #84 lands) history
+— never rely on it for anything beyond stepping through one agent's code.
 
 ## 5. Run the tests
 
@@ -126,6 +149,8 @@ conventions) once you're past initial setup.
 | Symptom | Likely cause |
 |---|---|
 | `ConfigurationError: Missing required environment variable: ...` | `.env.local` doesn't exist yet, isn't in your current directory, or is missing that specific key. Re-check step 3. |
+| `Could not reach the Mantis API: ...` | `mantis serve` isn't running, or `MANTIS_API_URL` points somewhere else. Start the service first (step 4) — the CLI never falls back to running an agent locally. |
+| `Mantis API authentication failed` | `MANTIS_API_TOKEN` doesn't match between the `mantis serve` process and the CLI's own environment. |
 | `openai.APIConnectionError` / connection refused talking to LiteLLM | `LITELLM_URL` unreachable — check VPN/network access, and that the URL includes the right port (`:4000`) and, if needed, `/v1`. |
 | `AWXError: ... 401` or `403` | `AWX_TOKEN` is missing, wrong, or lacks permission on the target AWX organization/inventory. |
 | SSL verification errors talking to AWX | Only disable via `AWX_VERIFY_SSL=false` for a known self-signed dev instance — never in anything resembling production. |
@@ -133,7 +158,8 @@ conventions) once you're past initial setup.
 
 ## Where to go next
 
-- [architecture.md](architecture.md) — the four layers and why they're separated
+- [api.md](api.md) — the HTTP API the CLI calls: authentication, run semantics, curl examples
+- [architecture.md](architecture.md) — the full layer stack and why they're separated
 - [tools.md](tools.md) / [agents.md](agents.md) — how to extend Mantis with new capabilities
 - [configuration.md](configuration.md) — full environment variable reference
 - [security.md](security.md) — credential handling, least privilege, read-only-by-default

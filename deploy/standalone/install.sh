@@ -2,7 +2,7 @@
 set -euo pipefail
 
 if [[ "${EUID}" -ne 0 ]]; then
-  echo "Run this installer as root (for example: sudo bash deploy/degobah/install.sh)" >&2
+  echo "Run this installer as root (for example: sudo bash deploy/standalone/install.sh)" >&2
   exit 1
 fi
 
@@ -30,7 +30,7 @@ else
 fi
 
 cat <<EOF
-Installed degobah deployment files:
+Installed standalone deployment files:
   ${DEPLOY_ROOT}/compose.yaml
   ${DEPLOY_ROOT}/deploy.env
   ${DEPLOY_ROOT}/runtime.env

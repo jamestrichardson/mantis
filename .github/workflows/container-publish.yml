@@ -64,10 +64,39 @@ jobs:
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
-      - name: Smoke test
+      - name: Smoke test (#21) -- real service, PID1, /healthz, /readyz, SIGTERM
         run: |
+          set -euo pipefail
           image="$(head -n1 <<< '${{ steps.meta.outputs.tags }}')"
-          docker run --rm "$image" | grep -q "Usage: mantis"
+          container_id=$(docker run -d \
+            -p 18080:8080 \
+            -e MANTIS_API_TOKEN=publish-smoke-token \
+            -e LITELLM_URL=http://localhost:4000 \
+            -e LITELLM_API_KEY=publish-smoke-key \
+            -e AWX_URL=https://awx.example.test \
+            -e AWX_TOKEN=publish-smoke-token \
+            "$image")
+          trap 'docker logs "$container_id" || true; docker rm -f "$container_id" >/dev/null 2>&1 || true' EXIT
+
+          pid1_cmd=$(docker top "$container_id" | tail -n +2 | head -n 1)
+          case "$pid1_cmd" in
+            *mantis\ serve) ;;
+            *) echo "PID1 was '$pid1_cmd', expected a 'mantis serve' process (no resident sleep infinity)"; exit 1 ;;
+          esac
+
+          for _ in $(seq 1 30); do
+            curl -sf http://localhost:18080/healthz >/dev/null && break
+            sleep 1
+          done
+          curl -sf http://localhost:18080/healthz | grep -q '"status":"ok"'
+          curl -sf http://localhost:18080/readyz | grep -q '"status":"ready"'
+          curl -sf http://localhost:18080/api/v1/agents -H "Authorization: Bearer publish-smoke-token" \
+            | grep -q '"system-troubleshooter"'
+          curl -s -o /dev/null -w '%{http_code}' http://localhost:18080/api/v1/agents | grep -q '^401$'
+
+          docker stop -t 15 "$container_id"
+          container_status=$(docker inspect -f '{{.State.Status}}' "$container_id")
+          [ "$container_status" = "exited" ] || { echo "Container did not exit cleanly after SIGTERM (status: $container_status)"; exit 1; }
 
       - uses: docker/login-action@v3
         with:
@@ -126,10 +155,39 @@ jobs:
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
-      - name: Smoke test
+      - name: Smoke test (#21) -- real service, PID1, /healthz, /readyz, SIGTERM
         run: |
+          set -euo pipefail
           image="$(head -n1 <<< '${{ steps.meta.outputs.tags }}')"
-          docker run --rm "$image" | grep -q "Usage: mantis"
+          container_id=$(docker run -d \
+            -p 18080:8080 \
+            -e MANTIS_API_TOKEN=publish-smoke-token \
+            -e LITELLM_URL=http://localhost:4000 \
+            -e LITELLM_API_KEY=publish-smoke-key \
+            -e AWX_URL=https://awx.example.test \
+            -e AWX_TOKEN=publish-smoke-token \
+            "$image")
+          trap 'docker logs "$container_id" || true; docker rm -f "$container_id" >/dev/null 2>&1 || true' EXIT
+
+          pid1_cmd=$(docker top "$container_id" | tail -n +2 | head -n 1)
+          case "$pid1_cmd" in
+            *mantis\ serve) ;;
+            *) echo "PID1 was '$pid1_cmd', expected a 'mantis serve' process (no resident sleep infinity)"; exit 1 ;;
+          esac
+
+          for _ in $(seq 1 30); do
+            curl -sf http://localhost:18080/healthz >/dev/null && break
+            sleep 1
+          done
+          curl -sf http://localhost:18080/healthz | grep -q '"status":"ok"'
+          curl -sf http://localhost:18080/readyz | grep -q '"status":"ready"'
+          curl -sf http://localhost:18080/api/v1/agents -H "Authorization: Bearer publish-smoke-token" \
+            | grep -q '"system-troubleshooter"'
+          curl -s -o /dev/null -w '%{http_code}' http://localhost:18080/api/v1/agents | grep -q '^401$'
+
+          docker stop -t 15 "$container_id"
+          container_status=$(docker inspect -f '{{.State.Status}}' "$container_id")
+          [ "$container_status" = "exited" ] || { echo "Container did not exit cleanly after SIGTERM (status: $container_status)"; exit 1; }
 
       - uses: docker/login-action@v3
         with:
@@ -199,10 +257,39 @@ jobs:
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
-      - name: Smoke test
+      - name: Smoke test (#21) -- real service, PID1, /healthz, /readyz, SIGTERM
         run: |
+          set -euo pipefail
           image="$(head -n1 <<< '${{ steps.meta.outputs.tags }}')"
-          docker run --rm "$image" | grep -q "Usage: mantis"
+          container_id=$(docker run -d \
+            -p 18080:8080 \
+            -e MANTIS_API_TOKEN=publish-smoke-token \
+            -e LITELLM_URL=http://localhost:4000 \
+            -e LITELLM_API_KEY=publish-smoke-key \
+            -e AWX_URL=https://awx.example.test \
+            -e AWX_TOKEN=publish-smoke-token \
+            "$image")
+          trap 'docker logs "$container_id" || true; docker rm -f "$container_id" >/dev/null 2>&1 || true' EXIT
+
+          pid1_cmd=$(docker top "$container_id" | tail -n +2 | head -n 1)
+          case "$pid1_cmd" in
+            *mantis\ serve) ;;
+            *) echo "PID1 was '$pid1_cmd', expected a 'mantis serve' process (no resident sleep infinity)"; exit 1 ;;
+          esac
+
+          for _ in $(seq 1 30); do
+            curl -sf http://localhost:18080/healthz >/dev/null && break
+            sleep 1
+          done
+          curl -sf http://localhost:18080/healthz | grep -q '"status":"ok"'
+          curl -sf http://localhost:18080/readyz | grep -q '"status":"ready"'
+          curl -sf http://localhost:18080/api/v1/agents -H "Authorization: Bearer publish-smoke-token" \
+            | grep -q '"system-troubleshooter"'
+          curl -s -o /dev/null -w '%{http_code}' http://localhost:18080/api/v1/agents | grep -q '^401$'
+
+          docker stop -t 15 "$container_id"
+          container_status=$(docker inspect -f '{{.State.Status}}' "$container_id")
+          [ "$container_status" = "exited" ] || { echo "Container did not exit cleanly after SIGTERM (status: $container_status)"; exit 1; }
 
       - uses: docker/login-action@v3
         with:

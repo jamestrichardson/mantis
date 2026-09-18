@@ -15,10 +15,11 @@ from datetime import datetime, timezone
 
 # Importing mantis.eval registers all built-in scenarios as a side effect.
 import mantis.eval  # noqa: F401
-from mantis.config import ConfigurationError, LiteLLMConfig
+from mantis.config import ConfigurationError, LiteLLMConfig, get_metrics_enabled
 from mantis.eval.results import EvalResult
 from mantis.eval.runner import run_comparison
 from mantis.eval.scenarios import ScenarioNotFoundError, default_scenarios
+from mantis.observability.metrics import start_metrics_server
 from mantis.runtime import build_openai_client
 
 DEFAULT_RESULTS_DIR = "eval-results"
@@ -205,6 +206,13 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def main(argv: list[str] | None = None) -> int:
+    # `mantis eval` owns its own metrics-server opt-in (default off, a
+    # one-shot local process has no persistent home for :9108 the way
+    # `mantis serve` does) rather than sharing mantis.cli's generic
+    # entry point's decision — see docs/observability.md.
+    if get_metrics_enabled(default=False):
+        start_metrics_server()
+
     argv = sys.argv[1:] if argv is None else argv
     parser = build_parser()
     args = parser.parse_args(argv)

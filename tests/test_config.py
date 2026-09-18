@@ -12,11 +12,14 @@ import pytest
 import mantis.config as config
 from mantis.config import (
     DEFAULT_LITELLM_MODEL,
+    ApiClientConfig,
+    ApiServerConfig,
     AWXConfig,
     ConfigurationError,
     LiteLLMConfig,
     ReliabilityConfig,
     Secret,
+    get_metrics_enabled,
 )
 
 
@@ -304,3 +307,170 @@ def test_reliability_config_from_env_rejects_inf(monkeypatch):
     monkeypatch.setenv("MANTIS_RUN_TIMEOUT_SECONDS", "inf")
     with pytest.raises(ConfigurationError):
         ReliabilityConfig.from_env()
+
+
+# ---------------------------------------------------------------------------
+# ApiServerConfig (#21/#83) -- construction/validation only, no networking
+# ---------------------------------------------------------------------------
+
+
+def test_api_server_config_requires_token_in_default_bearer_token_mode():
+    with pytest.raises(ConfigurationError, match="MANTIS_API_TOKEN"):
+        ApiServerConfig(auth_mode="bearer_token", bearer_token=None)
+
+
+def test_api_server_config_default_auth_mode_is_bearer_token():
+    cfg = ApiServerConfig(bearer_token=Secret("x"))
+    assert cfg.auth_mode == "bearer_token"
+
+
+def test_api_server_config_disabled_mode_does_not_require_a_token():
+    cfg = ApiServerConfig(auth_mode="disabled")
+    assert cfg.bearer_token is None
+
+
+def test_api_server_config_rejects_unknown_auth_mode():
+    with pytest.raises(ConfigurationError, match="MANTIS_API_AUTH_MODE"):
+        ApiServerConfig(auth_mode="none", bearer_token=Secret("x"))
+
+
+@pytest.mark.parametrize("value", [0, -1])
+def test_api_server_config_rejects_invalid_max_concurrent_runs(value):
+    with pytest.raises(ConfigurationError, match="max_concurrent_runs"):
+        ApiServerConfig(auth_mode="disabled", max_concurrent_runs=value)
+
+
+@pytest.mark.parametrize("value", [0.0, -1.0])
+def test_api_server_config_rejects_invalid_shutdown_grace_period(value):
+    with pytest.raises(ConfigurationError, match="shutdown_grace_period_seconds"):
+        ApiServerConfig(auth_mode="disabled", shutdown_grace_period_seconds=value)
+
+
+def test_api_server_config_rejects_invalid_port():
+    with pytest.raises(ConfigurationError, match="port"):
+        ApiServerConfig(auth_mode="disabled", port=-1)
+    with pytest.raises(ConfigurationError, match="port"):
+        ApiServerConfig(auth_mode="disabled", port=70000)
+
+
+def test_api_server_config_allows_port_zero_for_os_assigned_ephemeral_binding():
+    # A deliberate convention (see tests/test_api_server.py), never used
+    # in production configuration -- not this dataclass's job to forbid.
+    cfg = ApiServerConfig(auth_mode="disabled", port=0)
+    assert cfg.port == 0
+
+
+def test_api_server_config_from_env_defaults(monkeypatch):
+    monkeypatch.setenv("MANTIS_API_TOKEN", "server-token")
+    monkeypatch.delenv("MANTIS_API_AUTH_MODE", raising=False)
+    monkeypatch.delenv("MANTIS_API_HOST", raising=False)
+    monkeypatch.delenv("MANTIS_API_PORT", raising=False)
+
+    cfg = ApiServerConfig.from_env()
+
+    assert cfg.auth_mode == "bearer_token"
+    assert cfg.host == "0.0.0.0"
+    assert cfg.port == 8080
+    assert cfg.max_concurrent_runs == 4
+    assert cfg.shutdown_grace_period_seconds == 30.0
+    assert cfg.bearer_token.get_secret_value() == "server-token"
+
+
+def test_api_server_config_from_env_missing_token_raises(monkeypatch):
+    monkeypatch.delenv("MANTIS_API_TOKEN", raising=False)
+    monkeypatch.delenv("MANTIS_API_AUTH_MODE", raising=False)
+
+    with pytest.raises(ConfigurationError, match="MANTIS_API_TOKEN"):
+        ApiServerConfig.from_env()
+
+
+def test_api_server_config_from_env_disabled_mode(monkeypatch):
+    monkeypatch.setenv("MANTIS_API_AUTH_MODE", "disabled")
+    monkeypatch.delenv("MANTIS_API_TOKEN", raising=False)
+
+    cfg = ApiServerConfig.from_env()
+
+    assert cfg.auth_mode == "disabled"
+
+
+def test_api_server_config_repr_never_exposes_token():
+    cfg = ApiServerConfig(bearer_token=Secret("super-secret-api-token"))
+    assert "super-secret-api-token" not in repr(cfg)
+    assert "super-secret-api-token" not in str(cfg)
+
+
+# ---------------------------------------------------------------------------
+# ApiClientConfig (#83) -- client-side only, never a server credential
+# ---------------------------------------------------------------------------
+
+
+def test_api_client_config_from_env_defaults(monkeypatch):
+    monkeypatch.delenv("MANTIS_API_URL", raising=False)
+    monkeypatch.delenv("MANTIS_API_TOKEN", raising=False)
+
+    cfg = ApiClientConfig.from_env()
+
+    assert cfg.base_url == "http://localhost:8080"
+    assert cfg.token is None
+    assert cfg.connect_timeout_seconds == 5.0
+    assert cfg.read_timeout_seconds == 340.0
+
+
+def test_api_client_default_read_timeout_stays_above_the_server_run_deadline():
+    # Regression guard: if the client's default read timeout ever
+    # dropped to/below ReliabilityConfig's own run_timeout_seconds
+    # default, the client could give up right as the server was about
+    # to return its own classified run_timeout result -- see
+    # docs/api.md's "Timeout semantics" section.
+    client_default = ApiClientConfig.from_env().read_timeout_seconds
+    server_default = ReliabilityConfig().run_timeout_seconds
+    assert client_default > server_default + 30.0
+
+
+def test_api_client_config_from_env_reads_url_and_token(monkeypatch):
+    monkeypatch.setenv("MANTIS_API_URL", "https://mantis.example.test/")
+    monkeypatch.setenv("MANTIS_API_TOKEN", "client-token")
+
+    cfg = ApiClientConfig.from_env()
+
+    assert cfg.base_url == "https://mantis.example.test"  # trailing slash stripped
+    assert cfg.token.get_secret_value() == "client-token"
+
+
+def test_api_client_config_rejects_empty_base_url():
+    with pytest.raises(ConfigurationError, match="MANTIS_API_URL"):
+        ApiClientConfig(base_url="")
+
+
+@pytest.mark.parametrize("field", ["connect_timeout_seconds", "read_timeout_seconds"])
+def test_api_client_config_rejects_non_positive_timeouts(field):
+    with pytest.raises(ConfigurationError, match=field):
+        ApiClientConfig(base_url="http://localhost:8080", **{field: 0.0})
+
+
+def test_api_client_config_repr_never_exposes_token():
+    cfg = ApiClientConfig(base_url="http://localhost:8080", token=Secret("super-secret-client-token"))
+    assert "super-secret-client-token" not in repr(cfg)
+
+
+# ---------------------------------------------------------------------------
+# get_metrics_enabled -- the one centralized MANTIS_METRICS_ENABLED reader
+# ---------------------------------------------------------------------------
+
+
+def test_get_metrics_enabled_uses_the_given_default_when_unset(monkeypatch):
+    monkeypatch.delenv("MANTIS_METRICS_ENABLED", raising=False)
+    assert get_metrics_enabled(default=False) is False
+    assert get_metrics_enabled(default=True) is True
+
+
+@pytest.mark.parametrize("value", ["true", "1", "yes", "on"])
+def test_get_metrics_enabled_true_values(monkeypatch, value):
+    monkeypatch.setenv("MANTIS_METRICS_ENABLED", value)
+    assert get_metrics_enabled(default=False) is True
+
+
+@pytest.mark.parametrize("value", ["false", "0", "no", "off", ""])
+def test_get_metrics_enabled_false_values(monkeypatch, value):
+    monkeypatch.setenv("MANTIS_METRICS_ENABLED", value)
+    assert get_metrics_enabled(default=True) is False
