@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "mantis"
-version = "1.5.0"
+version = "1.6.0"
 description = "Monitoring, Automation, Network Triage & Infrastructure System — an operations-focused AI agent framework"
 readme = "README.md"
 requires-python = ">=3.11"
