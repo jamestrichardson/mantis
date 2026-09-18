@@ -46,10 +46,13 @@ That shapes what's actually true today for each surface:
 
 ## Structured JSON logs
 
-Enabled automatically by `mantis.cli.main()` (every `mantis <agent>` and
-`mantis eval ...` invocation) — never something an agent module
-configures itself, so log level/format changes never require touching
-agent code. Configure with `MANTIS_LOG_LEVEL` (default `INFO`) — see
+Enabled automatically by `mantis.cli.main()` for every invocation it
+dispatches (`mantis <agent>`, `mantis eval ...`, and `mantis serve`
+alike) — never something an agent module configures itself, so log
+level/format changes never require touching agent code. Unlike metrics
+ownership above, logging configuration has no per-subcommand opt-in:
+it's unconditional at this one shared entry point. Configure with
+`MANTIS_LOG_LEVEL` (default `INFO`) — see
 [docs/configuration.md](configuration.md).
 
 Every line is one JSON object. Fields present on every event:

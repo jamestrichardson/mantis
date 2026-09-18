@@ -9,6 +9,7 @@ these tests stay deterministic and require no live backend.
 from __future__ import annotations
 
 import asyncio
+import logging
 import threading
 
 import pytest
@@ -128,6 +129,45 @@ def test_execution_failure_is_classified_and_never_raised(exc, expected_kind):
     # The safe message must never contain the raw exception text.
     assert "AWX_TOKEN" not in result.error.message
     assert "something broke" not in result.error.message
+
+
+def test_concurrency_saturation_logs_the_rejected_run_id(caplog):
+    # docs/api.md promises a 429's run_id is correlatable in server-side
+    # logs even though the run itself never executes -- without a
+    # dedicated event here, that ID never actually appeared in any log
+    # line (mantis_api_run_started only fires *after* this check).
+    caplog.set_level(logging.INFO, logger="mantis.api.invocation")
+    started = threading.Event()
+    release = threading.Event()
+
+    def _slow_run(prompt: str, *, run_id: str | None = None) -> str:
+        started.set()
+        release.wait(timeout=5)
+        return "done"
+
+    class _SlowRuntime:
+        run = staticmethod(_slow_run)
+
+    service = _service([_entry("slow", build_runtime=lambda: _SlowRuntime())], max_concurrent_runs=1)
+
+    async def scenario():
+        first = asyncio.create_task(service.invoke("slow", "p1"))
+        await asyncio.to_thread(started.wait, 5)
+
+        with pytest.raises(ConcurrencyLimitExceededError) as exc_info:
+            await service.invoke("slow", "p2")
+
+        release.set()
+        await first
+        return exc_info.value.run_id
+
+    rejected_run_id = asyncio.run(scenario())
+
+    rejected_events = [r for r in caplog.records if getattr(r, "event", None) == "mantis_api_run_rejected"]
+    assert len(rejected_events) == 1
+    assert rejected_events[0].run_id == rejected_run_id
+    assert rejected_events[0].agent == "slow"
+    assert rejected_events[0].reason == "overloaded"
 
 
 def test_concurrency_saturation_rejects_immediately_with_the_assigned_run_id():

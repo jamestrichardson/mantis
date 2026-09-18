@@ -302,24 +302,41 @@ wait/queue. Retry after a short backoff.
 
 ## Timeout semantics
 
-Three distinct timeouts, easy to conflate:
+Several distinct timeouts, easy to conflate:
 
 1. **Your HTTP client's own request timeout** — how long *you're*
    willing to wait for a response. Set this generously: a real
    multi-tool investigation can legitimately take tens of seconds. The
-   official CLI defaults to `MANTIS_API_CLIENT_READ_TIMEOUT_SECONDS=340`
-   — deliberately *above* the server's own run deadline below, so the
-   client never gives up before the server itself would.
+   official CLI defaults to `MANTIS_API_CLIENT_READ_TIMEOUT_SECONDS=340`,
+   above the *nominal* `300`s Mantis run deadline below. This normally
+   lets the server return a classified `run_timeout` first — but it is
+   **not a hard guarantee**: see the caveat immediately below.
 2. **The Mantis run deadline** (`MANTIS_RUN_TIMEOUT_SECONDS`, #15,
-   default `300`) — how long the *server* lets one agent run continue
-   before giving up. Exceeding it produces `outcome="error"`,
-   `error.kind="run_timeout"` — a normal `200` response, not a timeout
-   at the HTTP layer.
-3. **Downstream model/integration timeouts** (`MANTIS_HTTP_*_TIMEOUT_SECONDS`,
-   #15) — bound inside the run deadline above; a slow LiteLLM/AWX/
-   Prometheus/Loki/Kubernetes call fails as a classified integration
-   error the agent can reason about, it doesn't hang the request
-   indefinitely.
+   default `300`) — checked *between* iterations of `AgentRuntime`'s
+   loop (before starting the next model call or dispatching the next
+   tool call), producing `outcome="error"`, `error.kind="run_timeout"`
+   when exceeded — a normal `200` response, not a timeout at the HTTP
+   layer. Critically, this deadline does **not** preempt a call already
+   in flight when it's checked: an already-running model or integration
+   call can still outlive it, in which case the run simply finishes
+   later than 300s and the 340s client timeout is what actually decides
+   whether the caller sees a response or `ApiTimeoutError` first. See
+   [docs/reliability.md](reliability.md) for why Mantis deadlines are
+   checked-between-steps, never preemptive of an in-flight blocking
+   call.
+3. **Downstream integration HTTP timeouts** (`MANTIS_HTTP_*_TIMEOUT_SECONDS`,
+   #15) — bound each individual AWX/Prometheus/Loki/Kubernetes HTTP
+   call, further capped at whatever remains of the run deadline above;
+   a slow integration call fails as a classified integration error the
+   agent can reason about rather than hanging the request indefinitely.
+   **These do not apply to the model call.** The LiteLLM/OpenAI-compatible
+   client (`mantis.runtime.build_openai_client`) is currently constructed
+   with no explicit timeout at all, so a model call falls back to the
+   OpenAI SDK's own built-in default client timeout, independent of
+   `MANTIS_RUN_TIMEOUT_SECONDS`/`MANTIS_HTTP_*_TIMEOUT_SECONDS` alike.
+   Deriving a model-call timeout from the remaining run budget is a
+   reasonable future reliability improvement, not something #95
+   implements.
 
 **If your HTTP client disconnects before the server responds:** the
 current implementation is a plain synchronous request/response — the

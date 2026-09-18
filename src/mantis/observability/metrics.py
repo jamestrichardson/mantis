@@ -115,9 +115,14 @@ def start_metrics_server(port: int | None = None, addr: str | None = None) -> No
 
     ``port``/``addr`` default to ``MANTIS_METRICS_PORT``/``MANTIS_METRICS_ADDR``
     (in turn defaulting to ``9108``/``0.0.0.0``). Call at most once per
-    process — intended for ``mantis.cli.main`` to call when
-    ``MANTIS_METRICS_ENABLED`` is set, not for library code to call
-    itself.
+    process — owned by ``mantis.api.server.run_server`` (``mantis
+    serve``, on by default: the one persistent process #66 gives
+    metrics a real, continuously-held-open home in) and
+    ``mantis.eval.cli.main`` (``mantis eval``, opt-in via
+    ``MANTIS_METRICS_ENABLED`` for its own short-lived local process),
+    never ``mantis.cli.main`` itself — the shared entry point
+    ``mantis agents``/``mantis run``/the convenience commands go
+    through has no metrics code path at all and must never call this.
     """
     resolved_port = port if port is not None else int(os.environ.get("MANTIS_METRICS_PORT", DEFAULT_PORT))
     resolved_addr = addr if addr is not None else os.environ.get("MANTIS_METRICS_ADDR", DEFAULT_ADDR)

@@ -207,6 +207,19 @@ class InvocationService:
             raise AgentUnavailableError(agent_id, reason=UNAVAILABLE_REASON_MISCONFIGURED) from None
 
         if not await self._limiter.try_acquire():
+            # docs/api.md promises this run_id is correlatable in
+            # server-side logs even for a rejected attempt -- without
+            # this event, it never actually appeared in any log line
+            # (mantis_api_run_started, the next one logged, only fires
+            # *after* this check), silently breaking that promise.
+            log_event(
+                logger,
+                "mantis_api_run_rejected",
+                level=logging.WARNING,
+                run_id=run_id,
+                agent=agent_id,
+                reason="overloaded",
+            )
             raise ConcurrencyLimitExceededError(run_id=run_id)
 
         started_at = _utc_now_iso()
