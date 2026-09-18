@@ -1,7 +1,7 @@
 # Security
 
 Mantis operates against real infrastructure (AWX, network/TCP,
-Prometheus, and Loki today; Kubernetes and others planned). These
+Prometheus, Loki, and Kubernetes today; others planned). These
 principles govern how it's built, and are enforced architecturally, not
 just by convention.
 
@@ -21,10 +21,10 @@ just by convention.
 ## Untrusted tool-output trust boundary
 
 Mantis has expanded beyond AWX into network/TCP diagnostics, Prometheus,
-and Loki, with Git, Kubernetes, and other systems planned — every one of
+Loki, and Kubernetes, with Git and other systems planned — every one of
 these produces output that is, by construction, arbitrary external text
 Mantis does not control. Loki log text is treated as the highest-risk
-untrusted-text source of the four implemented so far (see
+untrusted-text source implemented so far (see
 [docs/loki.md](loki.md)'s "Security" section): a log line is raw text
 written by whatever process produced it, with no schema constraining its
 content at all. That text can legitimately contain strings that look

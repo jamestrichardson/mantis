@@ -1,7 +1,7 @@
 # Reliability
 
 Mantis has moved from one remote integration (AWX) to several (network,
-Prometheus, Loki today; Git, Kubernetes planned). This page is the shared
+Prometheus, Loki, Kubernetes today; Git planned). This page is the shared
 reliability contract every integration adopts — explicit timeouts, one
 failure taxonomy, safe bounded retries, run/tool deadlines, and a
 run-local failure guard — implemented once in `mantis.reliability` and

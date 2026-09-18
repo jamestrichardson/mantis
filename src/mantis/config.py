@@ -276,6 +276,75 @@ class LokiConfig:
         )
 
 
+_KUBERNETES_AUTH_MODES = ("kubeconfig", "in_cluster")
+
+
+@dataclass(frozen=True)
+class KubernetesConfig:
+    """Connection settings for Kubernetes (#18).
+
+    Deliberately mirrors every other Mantis integration config: a frozen
+    dataclass with ``from_env()``, no eager networking/file access here
+    (parsing configuration and actually connecting to a cluster are
+    separate concerns — see ``mantis.integrations.kubernetes`` for the
+    latter), and a single explicit ``auth_mode`` rather than guessing
+    between several credentials based on whichever happens to be set.
+
+    Unlike AWX/Prometheus/Loki, there is no ``Secret``-wrapped field
+    here: in ``kubeconfig`` mode, credential material lives inside the
+    kubeconfig file itself and is read directly by the Kubernetes client
+    library, never by Mantis; in ``in_cluster`` mode, the client library
+    reads the mounted service-account token/CA directly from the
+    filesystem. Mantis never holds a raw Kubernetes credential value in
+    memory on its own, so there is nothing here for ``Secret`` to wrap.
+
+    ``kubeconfig_path``/``context`` are deployment configuration, never
+    model/tool input — see ``mantis.tools.kubernetes`` and
+    ``docs/kubernetes.md``'s "Configuration and authentication" section.
+    """
+
+    auth_mode: str
+    kubeconfig_path: str | None
+    context: str | None
+    cluster_name: str
+    verify_ssl: bool = True
+
+    def __post_init__(self) -> None:
+        if self.auth_mode not in _KUBERNETES_AUTH_MODES:
+            raise ConfigurationError(
+                f"MANTIS_KUBERNETES_AUTH_MODE must be one of {_KUBERNETES_AUTH_MODES}, "
+                f"got {self.auth_mode!r}"
+            )
+        if self.auth_mode == "kubeconfig":
+            if not self.kubeconfig_path:
+                raise ConfigurationError(
+                    "MANTIS_KUBERNETES_KUBECONFIG is required when "
+                    "MANTIS_KUBERNETES_AUTH_MODE=kubeconfig"
+                )
+        else:
+            # in_cluster: rejecting kubeconfig-only settings outright,
+            # rather than silently ignoring them, avoids ambiguous
+            # precedence between "which auth material actually wins" —
+            # see #18's configuration requirements.
+            if self.kubeconfig_path is not None or self.context is not None:
+                raise ConfigurationError(
+                    "MANTIS_KUBERNETES_KUBECONFIG/MANTIS_KUBERNETES_CONTEXT must not be set "
+                    "when MANTIS_KUBERNETES_AUTH_MODE=in_cluster (ambiguous precedence)"
+                )
+        if not self.cluster_name:
+            raise ConfigurationError("MANTIS_KUBERNETES_CLUSTER_NAME is required")
+
+    @classmethod
+    def from_env(cls) -> "KubernetesConfig":
+        return cls(
+            auth_mode=_require("MANTIS_KUBERNETES_AUTH_MODE"),
+            kubeconfig_path=os.environ.get("MANTIS_KUBERNETES_KUBECONFIG") or None,
+            context=os.environ.get("MANTIS_KUBERNETES_CONTEXT") or None,
+            cluster_name=_require("MANTIS_KUBERNETES_CLUSTER_NAME"),
+            verify_ssl=_getenv_bool("MANTIS_KUBERNETES_VERIFY_SSL", True),
+        )
+
+
 @dataclass(frozen=True)
 class ReliabilityConfig:
     """The shared reliability contract's configurable knobs (see

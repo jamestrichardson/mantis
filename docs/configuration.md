@@ -107,6 +107,52 @@ An unauthenticated Loki endpoint works with none of the auth variables
 set. If both a bearer token and basic auth are configured, the bearer
 token takes priority.
 
+## Kubernetes
+
+See [docs/kubernetes.md](kubernetes.md) for the full contract: auth
+modes, RBAC guidance, bounded pod/deployment/node/event evidence,
+truncation semantics, and provenance.
+
+| Variable | Required | Default | Description |
+|---|---|---|---|
+| `MANTIS_KUBERNETES_AUTH_MODE` | yes | — | `kubeconfig` or `in_cluster`. A single explicit mode — Mantis never guesses between credential sources. |
+| `MANTIS_KUBERNETES_KUBECONFIG` | only in `kubeconfig` mode | — | Path to a kubeconfig file. Deployment configuration, never model/tool input. Must **not** be set in `in_cluster` mode (rejected at config construction — ambiguous precedence otherwise). |
+| `MANTIS_KUBERNETES_CONTEXT` | no | — | Kubeconfig context to use. Recommended (rather than relying on the kubeconfig's own `current-context`) so context selection is explicit and stable. Must **not** be set in `in_cluster` mode. |
+| `MANTIS_KUBERNETES_CLUSTER_NAME` | yes | — | Human-safe logical cluster name used in every result's provenance (e.g. `"home-k3s"`) — never a raw API-server URL, which could be unsafe to expose. Required in both auth modes so provenance stays stable across deployment methods. |
+| `MANTIS_KUBERNETES_VERIFY_SSL` | no | `true` | Whether to verify TLS certificates when talking to the Kubernetes API server. Only disable for local/dev testing against a self-signed endpoint. |
+
+**Which mode to use:** `in_cluster` is recommended when Mantis itself
+runs inside the cluster it inspects — it uses the mounted
+service-account token/CA the Kubernetes runtime already provides, with
+no credential material in Mantis's own configuration at all. `kubeconfig`
+is for Mantis running outside the cluster (e.g. local development,
+homelab) — the token/cert material lives inside the kubeconfig file
+itself, read directly by the Kubernetes client library; Mantis never
+extracts, logs, or returns it.
+
+**Precedence/validation:** `auth_mode` must be exactly `kubeconfig` or
+`in_cluster` — there is no third "guess from whatever's present" mode.
+`kubeconfig` mode requires `MANTIS_KUBERNETES_KUBECONFIG`; `in_cluster`
+mode rejects `MANTIS_KUBERNETES_KUBECONFIG`/`MANTIS_KUBERNETES_CONTEXT`
+outright rather than silently ignoring them, so precedence is never
+ambiguous. `KubernetesConfig.from_env()` only parses configuration — it
+never opens the kubeconfig file or contacts a cluster; that happens only
+when a tool actually runs, via `KubernetesClient.from_config()`.
+
+**Provenance vs. credentials:** `cluster_name`, `context`, and
+`auth_mode` are safe, model-facing provenance, attached to every
+successful Kubernetes tool result. `MANTIS_KUBERNETES_KUBECONFIG`'s
+*value* (the path) is never included in any tool result, log line, or
+error message — only the two fields above are.
+
+**RBAC:** grant Mantis's service account (in-cluster) or kubeconfig user
+(local) a narrowly scoped **read-only** `ClusterRole` covering only
+`pods`, `deployments` (`apps/v1`), `nodes`, and `events` `get`/`list`/
+`watch` — see [docs/kubernetes.md](kubernetes.md#rbac) for a worked
+example manifest. Never grant `create`/`update`/`patch`/`delete`, `exec`,
+or access to `secrets` — Mantis has no code path that would use it, and
+granting it anyway widens blast radius for no benefit.
+
 ## Reliability
 
 See [docs/reliability.md](reliability.md) for the full contract:

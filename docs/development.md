@@ -93,14 +93,16 @@ src/mantis/
 │   ├── awx.py                   # AWXClient: raw AWX API access
 │   ├── network.py               # DNS + socket TCP-connect mechanics — see docs/network-tcp-connectivity.md
 │   ├── prometheus.py            # PrometheusClient: raw Prometheus HTTP API access — see docs/prometheus.md
-│   └── loki.py                  # LokiClient: raw Loki HTTP API access — see docs/loki.md
+│   ├── loki.py                  # LokiClient: raw Loki HTTP API access — see docs/loki.md
+│   └── kubernetes.py            # KubernetesClient: auth/config/API access — see docs/kubernetes.md
 ├── tools/
 │   ├── _text.py                 # excerpt/tail preprocessing helpers
 │   ├── _awx_events.py           # AWX job-event selection/bounding — see docs/awx-job-failure.md
 │   ├── awx.py                   # awx_recent_failed_jobs, awx_get_job_failure (semantic tools)
 │   ├── network.py               # check_tcp_connectivity (semantic tool)
 │   ├── prometheus.py            # prometheus_query, prometheus_query_range (semantic tools)
-│   └── loki.py                  # loki_query (semantic tool)
+│   ├── loki.py                  # loki_query (semantic tool)
+│   └── kubernetes.py            # kubernetes_list_pods/_deployments/_nodes/_events (semantic tools)
 ├── agents/
 │   └── awx_troubleshooter.py  # AWX Troubleshooting Agent
 ├── observability/              # structured logs + Prometheus metrics — see docs/observability.md
@@ -117,7 +119,8 @@ src/mantis/
         ├── awx.py             # FixtureAWXClient + golden AWX scenarios
         ├── network.py         # fixture-backed check_tcp_connectivity + combined AWX+TCP scenarios
         ├── prometheus.py      # fixture-backed prometheus_query_range + combined AWX+TCP+Prometheus scenarios
-        └── loki.py            # fixture-backed loki_query + the all-four-sources incident-correlation scenario
+        ├── loki.py            # fixture-backed loki_query + the all-four-sources incident-correlation scenario
+        └── kubernetes.py      # fixture-backed kubernetes_list_pods + the pod-restart/scrape-gap scenario
 ```
 
 See [docs/evaluation.md](evaluation.md) for the evaluation harness itself

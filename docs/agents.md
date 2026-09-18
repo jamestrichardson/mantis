@@ -158,8 +158,9 @@ cheap:
   evidence. Broader operational diagnosis than AWX alone. See
   `mantis.eval.fixtures.loki`'s `incident-correlation-all-signals`
   scenario for a worked example combining all four sources.
-- **Incident Triage Agent** — adds Kubernetes and git/change-history
-  tools to correlate a live incident against recent changes.
+- **Incident Triage Agent** — wires the existing Kubernetes (#18) tools
+  and new git/change-history (#17) tools together to correlate a live
+  incident against recent changes.
 - **Daily Operations Digest Agent** — a scheduled, read-only agent that
   summarizes the prior day's AWX activity, alerts, and log anomalies
   using the same shared tools with a digest-oriented prompt.

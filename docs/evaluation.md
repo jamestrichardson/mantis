@@ -476,14 +476,16 @@ is deliberately not a database — see "Non-goals".
   agent behavior only; see "What is and isn't scored" above.
 - **Not every possible golden scenario.** Eight AWX scenarios, two
   combined AWX+network scenarios (#8), two combined
-  AWX+network+Prometheus scenarios (#9), and one combined
-  AWX+network+Prometheus+Loki scenario (#10) prove the execution path
-  and scoring both work end to end across a real spread of behaviors
+  AWX+network+Prometheus scenarios (#9), one combined
+  AWX+network+Prometheus+Loki scenario (#10), and one combined
+  Kubernetes+Prometheus scenario (#18) prove the execution path and
+  scoring both work end to end across a real spread of behaviors
   (grounding, count-acknowledgment, error-source attribution, ambiguity,
   truncation, stopping behavior, structured-event grounding,
   historical-vs-current-state grounding, multi-signal timeline
-  correlation, prompt-injection-resistant log evidence handling);
-  Git/Kubernetes scenarios are follow-on work under #13, reusing this
+  correlation, prompt-injection-resistant log evidence handling,
+  pod-restart/scrape-gap temporal correlation without unsupported causal
+  direction); Git scenarios are follow-on work under #13, reusing this
   same expectation vocabulary and the fixture pattern documented above.
 - **No cross-run regression tracking / trend dashboards.** Each JSONL
   file is self-contained and comparable to others by hand; automated
