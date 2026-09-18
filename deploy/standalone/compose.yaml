@@ -47,11 +47,19 @@ services:
       # The deployment health gate (mantis-deploy) polls this Docker
       # healthcheck, which in turn polls the real /readyz contract --
       # never a synthetic liveness-only substitute. See docs/deployment.md.
-      test:
-        - CMD-SHELL
-        - >-
-          python -c 'import os, urllib.request; urllib.request.urlopen(os.environ["MANTIS_HEALTH_URL"], timeout=2).read(1)'
+      #
+      # Runs the baked-in bash-only probe (deploy/standalone/healthcheck.sh,
+      # #97), not a `python -c 'import urllib.request; ...'` one-liner --
+      # on a slow/constrained host, Python interpreter startup and import
+      # machinery alone could exceed this healthcheck's own `timeout`,
+      # marking a genuinely ready service unhealthy. The probe has its
+      # own internal read timeout (MANTIS_HEALTHCHECK_PROBE_TIMEOUT_SECONDS,
+      # default 3s); `timeout: 5s` below leaves ~2s of margin beyond that
+      # for bash/exec overhead, and `start_period` gives the service
+      # itself room to start on a slow host -- neither exists because the
+      # probe is expensive; it typically completes in low milliseconds.
+      test: ["CMD", "/usr/local/bin/mantis-healthcheck"]
       interval: 2s
-      timeout: 3s
+      timeout: 5s
       retries: 20
-      start_period: 2s
+      start_period: 5s

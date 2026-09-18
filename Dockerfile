@@ -20,6 +20,15 @@ RUN useradd --create-home --uid 1000 --shell /usr/sbin/nologin mantis
 
 COPY --from=builder /install /usr/local
 
+# Baked into the image (not just the repo) because Docker's healthcheck
+# in compose.yaml executes it *inside* the running container -- see
+# deploy/standalone/healthcheck.sh's own docstring and #97 for why this
+# replaced a `python -c 'import urllib.request; ...'` one-liner (its
+# interpreter-startup/import overhead alone could exceed the
+# healthcheck's configured timeout on a slow host).
+COPY deploy/standalone/healthcheck.sh /usr/local/bin/mantis-healthcheck
+RUN chmod +x /usr/local/bin/mantis-healthcheck
+
 # API port (mantis serve, #21/#83) and metrics port (mantis.observability.metrics,
 # #66). `mantis serve` is the production entry point (see CMD below) and,
 # unlike a one-shot CLI invocation, is exactly the persistent process
