@@ -54,6 +54,40 @@ def _error_response(status_code: int, error_type: str, message: str, *, run_id: 
     return JSONResponse(status_code=status_code, content=body.model_dump())
 
 
+def _error_openapi_response(
+    description: str, *, error_type: str, message: str, run_id: str | None = None
+) -> dict[str, Any]:
+    """Build one ``responses={...}`` entry with a concrete example, so
+    the generated OpenAPI/Swagger UI actually shows the real
+    ``error.type`` a given status code means — not just the generic
+    :class:`~mantis.api.schemas.ErrorResponse` shape with no indication
+    of which of several possible ``type`` values applies. Kept in one
+    place so every documented status code below matches
+    ``docs/api.md``'s error table exactly, rather than drifting from it
+    independently."""
+    return {
+        "model": ErrorResponse,
+        "description": description,
+        "content": {
+            "application/json": {
+                "example": {"error": {"type": error_type, "message": message, "run_id": run_id}}
+            }
+        },
+    }
+
+
+_RESPONSE_401 = _error_openapi_response(
+    "Missing or invalid bearer token",
+    error_type="unauthenticated",
+    message="A valid bearer token is required.",
+)
+_RESPONSE_500 = _error_openapi_response(
+    "Unexpected server error",
+    error_type="internal_error",
+    message="An unexpected error occurred.",
+)
+
+
 def create_app(
     *,
     server_config: ApiServerConfig | None = None,
@@ -84,13 +118,23 @@ def create_app(
         app.state.startup_complete = True
         log_event(logger, "mantis_api_startup_complete")
         yield
-        # Shutdown: flip readiness to not-ready as the very first
-        # action, before any other cleanup -- #21 requires readiness to
-        # transition to not-ready *before* new work is rejected, and
-        # both derive from this one flag (see create_run below), so
-        # there is no window where they disagree.
-        app.state.shutting_down = True
-        log_event(logger, "mantis_api_shutdown_started")
+        # Shutdown: flip readiness to not-ready, if it wasn't already --
+        # #21 requires readiness to transition to not-ready *before* new
+        # work is rejected, and both derive from this one flag (see
+        # create_run below), so there is no window where they disagree.
+        #
+        # For a real SIGTERM/SIGINT-driven shutdown, this flag is
+        # already True by the time this code runs at all --
+        # mantis.api.server._DrainingAwareServer flips it synchronously
+        # in the signal handler itself, deliberately *not* waiting for
+        # this ASGI lifespan phase, which uvicorn only reaches after its
+        # own (potentially much later) connection/task-draining sequence
+        # completes. This assignment is what makes shutdown observable
+        # for callers that never go through a real uvicorn.Server at all
+        # (e.g. exiting a bare TestClient(app) context in a test).
+        if not app.state.shutting_down:
+            app.state.shutting_down = True
+            log_event(logger, "mantis_api_shutdown_started")
 
     app = FastAPI(
         title=API_TITLE,
@@ -185,7 +229,7 @@ def create_app(
         tags=["agents"],
         summary="List invokable agents",
         dependencies=[Depends(auth_dependency)],
-        responses={401: {"model": ErrorResponse}},
+        responses={401: _RESPONSE_401, 500: _RESPONSE_500},
     )
     async def list_agents() -> AgentsResponse:
         return AgentsResponse(agents=[AgentSummary.from_entry(entry) for entry in resolved_catalog.list()])
@@ -202,12 +246,32 @@ def create_app(
         ),
         dependencies=[Depends(auth_dependency)],
         responses={
-            401: {"model": ErrorResponse, "description": "Missing or invalid bearer token"},
-            404: {"model": ErrorResponse, "description": "Unknown agent"},
-            409: {"model": ErrorResponse, "description": "Agent currently unavailable"},
-            422: {"model": ErrorResponse, "description": "Request validation failure"},
-            429: {"model": ErrorResponse, "description": "Server is at its concurrent-run limit"},
-            503: {"model": ErrorResponse, "description": "Service is starting up or shutting down"},
+            401: _RESPONSE_401,
+            404: _error_openapi_response(
+                "Unknown agent", error_type="unknown_agent", message="Unknown agent: 'nope'"
+            ),
+            409: _error_openapi_response(
+                "Agent currently unavailable",
+                error_type="agent_unavailable",
+                message="Agent 'system-troubleshooter' is currently unavailable: misconfigured",
+            ),
+            422: _error_openapi_response(
+                "Request validation failure (missing/oversized/unknown field)",
+                error_type="validation_error",
+                message="The request did not match the expected shape.",
+            ),
+            429: _error_openapi_response(
+                "Server is at its concurrent-run limit -- retry shortly",
+                error_type="overloaded",
+                message="Mantis is at its configured concurrent-run limit; try again shortly.",
+                run_id="3f9a1c2e4b6d4f0aa2c8e6d1b7a90123",
+            ),
+            503: _error_openapi_response(
+                "Service is starting up or shutting down",
+                error_type="not_ready",
+                message="The service is not currently accepting new runs.",
+            ),
+            500: _RESPONSE_500,
         },
     )
     async def create_run(payload: RunRequest, request: Request) -> JSONResponse:

@@ -154,6 +154,69 @@ def test_overload_raises_api_request_error(client):
 
     assert exc_info.value.status_code == 429
     assert exc_info.value.error_type == "overloaded"
+    # The server deliberately assigns a run ID before rejecting an
+    # overloaded request (see InvocationService); this client must not
+    # discard it -- it's what makes a rejected attempt correlatable in
+    # server-side logs.
+    assert exc_info.value.run_id == "r1"
+
+
+@respx.mock
+def test_unknown_agent_error_has_no_run_id(client):
+    # A rejection that happens before a run ID is ever assigned (e.g.
+    # unknown agent) must not fabricate one.
+    respx.post("https://mantis.example.test/api/v1/runs").mock(
+        return_value=httpx.Response(
+            404, json={"error": {"type": "unknown_agent", "message": "Unknown agent: 'nope'", "run_id": None}}
+        )
+    )
+
+    with pytest.raises(ApiRequestError) as exc_info:
+        client.create_run("nope", "prompt")
+
+    assert exc_info.value.run_id is None
+
+
+@respx.mock
+def test_non_dict_json_error_body_does_not_escape_the_typed_error(client):
+    # A misbehaving proxy/gateway could return a JSON body that isn't
+    # the expected {"error": {...}} object at all -- this must still
+    # raise ApiRequestError with safe defaults, never an unhandled
+    # AttributeError/TypeError escaping this client's typed hierarchy.
+    respx.post("https://mantis.example.test/api/v1/runs").mock(return_value=httpx.Response(400, json=["oops"]))
+
+    with pytest.raises(ApiRequestError) as exc_info:
+        client.create_run("agent", "prompt")
+
+    assert exc_info.value.status_code == 400
+    assert exc_info.value.error_type == "request_error"
+    assert exc_info.value.run_id is None
+
+
+@respx.mock
+def test_error_field_present_but_not_an_object_falls_back_safely(client):
+    respx.post("https://mantis.example.test/api/v1/runs").mock(
+        return_value=httpx.Response(422, json={"error": "just a string, not an object"})
+    )
+
+    with pytest.raises(ApiRequestError) as exc_info:
+        client.create_run("agent", "prompt")
+
+    assert exc_info.value.error_type == "request_error"
+    assert exc_info.value.run_id is None
+
+
+@respx.mock
+def test_non_json_error_body_falls_back_safely(client):
+    respx.post("https://mantis.example.test/api/v1/runs").mock(
+        return_value=httpx.Response(400, content=b"not json at all")
+    )
+
+    with pytest.raises(ApiRequestError) as exc_info:
+        client.create_run("agent", "prompt")
+
+    assert exc_info.value.error_type == "request_error"
+    assert "rejected" in str(exc_info.value).lower()
 
 
 @respx.mock

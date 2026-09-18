@@ -298,6 +298,31 @@ def test_api_request_error_includes_error_type(monkeypatch, capsys):
     assert "unknown_agent" in capsys.readouterr().err
 
 
+def test_overload_error_displays_the_servers_run_id(monkeypatch, capsys):
+    # The server deliberately assigns a run ID before rejecting an
+    # overloaded request; the CLI must surface it, not discard it.
+    _client_returning(
+        monkeypatch,
+        "create_run",
+        exc=ApiRequestError(429, "overloaded", "try again shortly", run_id="abc123"),
+    )
+
+    exit_code = cli_module.main(["run", "system-troubleshooter", "prompt"])
+
+    assert exit_code == 1
+    assert "abc123" in capsys.readouterr().err
+
+
+def test_unknown_agent_error_has_no_run_id_to_display(monkeypatch, capsys):
+    _client_returning(
+        monkeypatch, "create_run", exc=ApiRequestError(404, "unknown_agent", "Unknown agent: 'nope'")
+    )
+
+    cli_module.main(["run", "nope", "prompt"])
+
+    assert "run_id" not in capsys.readouterr().err
+
+
 def test_api_server_error_is_reported(monkeypatch, capsys):
     _client_returning(monkeypatch, "list_agents", exc=ApiServerError("HTTP 500"))
 

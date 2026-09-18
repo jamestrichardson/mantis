@@ -13,6 +13,7 @@ from mantis.api.catalog import (
     AgentCatalog,
     AgentCatalogEntry,
     AgentUnavailableError,
+    DuplicateAgentError,
     UnknownAgentError,
     build_default_catalog,
 )
@@ -94,10 +95,11 @@ def test_unavailable_agent_probes_false_with_a_safe_reason(monkeypatch):
     assert "LITELLM_URL" not in reason
 
 
-def test_catalog_construction_rejects_duplicate_ids_by_keeping_the_last_one():
-    # AgentCatalog is a plain dict-backed registry (like ToolRegistry) --
-    # document the actual last-one-wins behavior explicitly rather than
-    # leaving duplicate-id handling implicit/untested.
+def test_catalog_construction_rejects_duplicate_ids():
+    # The catalog is Mantis's agent invocation/authorization boundary --
+    # silently letting one entry shadow another ("last one wins") would
+    # be exactly the wrong failure mode for that, so construction must
+    # fail loudly instead.
     entry_a = AgentCatalogEntry(
         id="dup", display_name="A", description="a", read_only=True,
         build_runtime=lambda: None, default_prompt="p",
@@ -106,9 +108,9 @@ def test_catalog_construction_rejects_duplicate_ids_by_keeping_the_last_one():
         id="dup", display_name="B", description="b", read_only=True,
         build_runtime=lambda: None, default_prompt="p",
     )
-    catalog = AgentCatalog([entry_a, entry_b])
 
-    assert catalog.get("dup").display_name == "B"
+    with pytest.raises(DuplicateAgentError, match="dup"):
+        AgentCatalog([entry_a, entry_b])
 
 
 def test_agent_unavailable_error_has_stable_shape():

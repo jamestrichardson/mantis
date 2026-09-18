@@ -351,6 +351,17 @@ DEFAULT_API_PORT = 8080
 DEFAULT_API_MAX_CONCURRENT_RUNS = 4
 DEFAULT_API_SHUTDOWN_GRACE_PERIOD_SECONDS = 30.0
 
+DEFAULT_API_CLIENT_READ_TIMEOUT_SECONDS = 340.0
+"""Deliberately *above* :class:`ReliabilityConfig`'s own
+``run_timeout_seconds`` default (300.0s, the server-side bound on one
+agent run) by a comfortable ~40s margin. If the client's own read
+timeout instead equalled (or fell below) the server's run deadline, the
+client could give up and report a bare timeout at almost exactly the
+moment the server was about to return a proper, classified
+``outcome="error"``/``error.kind="run_timeout"`` result (see
+``docs/api.md``'s "Timeout semantics" section) -- the client should
+virtually always see the server's real answer first."""
+
 
 @dataclass(frozen=True)
 class ApiServerConfig:
@@ -429,7 +440,7 @@ class ApiClientConfig:
     base_url: str
     token: Secret | None = None
     connect_timeout_seconds: float = 5.0
-    read_timeout_seconds: float = 300.0
+    read_timeout_seconds: float = DEFAULT_API_CLIENT_READ_TIMEOUT_SECONDS
 
     def __post_init__(self) -> None:
         if not self.base_url:
@@ -445,7 +456,9 @@ class ApiClientConfig:
             base_url=base_url.rstrip("/"),
             token=Secret(token) if token else None,
             connect_timeout_seconds=_getenv_float("MANTIS_API_CLIENT_CONNECT_TIMEOUT_SECONDS", 5.0),
-            read_timeout_seconds=_getenv_float("MANTIS_API_CLIENT_READ_TIMEOUT_SECONDS", 300.0),
+            read_timeout_seconds=_getenv_float(
+                "MANTIS_API_CLIENT_READ_TIMEOUT_SECONDS", DEFAULT_API_CLIENT_READ_TIMEOUT_SECONDS
+            ),
         )
 
 

@@ -20,7 +20,7 @@ from mantis.api.catalog import (
     AgentUnavailableError,
     UnknownAgentError,
 )
-from mantis.api.invocation import ConcurrencyLimitExceededError, InvocationService
+from mantis.api.invocation import ConcurrencyLimitExceededError, InvocationService, _run_in_daemon_thread
 from mantis.config import ConfigurationError
 from mantis.runtime import MaxIterationsExceededError, RunDeadlineExceededError
 
@@ -181,3 +181,55 @@ def test_concurrency_slot_is_released_after_a_successful_run():
     result = asyncio.run(service.invoke("agent", "p2"))
 
     assert result.outcome == "success"
+
+
+# ---------------------------------------------------------------------------
+# _run_in_daemon_thread -- the primitive that lets the process exit on
+# schedule during shutdown even when a run never finishes. See
+# tests/test_api_server.py::test_shutdown_exits_promptly_even_with_a_blocked_in_flight_run
+# for the full server-level proof; these are the focused unit-level checks.
+# ---------------------------------------------------------------------------
+
+
+def test_run_in_daemon_thread_returns_the_function_result():
+    async def scenario():
+        return await _run_in_daemon_thread(lambda: 42)
+
+    assert asyncio.run(scenario()) == 42
+
+
+def test_run_in_daemon_thread_propagates_exceptions():
+    def _boom():
+        raise ValueError("nope")
+
+    async def scenario():
+        return await _run_in_daemon_thread(_boom)
+
+    with pytest.raises(ValueError, match="nope"):
+        asyncio.run(scenario())
+
+
+def test_run_in_daemon_thread_spawns_a_daemon_thread():
+    seen_daemon_flag = []
+
+    def _worker():
+        seen_daemon_flag.append(threading.current_thread().daemon)
+        return "done"
+
+    async def scenario():
+        return await _run_in_daemon_thread(_worker)
+
+    result = asyncio.run(scenario())
+
+    assert result == "done"
+    assert seen_daemon_flag == [True]
+
+
+def test_run_in_daemon_thread_passes_args_and_kwargs():
+    def _fn(a, *, b):
+        return a + b
+
+    async def scenario():
+        return await _run_in_daemon_thread(_fn, 1, b=2)
+
+    assert asyncio.run(scenario()) == 3

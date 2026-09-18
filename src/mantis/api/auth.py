@@ -9,6 +9,7 @@ orchestrator health checks should not need a credential) — see
 
 from __future__ import annotations
 
+import hmac
 import logging
 from typing import Callable, Coroutine
 
@@ -70,11 +71,15 @@ def build_auth_dependency(config: ApiServerConfig) -> Callable[..., Coroutine[No
     ) -> None:
         if credentials is None or expected is None:
             raise _unauthorized()
-        # Plain equality, not constant-time comparison: this guards one
-        # shared operator/service token, not many independent per-user
-        # secrets, matching every other Mantis credential-comparison
-        # convention (see mantis.config.Secret.__eq__).
-        if credentials.credentials != expected:
+        # Constant-time comparison: a plain `!=` short-circuits on the
+        # first differing byte, which (in principle) lets a network-
+        # positioned attacker use response-timing differences to guess
+        # the token one byte at a time. hmac.compare_digest() is the
+        # standard library's own recommended primitive for exactly this
+        # "compare a secret the caller supplied against a known-correct
+        # value" case -- cheap enough to use unconditionally here, no
+        # reason to fall back to plain equality.
+        if not hmac.compare_digest(credentials.credentials, expected):
             raise _unauthorized()
 
     return _bearer_auth

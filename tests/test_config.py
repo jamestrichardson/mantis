@@ -413,7 +413,18 @@ def test_api_client_config_from_env_defaults(monkeypatch):
     assert cfg.base_url == "http://localhost:8080"
     assert cfg.token is None
     assert cfg.connect_timeout_seconds == 5.0
-    assert cfg.read_timeout_seconds == 300.0
+    assert cfg.read_timeout_seconds == 340.0
+
+
+def test_api_client_default_read_timeout_stays_above_the_server_run_deadline():
+    # Regression guard: if the client's default read timeout ever
+    # dropped to/below ReliabilityConfig's own run_timeout_seconds
+    # default, the client could give up right as the server was about
+    # to return its own classified run_timeout result -- see
+    # docs/api.md's "Timeout semantics" section.
+    client_default = ApiClientConfig.from_env().read_timeout_seconds
+    server_default = ReliabilityConfig().run_timeout_seconds
+    assert client_default > server_default + 30.0
 
 
 def test_api_client_config_from_env_reads_url_and_token(monkeypatch):

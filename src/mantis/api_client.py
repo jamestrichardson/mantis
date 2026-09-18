@@ -44,12 +44,20 @@ class ApiAuthError(ApiClientError):
 class ApiRequestError(ApiClientError):
     """The API returned a well-formed rejection (HTTP 4xx other than
     401) — carries the parsed, safe error type/message from the
-    response body (see ``mantis.api.schemas.ErrorResponse``)."""
+    response body (see ``mantis.api.schemas.ErrorResponse``).
 
-    def __init__(self, status_code: int, error_type: str, message: str) -> None:
+    ``run_id`` is set when the server had already assigned one before
+    rejecting the request (e.g. a 429 overload rejection — see
+    ``mantis.api.invocation.ConcurrencyLimitExceededError``) — Mantis
+    deliberately generates that ID so even a rejected attempt is
+    correlatable in server-side logs; this client must not discard it.
+    """
+
+    def __init__(self, status_code: int, error_type: str, message: str, *, run_id: str | None = None) -> None:
         super().__init__(message)
         self.status_code = status_code
         self.error_type = error_type
+        self.run_id = run_id
 
 
 class ApiServerError(ApiClientError):
@@ -86,13 +94,38 @@ class RunResult:
     duration_ms: int
 
 
-def _parse_error_body(response: httpx.Response) -> tuple[str, str]:
+_DEFAULT_ERROR_TYPE = "request_error"
+_DEFAULT_ERROR_MESSAGE = "The request was rejected."
+
+
+def _parse_error_body(response: httpx.Response) -> tuple[str, str, str | None]:
+    """Parse ``mantis.api.schemas.ErrorResponse``'s
+    ``{"error": {"type", "message", "run_id"}}`` shape defensively —
+    the response is coming from the network, not a value this client
+    controls. A non-JSON body, or JSON that isn't the expected object
+    shape (e.g. a bare list or string, which a misbehaving proxy could
+    return instead of the real API), falls back to a safe default
+    rather than raising ``AttributeError``/``TypeError`` out of this
+    function and escaping the typed :class:`ApiClientError` hierarchy
+    entirely.
+    """
     try:
         body = response.json()
-        error = body.get("error", {})
-        return error.get("type", "request_error"), error.get("message", "The request was rejected.")
     except ValueError:
-        return "request_error", "The request was rejected."
+        return _DEFAULT_ERROR_TYPE, _DEFAULT_ERROR_MESSAGE, None
+    if not isinstance(body, dict):
+        return _DEFAULT_ERROR_TYPE, _DEFAULT_ERROR_MESSAGE, None
+    error = body.get("error")
+    if not isinstance(error, dict):
+        return _DEFAULT_ERROR_TYPE, _DEFAULT_ERROR_MESSAGE, None
+    error_type = error.get("type")
+    message = error.get("message")
+    run_id = error.get("run_id")
+    return (
+        error_type if isinstance(error_type, str) else _DEFAULT_ERROR_TYPE,
+        message if isinstance(message, str) else _DEFAULT_ERROR_MESSAGE,
+        run_id if isinstance(run_id, str) else None,
+    )
 
 
 class MantisApiClient:
@@ -131,8 +164,8 @@ class MantisApiClient:
         if response.status_code == 401:
             raise ApiAuthError("Authentication with the Mantis API failed -- check MANTIS_API_TOKEN.")
         if 400 <= response.status_code < 500:
-            error_type, message = _parse_error_body(response)
-            raise ApiRequestError(response.status_code, error_type, message)
+            error_type, message, run_id = _parse_error_body(response)
+            raise ApiRequestError(response.status_code, error_type, message, run_id=run_id)
         if response.status_code >= 500:
             raise ApiServerError(
                 f"The Mantis API returned an unexpected server error (HTTP {response.status_code})."

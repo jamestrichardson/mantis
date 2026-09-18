@@ -11,12 +11,14 @@ integration test of the actual service lifecycle, not a mock of it.
 
 from __future__ import annotations
 
+import signal
 import threading
 import time
 
 import httpx
 import pytest
 
+import mantis.runtime as runtime_module
 from mantis.api.server import build_server
 from mantis.config import ApiServerConfig
 
@@ -92,3 +94,98 @@ def test_build_server_uses_the_configured_shutdown_grace_period():
     server = build_server(config)
 
     assert server.config.timeout_graceful_shutdown == 12
+
+
+# ---------------------------------------------------------------------------
+# Graceful shutdown, precisely: the drain flag flips in the same
+# synchronous signal-handling moment uvicorn decides to shut down at all
+# -- never waiting for uvicorn's own (potentially much later) connection/
+# task-draining sequence -- and the process still exits on schedule even
+# when a run is genuinely blocked and never finishes. See
+# mantis.api.server's module docstring for the full reasoning.
+# ---------------------------------------------------------------------------
+
+
+def test_handle_exit_flips_the_drain_flag_synchronously():
+    # No running event loop or thread needed at all: handle_exit() is a
+    # plain synchronous method, so this is fully deterministic -- it
+    # proves the flag flips in the exact call a real SIGTERM/SIGINT
+    # handler makes, not merely "eventually, once uvicorn gets to it."
+    config = ApiServerConfig(auth_mode="disabled", port=0)
+    server = build_server(config)
+    assert server.app.state.shutting_down is False
+
+    server.handle_exit(signal.SIGTERM, None)
+
+    assert server.app.state.shutting_down is True
+    assert server.should_exit is True
+
+
+def test_handle_exit_is_idempotent_about_logging_but_still_sets_should_exit():
+    config = ApiServerConfig(auth_mode="disabled", port=0)
+    server = build_server(config)
+
+    server.handle_exit(signal.SIGTERM, None)
+    server.handle_exit(signal.SIGTERM, None)  # a second signal must not raise
+
+    assert server.app.state.shutting_down is True
+
+
+def test_shutdown_exits_promptly_even_with_a_blocked_in_flight_run(monkeypatch):
+    # The scenario #21's grace-period contract is actually about: a run
+    # already executing AgentRuntime.run() synchronously in its own
+    # thread when shutdown begins, which never finishes on its own.
+    # Proves the server process still exits on schedule (because that
+    # thread is a daemon, per mantis.api.invocation._run_in_daemon_thread)
+    # rather than hanging until the blocked call eventually returns.
+    started = threading.Event()
+    release = threading.Event()
+
+    def _blocking_run(self, prompt, *, run_id=None):
+        started.set()
+        release.wait(timeout=10.0)
+        return "done"
+
+    monkeypatch.setattr(runtime_module.AgentRuntime, "run", _blocking_run)
+
+    grace_period = 1.0
+    config = ApiServerConfig(
+        auth_mode="disabled", host="127.0.0.1", port=0, shutdown_grace_period_seconds=grace_period
+    )
+    server = build_server(config)
+    server_thread = threading.Thread(target=server.run, daemon=True)
+    server_thread.start()
+
+    deadline = time.monotonic() + 5.0
+    while not server.started and time.monotonic() < deadline:
+        time.sleep(0.01)
+    assert server.started
+
+    port = server.servers[0].sockets[0].getsockname()[1]
+    base_url = f"http://127.0.0.1:{port}"
+
+    request_thread = threading.Thread(
+        target=lambda: httpx.post(
+            f"{base_url}/api/v1/runs",
+            json={"agent": "awx-troubleshooter", "prompt": "investigate"},
+            timeout=10.0,
+        ),
+        daemon=True,
+    )
+    request_thread.start()
+    assert started.wait(timeout=5.0), "the in-flight run never started"
+
+    try:
+        server.handle_exit(signal.SIGTERM, None)
+
+        # The server (and therefore the process, in production) must
+        # exit within roughly the configured grace period -- deliberately
+        # never releasing the blocked run, so this only passes if the
+        # daemon-thread design actually works, not because the call
+        # happened to finish in time.
+        server_thread.join(timeout=grace_period + 5.0)
+        assert not server_thread.is_alive(), (
+            "server did not exit within the grace period while a run was still blocked"
+        )
+    finally:
+        release.set()  # let the abandoned thread finish so it doesn't leak past the test

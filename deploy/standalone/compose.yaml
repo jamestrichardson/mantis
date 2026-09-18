@@ -11,8 +11,15 @@ services:
       MANTIS_DEPLOYED_TAG: ${MANTIS_DEPLOYED_TAG:-unknown}
       MANTIS_HEALTH_URL: ${MANTIS_HEALTH_URL:-http://127.0.0.1:8080/readyz}
 
+    # The API port is bound to localhost only -- the bearer-token API
+    # (#83) has no TLS boundary of its own, so it must never be reachable
+    # directly on a public/host interface. Remote access requires an
+    # explicit reverse proxy/ingress terminating TLS and forwarding to
+    # 127.0.0.1:8080 -- see docs/api.md#transport-security-tls. The
+    # metrics port is exposed on all interfaces as before, matching its
+    # existing (pre-#21) exposure posture; it carries no credential.
     ports:
-      - "8080:8080"
+      - "127.0.0.1:8080:8080"
       - "9108:9108"
 
     # `mantis serve` (#21/#83) is the real persistent service and the
@@ -24,6 +31,17 @@ services:
     entrypoint: ["/bin/sh", "-c"]
     command:
       - "${MANTIS_CONTAINER_COMMAND:-exec mantis serve}"
+
+    # Docker sends SIGTERM, then SIGKILL after this elapses if the
+    # container hasn't exited on its own. Must stay comfortably above
+    # MANTIS_API_SHUTDOWN_GRACE_PERIOD_SECONDS (the *application's* own
+    # bounded drain window, default 30s -- see docs/deployment.md's
+    # "Graceful shutdown" section) or Docker kills the process before
+    # Mantis's own documented grace period has had a chance to elapse.
+    # If you change MANTIS_API_SHUTDOWN_GRACE_PERIOD_SECONDS in
+    # runtime.env, raise MANTIS_STOP_GRACE_PERIOD here to match (leave a
+    # buffer of at least 10s for OS/Docker overhead).
+    stop_grace_period: ${MANTIS_STOP_GRACE_PERIOD:-40s}
 
     healthcheck:
       # The deployment health gate (mantis-deploy) polls this Docker

@@ -25,9 +25,13 @@ defines:
   with the above. This is the one factory `mantis.api.catalog` points
   at; it is never called from `mantis.cli` directly.
 - `main(argv)` — a small wrapper around `build_runtime().run(prompt)`
-  for running the module directly (`python -m mantis.agents.<name>`),
-  independent of the API — see [docs/api.md](api.md#cli-relationship)
-  for why the *official* `mantis` CLI never calls this.
+  for running the module directly (`python -m mantis.agents.<name>`).
+  This is **not** a supported execution path — it's an unsupported,
+  low-level debugging escape hatch (e.g. for stepping through one
+  agent's code without an HTTP hop), with none of the API's
+  authentication, request bounds, concurrency limiting, run ID, or
+  (once #84 lands) history. The official `mantis` CLI never calls this
+  — see [docs/api.md](api.md#cli-relationship).
 
 That's the whole shape. There is no agent-specific subclass of the
 runtime, no agent-specific tool implementation, and no agent-specific
@@ -112,8 +116,9 @@ directly in the agent module.
 3. Add a `build_runtime()` function returning
    `AgentRuntime(name=AGENT_NAME, system_prompt=SYSTEM_PROMPT, tools=ALLOWED_TOOLS)`.
 4. Add a `main(argv)` wrapper (copy the pattern from
-   `awx_troubleshooter.py`) for direct-module invocation during
-   development.
+   `awx_troubleshooter.py`) — an unsupported debugging escape hatch for
+   direct-module invocation, not a development workflow to build on
+   (see [What constitutes an agent](#what-constitutes-an-agent) above).
 5. Register it in `mantis.api.catalog.build_default_catalog()` (one
    `AgentCatalogEntry` pointing at this module's `build_runtime`/
    `AGENT_NAME`/`DEFAULT_PROMPT`, plus a `display_name`/`description`/
@@ -126,9 +131,10 @@ directly in the agent module.
 
 ### Catalog registration (required for API/CLI access)
 
-Steps 1–4 above make an agent *runnable* (e.g.
-`python -m mantis.agents.<name>`); step 5 is what makes it *invokable*
-through the API and therefore the official CLI. An agent module with no
+Steps 1–4 above make an agent *runnable* only via the unsupported
+`python -m mantis.agents.<name>` debugging escape hatch; step 5 is what
+makes it *invokable* through the API and therefore the official CLI —
+the only supported path. An agent module with no
 catalog entry is dead code from the API/CLI's perspective — the catalog
 in `mantis.api.catalog` is the single source of truth both the HTTP API
 and the CLI resolve agent IDs against (see
@@ -161,10 +167,12 @@ and the CLI resolve agent IDs against (see
   and `temperature=0.1` for focused, consistently formatted output from
   smaller local models.
 
-Run it via the API/CLI (`mantis awx-troubleshooter "..."` or `mantis run
-awx-troubleshooter "..."` — both HTTP calls to a running `mantis serve`,
-see [docs/api.md](api.md)), or directly for local development with
-`python -m mantis.agents.awx_troubleshooter`.
+Run it via the API/CLI: `mantis awx-troubleshooter "..."` or `mantis run
+awx-troubleshooter "..."` — both HTTP calls to a running `mantis serve`
+(see [docs/api.md](api.md)). The only other way to run it,
+`python -m mantis.agents.awx_troubleshooter`, is the unsupported
+debugging escape hatch described above — not a normal way to use this
+agent.
 
 ## System Troubleshooter example
 
@@ -196,9 +204,11 @@ design and a worked `ferros-c01` example:
   [docs/system-troubleshooter.md](system-troubleshooter.md#budgets) for
   the full rationale.
 
-Run it via the API/CLI (`mantis system-troubleshooter "..."` or `mantis
-run system-troubleshooter "..."`), or directly for local development
-with `python -m mantis.agents.system_troubleshooter`.
+Run it via the API/CLI: `mantis system-troubleshooter "..."` or `mantis
+run system-troubleshooter "..."`. The only other way to run it,
+`python -m mantis.agents.system_troubleshooter`, is the unsupported
+debugging escape hatch described above — not a normal way to use this
+agent.
 
 ## Envisioned future agents
 

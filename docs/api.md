@@ -69,6 +69,36 @@ curl -s "$MANTIS_API_URL/api/v1/agents" \
   -H "Authorization: Bearer $MANTIS_API_TOKEN"
 ```
 
+## Transport security (TLS)
+
+Mantis's FastAPI process speaks plain HTTP — it does not terminate TLS
+itself, and the bearer token above has no protection in transit beyond
+whatever network path it travels. **Never expose `mantis serve`'s port
+directly on a public or otherwise untrusted network interface.** The
+reference standalone deployment (`deploy/standalone/compose.yaml`)
+binds the published API port to `127.0.0.1` on the host specifically so
+this can't happen by accident:
+
+```text
+remote client
+     |
+   HTTPS
+     |
+reverse proxy / ingress   (terminates TLS)
+     |
+127.0.0.1:8080
+     |
+  mantis serve
+```
+
+Put a TLS-terminating reverse proxy (nginx, Caddy, Traefik, a cloud
+load balancer, ...) in front of the localhost-bound port for any access
+beyond the deployment host itself, and forward
+`Authorization` through unmodified. If Mantis only ever needs to be
+reached from the same host or a network you already trust as a whole
+(no reverse proxy in the path), that trust boundary should be explicit
+in your own deployment notes, not assumed silently.
+
 ## Health and readiness
 
 Both are cheap, bounded, unauthenticated, and never call a model, agent,
@@ -308,14 +338,18 @@ failed or definitely succeeded server-side.
 
 ## Graceful shutdown
 
-See [docs/deployment.md](deployment.md#graceful-shutdown) for the full
-sequence. In short: `/readyz` flips to `not_ready` (`reason:
-"shutting_down"`) as the very first shutdown action, and `POST
-/api/v1/runs` starts returning `503`/`not_ready` at the same moment —
-both derive from one shared flag, so there's no window where they
-disagree. Already-in-flight runs get
-`MANTIS_API_SHUTDOWN_GRACE_PERIOD_SECONDS` (default `30`) to finish
-before the process exits.
+See [docs/deployment.md](deployment.md#graceful-shutdown) for the exact
+signal-to-exit sequence. In short: on `SIGTERM`/`SIGINT`, `/readyz`
+flips to `not_ready` (`reason: "shutting_down"`) **synchronously, in
+the same instant** the signal is handled — not merely "eventually" —
+and `POST /api/v1/runs` starts returning `503`/`not_ready` from that
+same moment, since both derive from the one flag that flip sets. A run
+already in flight gets up to `MANTIS_API_SHUTDOWN_GRACE_PERIOD_SECONDS`
+(default `30`) to finish; if it hasn't by then, the process still exits
+on schedule regardless — that run is abandoned, not extended, so
+"exits predictably after the configured grace period" holds even for a
+genuinely stuck call (Mantis cannot forcibly stop synchronous work
+already in progress; see [docs/reliability.md](reliability.md)).
 
 ## CLI relationship
 

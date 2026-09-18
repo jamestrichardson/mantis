@@ -115,10 +115,6 @@ mantis awx-troubleshooter \
 
 # Equivalent, explicit generic form:
 mantis run awx-troubleshooter "Show me the last 3 failed AWX jobs and tell me whether they appear related."
-
-# Direct module invocation, independent of the service (useful for
-# running one agent under a debugger without the HTTP hop):
-python -m mantis.agents.awx_troubleshooter "Show me the last 5 failed AWX jobs and summarize them."
 ```
 
 What you should see: the agent calls out to your AWX instance for recent
@@ -126,6 +122,15 @@ failed jobs, retrieves and preprocesses their stdout, sends that evidence
 to your model via LiteLLM, and the CLI prints an evidence-based summary
 plus the run's ID. See the [README](../README.md#example) for a worked
 example of the kind of output to expect.
+
+### Debugging escape hatch: running a module directly
+
+`python -m mantis.agents.awx_troubleshooter "..."` also works, bypassing
+`mantis serve`/the API entirely. This is **not** a supported development
+workflow — it exists only so an agent module can be run under a debugger
+without an HTTP hop in the way. It gets none of the API's authentication,
+request bounds, concurrency limiting, run ID, or (once #84 lands) history
+— never rely on it for anything beyond stepping through one agent's code.
 
 ## 5. Run the tests
 

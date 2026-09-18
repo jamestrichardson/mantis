@@ -36,6 +36,18 @@ class AgentCatalogError(Exception):
         self.http_status = http_status
 
 
+class DuplicateAgentError(ValueError):
+    """Raised by :meth:`AgentCatalog.__init__` when two entries share an
+    ``id``. Not an :class:`AgentCatalogError` — this is a catalog
+    *construction* bug (a programming error in
+    :func:`build_default_catalog` or a custom catalog), never a
+    per-request condition an API route needs to classify/handle, so it
+    deliberately doesn't carry an HTTP status. The catalog is becoming
+    Mantis's capability/authorization boundary for agent invocation, so
+    silently letting one entry shadow another ("last one wins") is
+    exactly the kind of ambiguity that boundary must not have."""
+
+
 class UnknownAgentError(AgentCatalogError):
     """Raised when a requested agent ID is not in the catalog at all —
     a caller/client mistake, rejected before any model/tool execution."""
@@ -109,7 +121,11 @@ class AgentCatalog:
     plugin/discovery framework. See :func:`build_default_catalog`."""
 
     def __init__(self, entries: list[AgentCatalogEntry]) -> None:
-        self._entries: dict[str, AgentCatalogEntry] = {entry.id: entry for entry in entries}
+        self._entries: dict[str, AgentCatalogEntry] = {}
+        for entry in entries:
+            if entry.id in self._entries:
+                raise DuplicateAgentError(f"Duplicate agent ID: {entry.id!r}")
+            self._entries[entry.id] = entry
 
     def list(self) -> list[AgentCatalogEntry]:
         return list(self._entries.values())

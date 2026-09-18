@@ -46,6 +46,24 @@ It:
 There is exactly one process per container performing all of this —
 no separate daemon for metrics, the API, or agent execution.
 
+## Network exposure and TLS
+
+`mantis serve` speaks plain HTTP; it does not terminate TLS. The
+reference Compose file therefore publishes the API port bound to
+`127.0.0.1` on the deployment host only:
+
+```yaml
+ports:
+  - "127.0.0.1:8080:8080"
+```
+
+so the bearer-token-protected API is never reachable directly from
+outside the host by accident. For access beyond the host itself, put a
+TLS-terminating reverse proxy in front of `127.0.0.1:8080` — see
+[docs/api.md](api.md#transport-security-tls) for the supported pattern.
+The metrics port (`9108`) remains published on all interfaces, matching
+its pre-#21 exposure — it carries no credential.
+
 ## Initial setup
 
 Requirements on the deployment host:
@@ -143,14 +161,14 @@ This is the default in `deploy.env.example` — `/readyz` reports `not_ready` on
 
 ## Graceful shutdown
 
-`docker compose stop` (used implicitly by `mantis-deploy` when recreating the service, and by `mantis-deploy rollback`) sends `SIGTERM` to the container's PID1 — `mantis serve` itself, not an intermediate shell, since the Compose command uses `exec mantis serve`. On receipt:
+`docker compose stop` (used implicitly by `mantis-deploy` when recreating the service, and by `mantis-deploy rollback`) sends `SIGTERM` to the container's PID1 — `mantis serve` itself, not an intermediate shell, since the Compose command uses `exec mantis serve`. The exact sequence, precisely, because the ordering matters and is easy to get wrong:
 
-1. `/readyz` immediately reports `not_ready` (`reason: "shutting_down"`), and `POST /api/v1/runs` starts returning `503` — both derive from the same in-process flag, so there's no window where they disagree (see [docs/api.md](api.md#graceful-shutdown)).
-2. The HTTP server stops accepting new connections.
-3. Any run already in progress gets up to `MANTIS_API_SHUTDOWN_GRACE_PERIOD_SECONDS` (default `30`) to finish.
-4. The process exits.
+1. **Synchronously, in the signal handler itself** (`mantis.api.server._DrainingAwareServer.handle_exit`) — before uvicorn does anything else — `/readyz` flips to `not_ready` (`reason: "shutting_down"`) and `POST /api/v1/runs` starts returning `503`. This is deliberately *not* tied to uvicorn's own ASGI lifespan-shutdown phase, which normally only runs *after* the steps below — that would make the readiness transition depend on however long draining in-flight connections happens to take, defeating "readiness transitions to not-ready before new work is rejected" as a real guarantee rather than a usual case.
+2. uvicorn stops accepting new TCP connections immediately.
+3. Any request/run already in progress gets up to `MANTIS_API_SHUTDOWN_GRACE_PERIOD_SECONDS` (default `30`) to finish. If it hasn't by then, uvicorn cancels the *waiting* task — which stops the HTTP response, but cannot stop a still-running `AgentRuntime.run()` call, since Python cannot preempt arbitrary synchronous code (see [docs/reliability.md](reliability.md)). That run keeps executing in an abandoned **daemon** thread (`mantis.api.invocation._run_in_daemon_thread`); being a daemon thread is what lets the next step happen on schedule instead of hanging.
+4. The process exits — **on schedule, even if step 3's run is still running** in its abandoned thread. That run's result is simply lost; it does not extend the shutdown window.
 
-Docker's own `stop_grace_period` (or `docker compose stop -t <seconds>`) should be set at least as large as `MANTIS_API_SHUTDOWN_GRACE_PERIOD_SECONDS`, or Docker will `SIGKILL` the process before its own graceful window elapses.
+Docker's own `stop_grace_period` (`deploy/standalone/compose.yaml`, `MANTIS_STOP_GRACE_PERIOD` in `deploy.env`, default `40s`) must stay comfortably above `MANTIS_API_SHUTDOWN_GRACE_PERIOD_SECONDS` (default `30s`) — if you raise the latter, raise the former to match (keep at least a 10s buffer for OS/Docker overhead), or Docker will `SIGKILL` the process before Mantis's own graceful window has had a chance to elapse.
 
 ## Status
 

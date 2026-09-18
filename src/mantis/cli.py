@@ -68,7 +68,8 @@ def _call_api(fn: Callable[[], T]) -> tuple[T | None, int]:
     except ApiAuthError as exc:
         print(f"Mantis API authentication failed: {exc}", file=sys.stderr)
     except ApiRequestError as exc:
-        print(f"Mantis API rejected the request ({exc.error_type}): {exc}", file=sys.stderr)
+        run_id_suffix = f" [run_id: {exc.run_id}]" if exc.run_id else ""
+        print(f"Mantis API rejected the request ({exc.error_type}): {exc}{run_id_suffix}", file=sys.stderr)
     except ApiServerError as exc:
         print(f"Mantis API error: {exc}", file=sys.stderr)
     except ApiClientError as exc:  # pragma: no cover - defensive catch-all

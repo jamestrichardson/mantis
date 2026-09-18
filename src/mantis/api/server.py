@@ -6,20 +6,52 @@ Prometheus registry/server (#66) for the lifetime of the process. There
 is no second daemon for metrics, API, or agent execution — see
 ``docs/architecture.md``.
 
-Graceful shutdown is uvicorn's own: ``uvicorn.Server`` installs SIGTERM/
-SIGINT handlers when run in the main thread, stops accepting new
-connections immediately on signal, waits up to
-``shutdown_grace_period_seconds`` for in-flight requests to finish, then
-exits — see ``docs/deployment.md``'s "Graceful shutdown" section for the
-exact sequence and its honest limitations.
+Graceful shutdown, precisely
+-----------------------------
+
+``uvicorn.Server`` installs SIGTERM/SIGINT handlers when run in the main
+thread. On signal, its *own* sequence is: stop accepting new TCP
+connections, wait up to ``timeout_graceful_shutdown`` for in-flight
+requests/tasks to finish (cancelling them if that elapses), and only
+*then* run the ASGI ``lifespan`` "shutdown" phase
+(``mantis.api.app``'s ``app.state.shutting_down = True``).
+
+That ordering is a real problem for #21's readiness contract on its
+own: "readiness transitions to not-ready *before* new work is rejected"
+should not depend on how long uvicorn's own connection/task draining
+happens to take. :class:`_DrainingAwareServer` below fixes this by
+overriding ``handle_exit`` (the method uvicorn's signal handler itself
+calls) to flip the app's drain flag **synchronously, in the same
+signal-handling moment** uvicorn decides to begin shutting down at all —
+before its connection-draining sequence even starts, not after.
+
+The second, deeper problem this module fixes is that
+``InvocationService`` runs ``AgentRuntime.run()`` in a **daemon** thread
+(see ``mantis.api.invocation._run_in_daemon_thread``), not the default
+executor ``asyncio.to_thread`` would use. If uvicorn's
+``timeout_graceful_shutdown`` elapses while a run is still executing,
+uvicorn cancels the *awaiting* asyncio task — which stops the HTTP
+response from ever completing, but cannot and does not stop the
+underlying OS thread the blocking call is still running in (Python
+cannot preempt arbitrary synchronous code; see
+``mantis.reliability``'s identical honest limitation). A **non-daemon**
+thread there would be joined by ``concurrent.futures.thread``'s own
+``atexit`` hook, silently blocking process exit for as long as that
+call keeps running — directly defeating "the process exits predictably
+after the configured bounded grace period." A daemon thread cannot
+block interpreter exit, so the process still exits on schedule; the
+abandoned run itself is simply lost, exactly as honestly documented in
+``docs/deployment.md``.
 """
 
 from __future__ import annotations
 
 import logging
 import sys
+from types import FrameType
 
 import uvicorn
+from fastapi import FastAPI
 
 from mantis.api.app import create_app
 from mantis.config import ApiServerConfig, ConfigurationError, get_metrics_enabled
@@ -29,13 +61,35 @@ from mantis.observability.metrics import start_metrics_server
 logger = logging.getLogger(__name__)
 
 
+class _DrainingAwareServer(uvicorn.Server):
+    """A ``uvicorn.Server`` that flips its app's drain flag the instant
+    a shutdown signal is handled, rather than waiting for uvicorn's own
+    (potentially much later) ASGI lifespan-shutdown phase. See this
+    module's docstring for exactly why that ordering matters."""
+
+    def __init__(self, config: uvicorn.Config, app: FastAPI) -> None:
+        super().__init__(config)
+        self.app = app
+        """The real Mantis FastAPI app this server hosts — a public
+        attribute (not just closed over) so tests can assert
+        ``server.app.state.shutting_down`` deterministically, without
+        racing a new HTTP connection against uvicorn's own
+        connection-draining timing."""
+
+    def handle_exit(self, sig: int, frame: FrameType | None) -> None:
+        if not self.app.state.shutting_down:  # only log/flip once
+            self.app.state.shutting_down = True
+            log_event(logger, "mantis_api_shutdown_started", signal=sig)
+        super().handle_exit(sig, frame)
+
+
 def build_server(config: ApiServerConfig) -> uvicorn.Server:
     """Construct (but do not run) the real ``uvicorn.Server`` hosting
     the real Mantis app for ``config``. Split out from :func:`run_server`
     purely so tests can start/stop the real server deterministically
-    (bind an ephemeral port, poll ``server.started``, flip
-    ``server.should_exit`` — the same mechanism uvicorn's own SIGTERM/
-    SIGINT handler uses) without needing real process signals.
+    (bind an ephemeral port, poll ``server.started``, call
+    ``server.handle_exit(...)`` directly — the same method a real
+    SIGTERM/SIGINT invokes) without needing real process signals.
     """
     app = create_app(server_config=config)
     uvicorn_config = uvicorn.Config(
@@ -44,7 +98,7 @@ def build_server(config: ApiServerConfig) -> uvicorn.Server:
         port=config.port,
         timeout_graceful_shutdown=int(config.shutdown_grace_period_seconds),
     )
-    return uvicorn.Server(uvicorn_config)
+    return _DrainingAwareServer(uvicorn_config, app)
 
 
 def run_server(*, config: ApiServerConfig | None = None) -> None:

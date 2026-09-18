@@ -162,10 +162,9 @@ mantis awx-troubleshooter \
 
 # Equivalent, explicit generic form:
 mantis run awx-troubleshooter "Show me the last 3 failed AWX jobs and tell me whether they appear related."
-
-# Direct module invocation, independent of the API (local development only):
-python -m mantis.agents.awx_troubleshooter "Show me the last 5 failed AWX jobs and summarize them."
 ```
+
+Both go through the real Mantis API (`mantis serve` must already be running — see [Quickstart](#quickstart) above). There is no supported way to run an agent without it; see [docs/api.md](docs/api.md#cli-relationship).
 
 ### What happens
 

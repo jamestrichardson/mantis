@@ -197,6 +197,40 @@ def test_docs_ui_is_served():
     assert b"swagger" in response.content.lower()
 
 
+def test_openapi_documents_every_error_status_code_runs_can_actually_return():
+    # Regression guard: keep the generated OpenAPI schema aligned with
+    # docs/api.md's error table -- every status/error.type the real
+    # implementation can produce for POST /api/v1/runs should be
+    # declared, with a concrete example of that exact error.type.
+    app = create_app(server_config=_server_config())
+    with TestClient(app) as client:
+        schema = client.get("/openapi.json").json()
+
+    responses = schema["paths"]["/api/v1/runs"]["post"]["responses"]
+    expected = {
+        "401": "unauthenticated",
+        "404": "unknown_agent",
+        "409": "agent_unavailable",
+        "422": "validation_error",
+        "429": "overloaded",
+        "503": "not_ready",
+        "500": "internal_error",
+    }
+    for status, error_type in expected.items():
+        assert status in responses, f"missing {status} in documented responses"
+        example = responses[status]["content"]["application/json"]["example"]
+        assert example["error"]["type"] == error_type
+
+
+def test_openapi_documents_unauthorized_and_server_error_for_agents_listing():
+    app = create_app(server_config=_server_config())
+    with TestClient(app) as client:
+        schema = client.get("/openapi.json").json()
+
+    responses = schema["paths"]["/api/v1/agents"]["get"]["responses"]
+    assert set(responses) >= {"200", "401", "500"}
+
+
 # ---------------------------------------------------------------------------
 # Authentication
 # ---------------------------------------------------------------------------

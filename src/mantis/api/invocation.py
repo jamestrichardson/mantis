@@ -16,9 +16,11 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import threading
 import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
+from typing import Callable, TypeVar
 
 from openai import OpenAIError
 
@@ -40,9 +42,57 @@ MAX_PROMPT_CHARS = 4000
 :class:`InvocationService`; repeated here only as the canonical
 constant other modules (tests, schemas) import from."""
 
+T = TypeVar("T")
+
 
 def _utc_now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
+
+
+def _run_in_daemon_thread(fn: Callable[..., T], *args: object, **kwargs: object) -> "asyncio.Future[T]":
+    """Run a blocking call in a **daemon** thread and return a Future
+    that resolves when it completes — deliberately not
+    ``asyncio.to_thread``/``loop.run_in_executor(None, ...)``, both of
+    which submit to the process's default ``ThreadPoolExecutor``, whose
+    worker threads are non-daemon. A non-daemon thread running
+    ``AgentRuntime.run()`` past the point uvicorn cancels the awaiting
+    task (see :meth:`InvocationService.invoke` and #21's graceful
+    shutdown contract) would otherwise be joined by
+    ``concurrent.futures.thread``'s own ``atexit`` hook, silently
+    blocking process exit for as long as that call keeps running —
+    directly defeating "the process exits predictably after the
+    configured bounded grace period."
+
+    Awaiting the returned future is fully cancellable in the normal
+    asyncio sense (a cancellation just stops *waiting*, exactly like
+    ``mantis.reliability``'s existing honest limitation that Mantis
+    cannot forcibly interrupt an already-running blocking call) — the
+    thread itself is not, and is not claimed to be, stoppable; making it
+    a daemon thread only guarantees it can never block interpreter exit.
+    """
+    loop = asyncio.get_running_loop()
+    future: "asyncio.Future[T]" = loop.create_future()
+
+    def _worker() -> None:
+        try:
+            result = fn(*args, **kwargs)
+        except BaseException as exc:  # noqa: BLE001 -- forwarded to the future, not swallowed
+            if not loop.is_closed():
+                loop.call_soon_threadsafe(_set_exception, exc)
+        else:
+            if not loop.is_closed():
+                loop.call_soon_threadsafe(_set_result, result)
+
+    def _set_result(result: T) -> None:
+        if not future.done():
+            future.set_result(result)
+
+    def _set_exception(exc: BaseException) -> None:
+        if not future.done():
+            future.set_exception(exc)
+
+    threading.Thread(target=_worker, daemon=True, name="mantis-agent-run").start()
+    return future
 
 
 class InvocationError(Exception):
@@ -163,7 +213,7 @@ class InvocationService:
         start_perf = time.perf_counter()
         log_event(logger, "mantis_api_run_started", run_id=run_id, agent=agent_id)
         try:
-            output = await asyncio.to_thread(runtime.run, prompt, run_id=run_id)
+            output = await _run_in_daemon_thread(runtime.run, prompt, run_id=run_id)
             outcome = "success"
             error: RunError | None = None
         except Exception as exc:  # noqa: BLE001 -- classified below; this is the invocation
