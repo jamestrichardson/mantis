@@ -126,11 +126,11 @@ A deploy performs these steps:
 1. validates the tag;
 2. pulls `ghcr.io/jamestrichardson/mantis:<tag>`;
 3. resolves the pulled tag to an immutable `repo@sha256:...` reference;
-4. records the previous known-good tag/digest;
+4. records the previous known-good tag/digest/contract;
 5. recreates the `mantis` Compose service using the immutable digest;
 6. waits for a bounded Docker health/readiness result — the real `/readyz` contract (see below), not a synthetic substitute;
-7. records the new tag/digest only after the health check succeeds;
-8. automatically restores the previous known-good digest if the new container fails health.
+7. records the new tag/digest/contract only after the health check succeeds — the contract recorded is always the currently active `DEPLOYMENT_CONTRACT_VERSION`, since that's what this deployment was just proven against;
+8. automatically restores the previous known-good digest if the new container fails health — **but only if that previous deployment's own recorded contract is known to match the currently active one** (#98); otherwise the failed candidate is stopped and left unresolved for manual recovery rather than risking an incompatible-lifecycle restart loop. See [Deployment contract compatibility](#deployment-contract-compatibility-98).
 
 Deployments are serialized with a local `flock`, so two operators cannot update the container at the same time.
 
@@ -159,6 +159,19 @@ MANTIS_HEALTH_URL=http://127.0.0.1:8080/readyz
 
 This is the default in `deploy.env.example` — `/readyz` reports `not_ready` only while mandatory local startup is still in progress or shutdown has begun, never because of an AWX/LiteLLM/Kubernetes/Prometheus/Loki outage (see [docs/api.md](api.md#health-and-readiness) for the full contract). `mantis-deploy` polls the resulting Docker health status; `MANTIS_HEALTH_TIMEOUT_SECONDS`/`MANTIS_HEALTH_INTERVAL_SECONDS` control how long it waits. Only a Docker-reported `healthy` status promotes a deployment — a container with no healthcheck metadata at all (`docker inspect` reports `none`, e.g. from a missing or misconfigured `healthcheck:` stanza) fails closed: it simply runs out the poll timeout and the deployment is reported as failed, exactly like a container that never passes its healthcheck. It is never treated as an acceptable substitute for a proven `/readyz` result.
 
+### The probe itself (#97)
+
+`deploy/standalone/healthcheck.sh` is baked into the runtime image at `/usr/local/bin/mantis-healthcheck` and invoked directly by Compose's `healthcheck.test` — a raw HTTP/1.0 request over bash's own `/dev/tcp` pseudo-device (a builtin, not a new process or package): connect, send `GET <path> HTTP/1.0`, read one response line, and treat any `2xx` status as success. Anything else — a non-`2xx` status, a malformed/non-HTTP response line, a refused/failed connection, or no response within its own bounded read timeout (`MANTIS_HEALTHCHECK_PROBE_TIMEOUT_SECONDS`, default `3`) — is a failure, exiting non-zero. It never weakens the check to process liveness, port-open-only, or `/healthz` — it is always a real `/readyz` HTTP round-trip. On failure it prints one fixed diagnostic line to stderr (e.g. the HTTP status or "no response within Ns") — never response headers/body, and never a credential (`/readyz` itself is always unauthenticated, so none could leak here regardless).
+
+This replaced an earlier `python -c 'import urllib.request; ...'` probe: on a slow/constrained host, Python interpreter startup and import machinery alone were measured taking 1.4s–5.8s, which could exceed the healthcheck's own `timeout` even though `/readyz` itself had already returned `200` — Docker would mark a genuinely ready container unhealthy purely from probe-process overhead, not application state. The bash-only probe adds no new package to the runtime image and, once the service is actually ready, completes in single-digit milliseconds even under heavy CPU throttling (verified with `docker run --cpus=0.1`).
+
+Two independent timeouts are both intentional, not redundant:
+
+- The probe's **own** `MANTIS_HEALTHCHECK_PROBE_TIMEOUT_SECONDS` (default `3`) bounds the read after a successful TCP connect — the realistic hang case (the connection is accepted, but the server is slow/blocked before writing a response). The target is always the loopback interface in the shipped `compose.yaml`, whose `connect()` is synchronous and never itself hangs.
+- Compose's `healthcheck.timeout: 5s` bounds the *whole* probe process from Docker's side, leaving ~2s of margin beyond the probe's own budget for bash/exec startup — not because the probe is expensive, but so a slow host still has headroom. `start_period: 5s` gives `mantis serve`'s own startup the same kind of margin before failures start counting toward `retries` (`20`, at `interval: 2s`).
+
+Both were chosen with realistic slow-host headroom in mind, not as a substitute for the probe being cheap — the workaround from the original incident (bumping the Docker healthcheck timeout to 10s while keeping the expensive probe) is no longer necessary and should not be reintroduced.
+
 ## Graceful shutdown
 
 `docker compose stop` (used implicitly by `mantis-deploy` when recreating the service, and by `mantis-deploy rollback`) sends `SIGTERM` to the container's PID1 — `mantis serve` itself, not an intermediate shell, since the Compose command uses `exec mantis serve`. The exact sequence, precisely, because the ordering matters and is easy to get wrong:
@@ -179,11 +192,28 @@ sudo mantis-deploy status
 Status reports:
 
 - configured tag and immutable image reference;
-- current known-good tag/digest;
-- previous known-good tag/digest;
+- the currently active deployment contract version (#98);
+- current known-good tag/digest/contract;
+- previous known-good tag/digest/contract;
 - actual running image reference and image ID;
 - Docker container state and health;
 - container start timestamp.
+
+A `contract` value of `unknown` means that side (current or previous) either predates #98 or was never recorded — see [Deployment contract compatibility](#deployment-contract-compatibility-98).
+
+## Deployment contract compatibility (#98)
+
+A previous image and the currently installed `compose.yaml`/`mantis-deploy` are two independently-evolving things — nothing guarantees an older image actually supports whatever the *current* Compose `command`/`healthcheck` expects of it. Mantis 1.7 introduced `mantis serve` as PID1 (#21); a 1.5.0 image predates that entirely. During the real 1.7.0 rollout, an automatic rollback recreated a 1.5.0 container using the 1.7 Compose contract, and it entered a restart loop (`Unknown agent: 'serve'`) — the old image had no `serve` subcommand for the new `command:` to invoke.
+
+`mantis-deploy` fixes this with an explicit **deployment contract version** — `DEPLOYMENT_CONTRACT_VERSION` in the script itself (currently `"1"`), bumped deliberately whenever a future change to `compose.yaml`'s `command`/`healthcheck` (or an equivalent lifecycle-shape change) means an older image can no longer be assumed to work under it. **This is never inferred from the image's own tag or SemVer** — a 1.5.0 vs. 1.7.0 tag doesn't itself tell you their lifecycle contracts differ; only a deliberate, reviewed bump of this constant does.
+
+Every successful deployment now records which contract was active at the time, alongside its tag/ref (`current-contract`/`previous-contract` — see [Files and state](#files-and-state) below). Both automatic rollback (after a failed `mantis-deploy <tag>`) and manual `mantis-deploy rollback` apply the exact same rule, checked **before** any `docker pull`/`compose up` for the rollback target — never by starting the old image under the current contract "to find out," which is exactly the failure mode this exists to prevent:
+
+- The target's recorded contract must be present and **exactly equal** to the currently active `DEPLOYMENT_CONTRACT_VERSION`. Anything else — a genuine mismatch, or an empty/missing value — is treated as **incompatible**, never as compatible-by-default.
+- **Legacy state that predates this feature** (installed before #98, so `current-contract`/`previous-contract` were never written) reads back empty, which this rule treats identically to a known mismatch: unsafe, not compatible. There is no grace period or implicit migration that assumes an existing deployment is fine — an operator upgrading `mantis-deploy` (via `install.sh`) onto a pre-#98 install will have its first automatic/manual rollback attempt refused until a fresh, successful `mantis-deploy <tag>` records a real contract for the running deployment.
+- On refusal, `mantis-deploy` **never** pulls or starts the incompatible target and **never** changes `current-*`/`previous-*` state to claim a rollback happened. For an automatic-rollback refusal (i.e. a brand-new deploy already failed its own health check), the failed candidate container is stopped (`compose stop`) so it doesn't sit restart-looping — `current-*` state is left describing the last known-good deployment throughout, even though nothing is currently running. For a manual `mantis-deploy rollback` refusal, the currently running container is never touched at all.
+- `mantis-deploy` only ever reports rollback success once the restored target has actually passed the same `/readyz` health gate as a normal deploy (unchanged from before #98) — a refused rollback is always a distinct, explicit failure, never silently reported as success.
+- **The refusal message never offers `mantis-deploy <tag>` as the recovery command.** Rollback is digest-based specifically so a moving mutable tag (e.g. a rebuilt `pr-100`) never changes what "previous known-good" means — re-resolving that tag as "recovery" would silently reintroduce exactly the tag-drift problem digest-based rollback exists to prevent. Instead the message names the exact recorded `repo@sha256:...` ref and explains that restoring it (once you've separately confirmed it's actually compatible with the currently installed tooling) means bypassing `mantis-deploy` for that one step — setting `MANTIS_IMAGE_REF`/`MANTIS_DEPLOYED_TAG` in `deploy.env` directly and running `docker compose up` yourself — since there is no `mantis-deploy` subcommand that accepts an already-resolved digest (a deliberate scope decision, not an oversight). That bypass also means `mantis-deploy`'s own health gate and state tracking don't apply to it: verify readiness yourself, and expect `mantis-deploy status` to look inconsistent until the next successful `mantis-deploy <tag>` or `mantis-deploy rollback` re-establishes state.
 
 ## Rollback
 
@@ -191,32 +221,43 @@ Status reports:
 sudo mantis-deploy rollback
 ```
 
-Rollback deploys the exact immutable digest recorded for the previous known-good deployment, validated against the same `/readyz` health gate as a normal deploy. It does not re-resolve the old tag, so rollback remains deterministic even for mutable PR tags.
+Rollback deploys the exact immutable digest recorded for the previous known-good deployment, validated against the same `/readyz` health gate as a normal deploy, and against the [deployment contract compatibility](#deployment-contract-compatibility-98) rule above. It does not re-resolve the old tag, so rollback remains deterministic even for mutable PR tags.
 
-A successful rollback swaps current/previous state, allowing another `rollback` to move back if needed.
+A successful rollback swaps current/previous state (tag, ref, and contract together), allowing another `rollback` to move back if needed.
 
 ## Deployment events
 
-Each deployment/rollback emits a compact JSON `mantis_deployment` event to the host journal. When the container is running, the script also writes the event into container stdout so Alloy's existing Docker log collection sends it to Loki.
+Each deployment/rollback emits a compact JSON `mantis_deployment` event to the host journal. When the container is running, the script also writes the event into container stdout so Alloy's existing Docker log collection sends it to Loki — no second logging backend was added for this.
 
-Example Loki query:
+Every event now also carries `deployment_contract`: the currently active `DEPLOYMENT_CONTRACT_VERSION` (a fixed, low-cardinality string, never a secret) — most useful on a refused rollback, where `outcome` is `refused_incompatible_contract`:
+
+```json
+{"event":"mantis_deployment","timestamp":"...","action":"rollback","outcome":"refused_incompatible_contract","requested_tag":"1.5.0","image_ref":"ghcr.io/jamestrichardson/mantis@sha256:...","deployment_contract":"1","host":"..."}
+```
+
+Example Loki queries:
 
 ```logql
 {container="mantis"} |= "mantis_deployment"
+
+# Refused rollbacks specifically
+{container="mantis"} | json | outcome="refused_incompatible_contract"
 ```
 
 ## Files and state
 
-`deploy.env` contains deployment configuration only. `runtime.env` contains application configuration/secrets. State files under `/opt/mantis/state/` contain only tags and immutable image references:
+`deploy.env` contains deployment configuration only. `runtime.env` contains application configuration/secrets. State files under `/opt/mantis/state/` contain tags, immutable image references, and (#98) the deployment contract each was recorded under:
 
 ```text
 current-tag
 current-ref
+current-contract
 previous-tag
 previous-ref
+previous-contract
 ```
 
-Deleting state does not delete Docker images, but it removes the script's knowledge of the previous known-good deployment and therefore disables automatic/manual rollback until another successful deployment establishes state.
+Deleting state does not delete Docker images, but it removes the script's knowledge of the previous known-good deployment and therefore disables automatic/manual rollback until another successful deployment establishes state. A `-contract` file missing while its paired `-tag`/`-ref` files exist is exactly the legacy/pre-#98 shape described above — treated as an unknown, incompatible contract, never assumed safe.
 
 ## Updating the deployment tooling
 
@@ -226,7 +267,7 @@ After pulling a newer Mantis checkout, rerun:
 sudo bash deploy/standalone/install.sh
 ```
 
-Existing runtime/deployment environment files are preserved while `compose.yaml` and `/usr/local/bin/mantis-deploy` are refreshed.
+Existing runtime/deployment environment files are preserved while `compose.yaml` and `/usr/local/bin/mantis-deploy` are refreshed. If the refreshed `mantis-deploy` bumped `DEPLOYMENT_CONTRACT_VERSION`, the previously-recorded `current-contract` (from before this refresh) no longer matches it by design — see [Deployment contract compatibility](#deployment-contract-compatibility-98). The currently running deployment keeps running untouched; only a *rollback* attempt would be affected, and only until the next successful `mantis-deploy <tag>` records a fresh, matching contract for whatever's running.
 
 ## Out of scope
 
