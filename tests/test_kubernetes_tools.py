@@ -161,6 +161,38 @@ def test_no_prior_termination_is_none_not_a_fabricated_reason():
     assert result["pods"][0]["containers"][0]["last_termination"] is None
 
 
+def test_oversized_container_waiting_message_marks_truncated():
+    huge_message = "x" * (MAX_MESSAGE_CHARS * 3)
+    waiting_state = k8s.V1ContainerState(
+        waiting=k8s.V1ContainerStateWaiting(reason="CrashLoopBackOff", message=huge_message)
+    )
+    pod = _pod(container_state=waiting_state)
+    client = _StubKubernetesClient(pods_response=_pod_list([pod]))
+
+    result = kubernetes_list_pods("prod", _client=client)
+
+    returned_message = result["pods"][0]["containers"][0]["state"]["message"]
+    assert len(returned_message) < len(huge_message)
+    # Regression guard: a shortened container *state* (waiting) message
+    # must be reflected in meta.truncated, not silently dropped.
+    assert result["meta"]["truncated"] is True
+
+
+def test_oversized_container_termination_message_marks_truncated():
+    huge_message = "x" * (MAX_MESSAGE_CHARS * 3)
+    terminated = k8s.V1ContainerStateTerminated(exit_code=1, reason="Error", message=huge_message)
+    pod = _pod(last_termination=terminated)
+    client = _StubKubernetesClient(pods_response=_pod_list([pod]))
+
+    result = kubernetes_list_pods("prod", _client=client)
+
+    returned_message = result["pods"][0]["containers"][0]["last_termination"]["message"]
+    assert len(returned_message) < len(huge_message)
+    # Regression guard: a shortened last_termination message must be
+    # reflected in meta.truncated, not silently dropped.
+    assert result["meta"]["truncated"] is True
+
+
 def test_empty_pod_list_is_valid_evidence_not_a_failure():
     client = _StubKubernetesClient(pods_response=_pod_list([]))
 
@@ -168,6 +200,20 @@ def test_empty_pod_list_is_valid_evidence_not_a_failure():
 
     assert result["pods"] == []
     assert result["meta"]["truncated"] is False
+
+
+def test_continuation_token_marks_truncated_even_under_the_object_cap():
+    # The API server returned fewer items than PODS_REQUEST_LIMIT but
+    # still reports a continuation token -- meta.truncated must reflect
+    # that authoritative pagination signal, not just the N+1 sentinel.
+    pod = _pod()
+    response = _pod_list([pod])
+    response.metadata._continue = "some-opaque-continue-token"
+    client = _StubKubernetesClient(pods_response=response)
+
+    result = kubernetes_list_pods("prod", _client=client)
+
+    assert result["meta"]["truncated"] is True
 
 
 def test_pod_provenance_identifies_cluster_context_auth_mode():
@@ -380,6 +426,24 @@ def test_deployment_condition_cap_marks_truncated():
     assert result["meta"]["truncated"] is True
 
 
+def test_oversized_deployment_condition_message_marks_truncated():
+    huge_message = "x" * (MAX_MESSAGE_CHARS * 3)
+    condition = k8s.V1DeploymentCondition(type="Available", status="False", message=huge_message)
+    dep = _deployment(conditions=[condition])
+    client = _StubKubernetesClient(
+        deployments_response=k8s.V1DeploymentList(items=[dep], metadata=k8s.V1ListMeta())
+    )
+
+    result = kubernetes_list_deployments("prod", _client=client)
+
+    returned_message = result["deployments"][0]["conditions"][0]["message"]
+    assert len(returned_message) < len(huge_message)
+    # This is the regression this test guards: a shortened nested
+    # condition message must be reflected in meta.truncated, not just a
+    # dropped condition from exceeding the count cap.
+    assert result["meta"]["truncated"] is True
+
+
 # ---------------------------------------------------------------------------
 # kubernetes_list_nodes
 # ---------------------------------------------------------------------------
@@ -413,6 +477,19 @@ def test_node_pressure_condition_is_reported():
 
     condition_types = {c["type"]: c["status"] for c in result["nodes"][0]["conditions"]}
     assert condition_types["MemoryPressure"] == "True"
+
+
+def test_oversized_node_condition_message_marks_truncated():
+    huge_message = "x" * (MAX_MESSAGE_CHARS * 3)
+    pressure = k8s.V1NodeCondition(type="MemoryPressure", status="True", message=huge_message)
+    node = _node(ready=True, extra_conditions=[pressure])
+    client = _StubKubernetesClient(nodes_response=k8s.V1NodeList(items=[node], metadata=k8s.V1ListMeta()))
+
+    result = kubernetes_list_nodes(_client=client)
+
+    conditions = {c["type"]: c["message"] for c in result["nodes"][0]["conditions"]}
+    assert len(conditions["MemoryPressure"]) < len(huge_message)
+    assert result["meta"]["truncated"] is True
 
 
 def test_node_unschedulable_flag():

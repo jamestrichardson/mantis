@@ -237,8 +237,33 @@ class KubernetesClient:
         """The one narrow construction path every semantic tool uses —
         see ``mantis.tools.kubernetes._get_client``. Never called more
         than once per tool invocation's worth of work; a tool handler
-        never loads a kubeconfig or decides an auth mode itself."""
-        api_client = _build_api_client(config)
+        never loads a kubeconfig or decides an auth mode itself.
+
+        Client/auth construction (an unreadable or invalid kubeconfig, a
+        named context that doesn't exist, in-cluster service-account
+        files not mounted, ...) is just as much a classified integration
+        failure as a failed API call, not a bug that should escape to
+        ``AgentRuntime``'s generic last-resort exception handling. Any
+        failure here is translated into a :class:`KubernetesError`
+        (``kind=IntegrationErrorKind.AUTHENTICATION`` — a broken/missing
+        credential source, not a transient network condition, so it is
+        never retried) carrying only a fixed diagnostic plus the
+        underlying exception's *type* name — never ``str(exc)``, which
+        for the Kubernetes config-loading library can itself contain the
+        kubeconfig path or other configuration detail (e.g. "Invalid
+        kube-config file. Expected object with name X in /path/to/file
+        list").
+        """
+        try:
+            api_client = _build_api_client(config)
+        except Exception as exc:
+            raise KubernetesError(
+                f"Failed to construct an authenticated Kubernetes client "
+                f"({type(exc).__name__}); check the configured kubeconfig "
+                "path/context, or that in-cluster service-account files are "
+                "mounted correctly.",
+                kind=IntegrationErrorKind.AUTHENTICATION,
+            ) from exc
         return cls(
             core_v1=k8s_client.CoreV1Api(api_client),
             apps_v1=k8s_client.AppsV1Api(api_client),

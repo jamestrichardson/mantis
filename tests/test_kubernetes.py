@@ -421,3 +421,109 @@ def test_retry_after_parsed_from_rate_limit_response():
         client.list_pods("prod", label_selector=None, limit=51)
 
     assert exc_info.value.retry_after == 7.0
+
+
+# ---------------------------------------------------------------------------
+# KubernetesClient.from_config -- client/auth construction failures must
+# be translated into a classified KubernetesError, never left to escape
+# as a raw SDK exception through AgentRuntime's generic catch-all. Every
+# case here touches only local files/env vars -- no real cluster or
+# network access anywhere.
+# ---------------------------------------------------------------------------
+
+
+def test_from_config_raises_kubernetes_error_for_nonexistent_kubeconfig(tmp_path):
+    config = _kubeconfig_config(kubeconfig_path=str(tmp_path / "does-not-exist" / "config"))
+
+    with pytest.raises(KubernetesError) as exc_info:
+        KubernetesClient.from_config(config)
+
+    assert exc_info.value.kind == IntegrationErrorKind.AUTHENTICATION
+    assert exc_info.value.source_system == "kubernetes"
+    assert not exc_info.value.retryable
+
+
+def test_from_config_raises_kubernetes_error_for_unreadable_kubeconfig(tmp_path):
+    bad_file = tmp_path / "kubeconfig"
+    bad_file.write_text("not: [valid, yaml, at all: :::")
+    config = _kubeconfig_config(kubeconfig_path=str(bad_file))
+
+    with pytest.raises(KubernetesError) as exc_info:
+        KubernetesClient.from_config(config)
+
+    assert exc_info.value.kind == IntegrationErrorKind.AUTHENTICATION
+
+
+def _valid_kubeconfig(path, *, secret_token: str = "super-secret-token-value") -> None:
+    path.write_text(
+        f"""
+apiVersion: v1
+kind: Config
+clusters:
+  - cluster: {{server: https://example.test}}
+    name: home
+contexts:
+  - context: {{cluster: home, user: home}}
+    name: home
+current-context: home
+users:
+  - name: home
+    user: {{token: {secret_token}}}
+"""
+    )
+
+
+def test_from_config_raises_kubernetes_error_for_nonexistent_context(tmp_path):
+    kubeconfig_path = tmp_path / "kubeconfig"
+    _valid_kubeconfig(kubeconfig_path)
+    config = _kubeconfig_config(kubeconfig_path=str(kubeconfig_path), context="does-not-exist")
+
+    with pytest.raises(KubernetesError) as exc_info:
+        KubernetesClient.from_config(config)
+
+    assert exc_info.value.kind == IntegrationErrorKind.AUTHENTICATION
+
+
+def test_from_config_never_leaks_kubeconfig_path_or_secret_material(tmp_path):
+    kubeconfig_path = tmp_path / "some-sensitive-directory" / "kubeconfig"
+    kubeconfig_path.parent.mkdir()
+    _valid_kubeconfig(kubeconfig_path, secret_token="definitely-a-secret-token-12345")
+    config = _kubeconfig_config(kubeconfig_path=str(kubeconfig_path), context="does-not-exist")
+
+    with pytest.raises(KubernetesError) as exc_info:
+        KubernetesClient.from_config(config)
+
+    message = str(exc_info.value)
+    assert str(kubeconfig_path) not in message
+    assert "some-sensitive-directory" not in message
+    assert "definitely-a-secret-token-12345" not in message
+    assert "does-not-exist" not in message  # the raw ConfigException text names the context
+
+
+def test_from_config_raises_kubernetes_error_for_failed_in_cluster_load(monkeypatch):
+    # No mounted service-account files/env vars in this test process --
+    # load_incluster_config() fails exactly like it would on a real host
+    # that isn't actually running inside a cluster.
+    monkeypatch.delenv("KUBERNETES_SERVICE_HOST", raising=False)
+    monkeypatch.delenv("KUBERNETES_SERVICE_PORT", raising=False)
+    config = KubernetesConfig(auth_mode="in_cluster", kubeconfig_path=None, context=None, cluster_name="prod-eks")
+
+    with pytest.raises(KubernetesError) as exc_info:
+        KubernetesClient.from_config(config)
+
+    assert exc_info.value.kind == IntegrationErrorKind.AUTHENTICATION
+    assert not exc_info.value.retryable
+
+
+def test_from_config_failure_is_a_classified_integration_error_not_generic():
+    from mantis.reliability import IntegrationError
+
+    config = _kubeconfig_config(kubeconfig_path="/nonexistent/kubeconfig")
+
+    try:
+        KubernetesClient.from_config(config)
+    except Exception as exc:
+        assert isinstance(exc, IntegrationError)
+        assert isinstance(exc, KubernetesError)
+    else:
+        pytest.fail("expected KubernetesClient.from_config to raise")

@@ -305,21 +305,45 @@ def _apply_total_budget(items: list[dict[str, Any]]) -> tuple[list[dict[str, Any
     return admitted, truncated
 
 
-def _condition_summary(condition: Any) -> dict[str, Any]:
-    message, _ = _bounded_str_with_flag(condition.message, MAX_MESSAGE_CHARS)
-    return {
+def _has_more_pages(response: Any) -> bool:
+    """True if the raw Kubernetes list response's own ``metadata``
+    reports a pagination continuation token (``V1ListMeta._continue``) --
+    the authoritative, server-reported pagination signal, checked in
+    addition to (never instead of) the N+1 request-limit sentinel each
+    tool function also applies (see ``PODS_REQUEST_LIMIT`` and its
+    siblings). Belt-and-suspenders: even in the case where the API
+    server returns fewer items than the requested limit while still
+    indicating another page exists, ``meta.truncated`` must still say
+    so."""
+    metadata = getattr(response, "metadata", None)
+    continue_token = getattr(metadata, "_continue", None) if metadata is not None else None
+    return bool(continue_token)
+
+
+def _condition_summary(condition: Any) -> tuple[dict[str, Any], bool]:
+    """Returns ``(summary, message_truncated)`` -- the caller must fold
+    ``message_truncated`` into its own truncation signal, since a
+    shortened condition message is omitted evidence just as much as a
+    dropped condition (see :func:`_bounded_conditions`)."""
+    message, truncated = _bounded_str_with_flag(condition.message, MAX_MESSAGE_CHARS)
+    summary = {
         "type": condition.type,
         "status": condition.status,
         "reason": condition.reason,
         "message": message if condition.message is not None else None,
         "last_transition_time": _iso(getattr(condition, "last_transition_time", None)),
     }
+    return summary, truncated
 
 
 def _bounded_conditions(raw: list | None) -> tuple[list[dict[str, Any]], bool]:
     raw = raw or []
     truncated = len(raw) > MAX_CONDITIONS_PER_OBJECT
-    bounded = [_condition_summary(c) for c in raw[:MAX_CONDITIONS_PER_OBJECT]]
+    bounded: list[dict[str, Any]] = []
+    for condition in raw[:MAX_CONDITIONS_PER_OBJECT]:
+        summary, message_truncated = _condition_summary(condition)
+        bounded.append(summary)
+        truncated = truncated or message_truncated
     return bounded, truncated
 
 
@@ -334,53 +358,65 @@ def _condition_status(conditions: list | None, condition_type: str) -> bool | No
     return None
 
 
-def _container_state(state: Any) -> dict[str, Any]:
+def _container_state(state: Any) -> tuple[dict[str, Any], bool]:
     """Reduce a ``V1ContainerState`` (a oneof of running/waiting/
     terminated) to a small ``{"phase", "reason", "message", "exit_code",
     "finished_at"}`` shape -- a format change, not interpretation: at
     most one of the three source sub-objects is ever set, this just
-    names which one and bounds its reason/message through."""
+    names which one and bounds its reason/message through.
+
+    Returns ``(state, message_truncated)`` -- the caller must fold
+    ``message_truncated`` into its own truncation signal (see
+    :func:`_container_summary`)."""
     empty = {"phase": "unknown", "reason": None, "message": None, "exit_code": None, "finished_at": None}
     if state is None:
-        return empty
+        return empty, False
     if state.running is not None:
-        return {**empty, "phase": "running"}
+        return {**empty, "phase": "running"}, False
     if state.waiting is not None:
-        message, _ = _bounded_str_with_flag(state.waiting.message, MAX_MESSAGE_CHARS)
-        return {
-            **empty,
-            "phase": "waiting",
-            "reason": state.waiting.reason,
-            "message": message if state.waiting.message is not None else None,
-        }
+        message, truncated = _bounded_str_with_flag(state.waiting.message, MAX_MESSAGE_CHARS)
+        return (
+            {
+                **empty,
+                "phase": "waiting",
+                "reason": state.waiting.reason,
+                "message": message if state.waiting.message is not None else None,
+            },
+            truncated,
+        )
     if state.terminated is not None:
         terminated = state.terminated
-        message, _ = _bounded_str_with_flag(terminated.message, MAX_MESSAGE_CHARS)
-        return {
-            "phase": "terminated",
-            "reason": terminated.reason,
-            "message": message if terminated.message is not None else None,
-            "exit_code": terminated.exit_code,
-            "finished_at": _iso(terminated.finished_at),
-        }
-    return empty
+        message, truncated = _bounded_str_with_flag(terminated.message, MAX_MESSAGE_CHARS)
+        return (
+            {
+                "phase": "terminated",
+                "reason": terminated.reason,
+                "message": message if terminated.message is not None else None,
+                "exit_code": terminated.exit_code,
+                "finished_at": _iso(terminated.finished_at),
+            },
+            truncated,
+        )
+    return empty, False
 
 
 def _container_summary(container_status: Any) -> tuple[dict[str, Any], bool]:
     image, image_truncated = _bounded_str_with_flag(container_status.image, MAX_NAME_CHARS)
     last_state = container_status.last_state
-    last_termination = (
-        _container_state(last_state) if last_state is not None and last_state.terminated is not None else None
-    )
+    last_termination = None
+    last_termination_truncated = False
+    if last_state is not None and last_state.terminated is not None:
+        last_termination, last_termination_truncated = _container_state(last_state)
+    state, state_truncated = _container_state(container_status.state)
     summary = {
         "name": container_status.name,
         "ready": container_status.ready,
         "restart_count": container_status.restart_count,
         "image": image,
-        "state": _container_state(container_status.state),
+        "state": state,
         "last_termination": last_termination,
     }
-    return summary, image_truncated
+    return summary, image_truncated or state_truncated or last_termination_truncated
 
 
 def _normalize_pods(raw_items: list) -> tuple[list[dict[str, Any]], bool]:
@@ -415,9 +451,9 @@ def _normalize_pods(raw_items: list) -> tuple[list[dict[str, Any]], bool]:
         containers_truncated = len(raw_statuses) > MAX_CONTAINERS_PER_POD
         containers: list[dict[str, Any]] = []
         for container_status in raw_statuses[:MAX_CONTAINERS_PER_POD]:
-            summary, image_truncated = _container_summary(container_status)
+            summary, container_truncated = _container_summary(container_status)
             containers.append(summary)
-            containers_truncated = containers_truncated or image_truncated
+            containers_truncated = containers_truncated or container_truncated
 
         items.append(
             {
@@ -664,6 +700,7 @@ def kubernetes_list_pods(
         safe_namespace, label_selector=safe_selector, limit=PODS_REQUEST_LIMIT, deadline=_deadline
     )
     pods, truncated = _normalize_pods(response.items or [])
+    truncated = truncated or _has_more_pages(response)
 
     meta = QueryMeta(
         source_system=SOURCE_SYSTEM,
@@ -707,6 +744,7 @@ def kubernetes_list_deployments(
         safe_namespace, label_selector=safe_selector, limit=DEPLOYMENTS_REQUEST_LIMIT, deadline=_deadline
     )
     deployments, truncated = _normalize_deployments(response.items or [])
+    truncated = truncated or _has_more_pages(response)
 
     meta = QueryMeta(
         source_system=SOURCE_SYSTEM,
@@ -744,6 +782,7 @@ def kubernetes_list_nodes(
     client = _client or _get_client()
     response = client.list_nodes(label_selector=safe_selector, limit=NODES_REQUEST_LIMIT, deadline=_deadline)
     nodes, truncated = _normalize_nodes(response.items or [])
+    truncated = truncated or _has_more_pages(response)
 
     meta = QueryMeta(
         source_system=SOURCE_SYSTEM,
@@ -797,6 +836,7 @@ def kubernetes_list_events(
         safe_namespace, field_selector=field_selector, limit=EVENTS_REQUEST_LIMIT, deadline=_deadline
     )
     events, truncated = _normalize_events(response.items or [])
+    truncated = truncated or _has_more_pages(response)
 
     meta = QueryMeta(
         source_system=SOURCE_SYSTEM,
