@@ -5,7 +5,7 @@ import subprocess
 from pathlib import Path
 
 
-SCRIPT = Path(__file__).resolve().parents[1] / "deploy" / "degobah" / "mantis-deploy"
+SCRIPT = Path(__file__).resolve().parents[1] / "deploy" / "standalone" / "mantis-deploy"
 
 
 def _write_fake_docker(bin_dir: Path) -> None:

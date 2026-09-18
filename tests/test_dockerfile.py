@@ -27,7 +27,18 @@ def test_dockerfile_does_not_enable_metrics_by_default():
 
 
 def test_dockerfile_still_documents_the_metrics_port():
-    # EXPOSE stays even though the server isn't started by default — it's
-    # documentational (and correct for anyone who does set
-    # MANTIS_METRICS_ENABLED=true), not a behavior switch.
+    # EXPOSE stays even though a one-shot CLI invocation doesn't start
+    # the metrics server by default — it's documentational (and correct
+    # for `mantis serve`, which does), not a behavior switch.
     assert "EXPOSE 9108" in _content()
+
+
+def test_dockerfile_documents_the_api_port():
+    assert "EXPOSE 8080" in _content()
+
+
+def test_dockerfile_default_command_starts_the_persistent_service():
+    # #21: the production container must run the real Mantis service as
+    # PID1 -- no resident `sleep infinity`, no CLI --help default.
+    assert 'CMD ["serve"]' in _content()
+    assert "sleep infinity" not in _content()

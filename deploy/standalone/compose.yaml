@@ -1,0 +1,39 @@
+services:
+  mantis:
+    image: ${MANTIS_IMAGE_REF:?MANTIS_IMAGE_REF must be set by mantis-deploy}
+    container_name: mantis
+    restart: unless-stopped
+
+    env_file:
+      - runtime.env
+
+    environment:
+      MANTIS_DEPLOYED_TAG: ${MANTIS_DEPLOYED_TAG:-unknown}
+      MANTIS_HEALTH_URL: ${MANTIS_HEALTH_URL:-http://127.0.0.1:8080/readyz}
+
+    ports:
+      - "8080:8080"
+      - "9108:9108"
+
+    # `mantis serve` (#21/#83) is the real persistent service and the
+    # image's own default command -- no override needed for normal
+    # operation. MANTIS_CONTAINER_COMMAND remains available for an
+    # operator who deliberately needs to run something else in this
+    # container (e.g. a one-off debugging shell), without changing the
+    # deployment primitive.
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - "${MANTIS_CONTAINER_COMMAND:-exec mantis serve}"
+
+    healthcheck:
+      # The deployment health gate (mantis-deploy) polls this Docker
+      # healthcheck, which in turn polls the real /readyz contract --
+      # never a synthetic liveness-only substitute. See docs/deployment.md.
+      test:
+        - CMD-SHELL
+        - >-
+          python -c 'import os, urllib.request; urllib.request.urlopen(os.environ["MANTIS_HEALTH_URL"], timeout=2).read(1)'
+      interval: 2s
+      timeout: 3s
+      retries: 20
+      start_period: 2s

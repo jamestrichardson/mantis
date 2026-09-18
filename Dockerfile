@@ -20,18 +20,20 @@ RUN useradd --create-home --uid 1000 --shell /usr/sbin/nologin mantis
 
 COPY --from=builder /install /usr/local
 
-# Documents the metrics port this image is prepared to serve on, but
-# does NOT start the metrics server by default: Mantis today runs as a
-# short-lived CLI process per invocation (`docker compose exec mantis
-# mantis ...`), not a resident service, so a default-on metrics server
-# would bind 9108 (and contend for it under concurrent invocations) for
-# a window that closes the moment the command exits. See
-# docs/observability.md. Set MANTIS_METRICS_ENABLED=true explicitly for
-# local/manual testing of the endpoint itself.
+# API port (mantis serve, #21/#83) and metrics port (mantis.observability.metrics,
+# #66). `mantis serve` is the production entry point (see CMD below) and,
+# unlike a one-shot CLI invocation, is exactly the persistent process
+# that's supposed to hold both ports open for its lifetime -- see
+# docs/observability.md and docs/api.md. `MANTIS_METRICS_ENABLED=false`
+# still opts back out if an operator doesn't want the metrics port
+# exposed at all; `mantis <agent>`/`mantis eval` one-shot invocations
+# (e.g. via `docker compose exec`) keep defaulting the metrics server
+# off, unaffected by this image-level EXPOSE.
+EXPOSE 8080
 EXPOSE 9108
 
 USER mantis
 WORKDIR /home/mantis
 
 ENTRYPOINT ["mantis"]
-CMD ["--help"]
+CMD ["serve"]

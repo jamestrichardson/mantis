@@ -281,7 +281,7 @@ class AgentRuntime:
     def _tool_schemas(self) -> list[dict[str, Any]]:
         return [dict(tool.schema) for tool in self._resolved_tools.values()]
 
-    def run(self, user_prompt: str) -> str:
+    def run(self, user_prompt: str, *, run_id: str | None = None) -> str:
         """Run the agent loop for a single user prompt and return the
         model's final textual answer.
 
@@ -291,8 +291,16 @@ class AgentRuntime:
         fresh ``run_id`` (see :attr:`last_run_id`) — on failure, the
         event/metric are recorded and the exception still propagates
         unchanged; observability here never changes control flow.
+
+        ``run_id``: normally left ``None`` so one is generated here, but
+        a caller that must assign a stable run ID *before* invocation
+        (e.g. ``mantis.api.invocation.InvocationService``, so the same ID
+        it returns to an HTTP caller is the ID that correlates every
+        ``mantis_run_started``/``mantis_tool_call``/``mantis_model_call``
+        event this run produces) may pass one in explicitly instead of
+        reading :attr:`last_run_id` only after the fact.
         """
-        run_id = new_run_id()
+        run_id = run_id or new_run_id()
         self.last_run_id = run_id
         model_alias = self.model_config.model
         env = metrics.environment()

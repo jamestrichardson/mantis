@@ -142,7 +142,7 @@ emit_event() {
 }
 
 ensure_layout() {
-  [[ -f "$COMPOSE_FILE" ]] || die "Missing ${COMPOSE_FILE}; install deploy/degobah/compose.yaml first"
+  [[ -f "$COMPOSE_FILE" ]] || die "Missing ${COMPOSE_FILE}; install deploy/standalone/compose.yaml first"
   [[ -f "$DEPLOY_ENV" ]] || die "Missing ${DEPLOY_ENV}; copy deploy.env.example and configure it first"
   mkdir -p "$STATE_DIR"
   touch "$LOCK_FILE"

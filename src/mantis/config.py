@@ -345,6 +345,110 @@ class KubernetesConfig:
         )
 
 
+_API_AUTH_MODES = ("bearer_token", "disabled")
+DEFAULT_API_HOST = "0.0.0.0"
+DEFAULT_API_PORT = 8080
+DEFAULT_API_MAX_CONCURRENT_RUNS = 4
+DEFAULT_API_SHUTDOWN_GRACE_PERIOD_SECONDS = 30.0
+
+
+@dataclass(frozen=True)
+class ApiServerConfig:
+    """Server-side configuration for the Mantis FastAPI service (#21/#83)
+    — see ``mantis.api`` and ``docs/api.md``.
+
+    This is deliberately the *only* place ``MANTIS_API_*`` server
+    settings are read from the environment; ``mantis.api`` modules
+    accept this config object rather than reading ``os.environ``
+    themselves.
+
+    ``auth_mode`` defaults to ``"bearer_token"`` — the secure mode is
+    what you get by doing nothing, never the reverse. Disabling auth
+    (``auth_mode="disabled"``) requires an explicit, logged opt-in (see
+    ``mantis.api.auth``); it is never silently selected just because
+    ``MANTIS_API_TOKEN`` happens to be unset.
+    """
+
+    host: str = DEFAULT_API_HOST
+    port: int = DEFAULT_API_PORT
+    auth_mode: str = "bearer_token"
+    bearer_token: Secret | None = None
+    max_concurrent_runs: int = DEFAULT_API_MAX_CONCURRENT_RUNS
+    shutdown_grace_period_seconds: float = DEFAULT_API_SHUTDOWN_GRACE_PERIOD_SECONDS
+
+    def __post_init__(self) -> None:
+        if self.auth_mode not in _API_AUTH_MODES:
+            raise ConfigurationError(
+                f"MANTIS_API_AUTH_MODE must be one of {_API_AUTH_MODES}, got {self.auth_mode!r}"
+            )
+        if self.auth_mode == "bearer_token" and self.bearer_token is None:
+            raise ConfigurationError(
+                "MANTIS_API_TOKEN is required when MANTIS_API_AUTH_MODE=bearer_token "
+                "(the default) -- set MANTIS_API_AUTH_MODE=disabled explicitly for an "
+                "unauthenticated local-development mode instead of leaving the token unset"
+            )
+        # 0 is deliberately valid: "bind an OS-assigned ephemeral port,"
+        # the standard convention tests use to avoid a fixed-port clash
+        # (see tests/test_api_server.py) -- never used in production
+        # configuration, but not this dataclass's job to forbid a
+        # legitimate socket-binding convention.
+        _check_at_least("port", self.port, 0)
+        if self.port > 65535:
+            raise ConfigurationError(f"port must be <= 65535, got {self.port!r}")
+        _check_at_least("max_concurrent_runs", self.max_concurrent_runs, 1)
+        _check_positive("shutdown_grace_period_seconds", self.shutdown_grace_period_seconds)
+
+    @classmethod
+    def from_env(cls) -> "ApiServerConfig":
+        token = os.environ.get("MANTIS_API_TOKEN")
+        return cls(
+            host=os.environ.get("MANTIS_API_HOST", DEFAULT_API_HOST),
+            port=_getenv_int("MANTIS_API_PORT", DEFAULT_API_PORT),
+            auth_mode=os.environ.get("MANTIS_API_AUTH_MODE", "bearer_token"),
+            bearer_token=Secret(token) if token else None,
+            max_concurrent_runs=_getenv_int(
+                "MANTIS_API_MAX_CONCURRENT_RUNS", DEFAULT_API_MAX_CONCURRENT_RUNS
+            ),
+            shutdown_grace_period_seconds=_getenv_float(
+                "MANTIS_API_SHUTDOWN_GRACE_PERIOD_SECONDS", DEFAULT_API_SHUTDOWN_GRACE_PERIOD_SECONDS
+            ),
+        )
+
+
+@dataclass(frozen=True)
+class ApiClientConfig:
+    """Client-side configuration for talking to the Mantis API (#83) —
+    used by the ``mantis`` CLI, never by server-side code.
+
+    Deliberately holds only the Mantis API's own base URL/token/timeouts
+    — never LiteLLM/AWX/Kubernetes/Prometheus/Loki credentials. A CLI
+    invoking Mantis through the API needs none of those (see
+    ``docs/api.md``'s security-boundary section).
+    """
+
+    base_url: str
+    token: Secret | None = None
+    connect_timeout_seconds: float = 5.0
+    read_timeout_seconds: float = 300.0
+
+    def __post_init__(self) -> None:
+        if not self.base_url:
+            raise ConfigurationError("MANTIS_API_URL must not be empty")
+        _check_positive("connect_timeout_seconds", self.connect_timeout_seconds)
+        _check_positive("read_timeout_seconds", self.read_timeout_seconds)
+
+    @classmethod
+    def from_env(cls) -> "ApiClientConfig":
+        base_url = os.environ.get("MANTIS_API_URL", "http://localhost:8080")
+        token = os.environ.get("MANTIS_API_TOKEN")
+        return cls(
+            base_url=base_url.rstrip("/"),
+            token=Secret(token) if token else None,
+            connect_timeout_seconds=_getenv_float("MANTIS_API_CLIENT_CONNECT_TIMEOUT_SECONDS", 5.0),
+            read_timeout_seconds=_getenv_float("MANTIS_API_CLIENT_READ_TIMEOUT_SECONDS", 300.0),
+        )
+
+
 @dataclass(frozen=True)
 class ReliabilityConfig:
     """The shared reliability contract's configurable knobs (see
@@ -413,3 +517,16 @@ class ReliabilityConfig:
                 "MANTIS_SHORT_CIRCUIT_THRESHOLD", defaults.short_circuit_threshold
             ),
         )
+
+
+def get_metrics_enabled(default: bool) -> bool:
+    """Whether ``MANTIS_METRICS_ENABLED`` is set — the one place this
+    variable is read from the environment. Both ``mantis.cli`` (agent/
+    eval invocations, default ``False`` — see ``docs/observability.md``
+    for why a one-shot process shouldn't default to binding the metrics
+    port) and ``mantis.api.server`` (the persistent ``mantis serve``
+    process, default ``True`` — it's the process #66 gives metrics a
+    real home in) call this instead of reading ``os.environ`` directly,
+    each supplying the default appropriate to its own process model.
+    """
+    return _getenv_bool("MANTIS_METRICS_ENABLED", default)

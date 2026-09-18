@@ -1,12 +1,20 @@
-"""Tests for mantis.cli.main(): the metrics-server opt-in gate.
+"""Tests for mantis.cli.main(): the metrics-server opt-in gate, and the
+HTTP-client-only dispatch for agent invocation (#83).
 
 Mantis runs as a short-lived CLI process per invocation — the metrics
 HTTP server must never start unless MANTIS_METRICS_ENABLED is explicitly
 set, in any environment, including inside the Docker image (see
-docs/observability.md#current-status-of-metrics and
-tests/test_dockerfile.py). Structured logging has no such gate — it's
-always configured, since every invocation, however short, should emit
-its event sequence.
+docs/observability.md and tests/test_dockerfile.py). Structured logging
+has no such gate — it's always configured, since every invocation,
+however short, should emit its event sequence.
+
+Agent invocation (`mantis agents`/`mantis run <agent> <prompt>`/the
+per-agent convenience commands) is HTTP-only: this file asserts the CLI
+never constructs an AgentRuntime or imports an agent module to execute
+it, and that an unreachable API is reported as an explicit error with no
+local-execution fallback. See tests/test_api_client.py for the HTTP
+client's own behavior and tests/test_api_app.py for a real end-to-end
+CLI-against-real-service test.
 """
 
 from __future__ import annotations
@@ -14,6 +22,15 @@ from __future__ import annotations
 import pytest
 
 from mantis import cli as cli_module
+from mantis.api_client import (
+    AgentInfo,
+    ApiAuthError,
+    ApiRequestError,
+    ApiServerError,
+    ApiTimeoutError,
+    ApiUnavailableError,
+    RunResult,
+)
 
 
 @pytest.fixture
@@ -66,20 +83,237 @@ def test_main_always_configures_logging_regardless_of_metrics_setting(
     assert len(patched_configure_logging) == 1
 
 
-def test_getenv_bool_defaults_to_false_when_unset(monkeypatch):
-    monkeypatch.delenv("MANTIS_METRICS_ENABLED", raising=False)
-    assert cli_module._getenv_bool("MANTIS_METRICS_ENABLED", False) is False
+def test_help_lists_convenience_agents_and_serve():
+    assert cli_module.main(["--help"]) == 0
+    assert cli_module.CONVENIENCE_AGENTS == ("awx-troubleshooter", "system-troubleshooter")
+    assert cli_module.SUBCOMMANDS["serve"] == "mantis.api.server"
+    assert cli_module.SUBCOMMANDS["eval"] == "mantis.eval.cli"
 
 
-def test_system_troubleshooter_is_registered_as_an_agent():
-    # Regression test (#11): "mantis system-troubleshooter ..." must
-    # dispatch to the real agent module, following the exact same
-    # existing-CLI-pattern convention as "mantis awx-troubleshooter ...".
-    assert cli_module.AGENTS["system-troubleshooter"] == "mantis.agents.system_troubleshooter"
+# ---------------------------------------------------------------------------
+# `mantis agents` / `mantis run` / convenience commands are HTTP-only: no
+# AgentRuntime construction, no agent module import-and-execute, no
+# local fallback when the API is unreachable.
+# ---------------------------------------------------------------------------
 
 
-def test_system_troubleshooter_module_resolves_and_exposes_main(monkeypatch):
-    import importlib
+def _client_returning(monkeypatch, method_name: str, return_value=None, exc: Exception | None = None):
+    calls: list[tuple] = []
 
-    module = importlib.import_module(cli_module.AGENTS["system-troubleshooter"])
-    assert hasattr(module, "main")
+    def fake_method(self, *args, **kwargs):
+        calls.append((args, kwargs))
+        if exc is not None:
+            raise exc
+        return return_value
+
+    monkeypatch.setattr(cli_module.MantisApiClient, method_name, fake_method)
+    return calls
+
+
+def test_agents_command_calls_list_agents_over_http(monkeypatch, capsys):
+    agents = [
+        AgentInfo(
+            id="system-troubleshooter",
+            display_name="System Troubleshooter",
+            description="desc",
+            read_only=True,
+            available=True,
+            unavailable_reason=None,
+        )
+    ]
+    calls = _client_returning(monkeypatch, "list_agents", return_value=agents)
+
+    exit_code = cli_module.main(["agents"])
+
+    assert exit_code == 0
+    assert len(calls) == 1
+    out = capsys.readouterr().out
+    assert "system-troubleshooter" in out
+    assert "desc" in out
+
+
+def test_agents_command_shows_unavailable_reason(monkeypatch, capsys):
+    agents = [
+        AgentInfo(
+            id="awx-troubleshooter",
+            display_name="AWX Troubleshooter",
+            description="desc",
+            read_only=True,
+            available=False,
+            unavailable_reason="misconfigured",
+        )
+    ]
+    _client_returning(monkeypatch, "list_agents", return_value=agents)
+
+    cli_module.main(["agents"])
+
+    out = capsys.readouterr().out
+    assert "unavailable: misconfigured" in out
+
+
+def test_run_command_calls_create_run_with_agent_and_prompt(monkeypatch):
+    result = RunResult(
+        run_id="abc123",
+        agent="system-troubleshooter",
+        outcome="success",
+        output="the answer",
+        error_kind=None,
+        error_message=None,
+        started_at="t0",
+        finished_at="t1",
+        duration_ms=10,
+    )
+    calls = _client_returning(monkeypatch, "create_run", return_value=result)
+
+    exit_code = cli_module.main(["run", "system-troubleshooter", "why", "is", "it", "down"])
+
+    assert exit_code == 0
+    assert calls == [(("system-troubleshooter", "why is it down"), {})]
+
+
+def test_run_command_prints_output_and_run_id(monkeypatch, capsys):
+    result = RunResult(
+        run_id="abc123",
+        agent="system-troubleshooter",
+        outcome="success",
+        output="the answer",
+        error_kind=None,
+        error_message=None,
+        started_at="t0",
+        finished_at="t1",
+        duration_ms=10,
+    )
+    _client_returning(monkeypatch, "create_run", return_value=result)
+
+    cli_module.main(["run", "system-troubleshooter", "prompt"])
+
+    captured = capsys.readouterr()
+    assert "the answer" in captured.out
+    assert "abc123" in captured.err
+
+
+def test_run_command_with_too_few_args_is_a_usage_error(capsys):
+    exit_code = cli_module.main(["run", "system-troubleshooter"])
+
+    assert exit_code == 1
+    assert "Usage" in capsys.readouterr().err
+
+
+def test_run_command_reports_agent_execution_failure(monkeypatch, capsys):
+    result = RunResult(
+        run_id="abc123",
+        agent="system-troubleshooter",
+        outcome="error",
+        output=None,
+        error_kind="max_iterations",
+        error_message="The agent could not produce a final answer within its iteration limit.",
+        started_at="t0",
+        finished_at="t1",
+        duration_ms=10,
+    )
+    _client_returning(monkeypatch, "create_run", return_value=result)
+
+    exit_code = cli_module.main(["run", "system-troubleshooter", "prompt"])
+
+    assert exit_code == 1
+    assert "max_iterations" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize("agent_name", ["awx-troubleshooter", "system-troubleshooter"])
+def test_convenience_command_calls_create_run_with_matching_agent_id(monkeypatch, agent_name):
+    result = RunResult(
+        run_id="x",
+        agent=agent_name,
+        outcome="success",
+        output="ok",
+        error_kind=None,
+        error_message=None,
+        started_at="t0",
+        finished_at="t1",
+        duration_ms=1,
+    )
+    calls = _client_returning(monkeypatch, "create_run", return_value=result)
+
+    exit_code = cli_module.main([agent_name, "investigate", "this"])
+
+    assert exit_code == 0
+    assert calls == [((agent_name, "investigate this"), {})]
+
+
+def test_convenience_command_with_no_prompt_is_a_usage_error(capsys):
+    exit_code = cli_module.main(["awx-troubleshooter"])
+
+    assert exit_code == 1
+    assert "Usage" in capsys.readouterr().err
+
+
+def test_unknown_command_is_rejected(capsys):
+    exit_code = cli_module.main(["not-a-real-command"])
+
+    assert exit_code == 1
+    assert "Unknown command" in capsys.readouterr().err
+
+
+# ---------------------------------------------------------------------------
+# No local-execution fallback: every ApiClientError surfaces as a clear,
+# distinct CLI error, never a silently-swallowed retry-in-process.
+# ---------------------------------------------------------------------------
+
+
+def test_api_unavailable_is_reported_and_never_falls_back_locally(monkeypatch, capsys):
+    _client_returning(monkeypatch, "list_agents", exc=ApiUnavailableError("connection refused"))
+
+    exit_code = cli_module.main(["agents"])
+
+    assert exit_code == 1
+    assert "Could not reach the Mantis API" in capsys.readouterr().err
+
+
+def test_api_timeout_is_reported(monkeypatch, capsys):
+    _client_returning(monkeypatch, "list_agents", exc=ApiTimeoutError("timed out"))
+
+    exit_code = cli_module.main(["agents"])
+
+    assert exit_code == 1
+    assert "timed out" in capsys.readouterr().err.lower()
+
+
+def test_api_auth_failure_is_reported(monkeypatch, capsys):
+    _client_returning(monkeypatch, "list_agents", exc=ApiAuthError("bad token"))
+
+    exit_code = cli_module.main(["agents"])
+
+    assert exit_code == 1
+    assert "authentication failed" in capsys.readouterr().err.lower()
+
+
+def test_api_request_error_includes_error_type(monkeypatch, capsys):
+    _client_returning(
+        monkeypatch, "create_run", exc=ApiRequestError(404, "unknown_agent", "Unknown agent: 'nope'")
+    )
+
+    exit_code = cli_module.main(["run", "nope", "prompt"])
+
+    assert exit_code == 1
+    assert "unknown_agent" in capsys.readouterr().err
+
+
+def test_api_server_error_is_reported(monkeypatch, capsys):
+    _client_returning(monkeypatch, "list_agents", exc=ApiServerError("HTTP 500"))
+
+    exit_code = cli_module.main(["agents"])
+
+    assert exit_code == 1
+    assert "Mantis API error" in capsys.readouterr().err
+
+
+def test_cli_module_never_imports_agent_modules_directly():
+    # Regression guard for the architectural rule (#83): the CLI module
+    # itself must not import mantis.agents.* or mantis.runtime -- those
+    # are exclusively server-side (mantis.api.catalog/invocation)
+    # concerns now.
+    import mantis.cli as cli_mod
+
+    assert not hasattr(cli_mod, "AGENTS")
+    source_globals = vars(cli_mod)
+    assert "AgentRuntime" not in source_globals
