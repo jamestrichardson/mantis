@@ -587,6 +587,47 @@ def test_servers_beyond_the_cap_are_never_attempted(monkeypatch):
     assert result.truncated is True
 
 
+def test_more_than_server_cap_but_first_definitive_is_not_truncated(monkeypatch):
+    # PR #117 review: a profile configuring more servers than
+    # MAX_SERVERS_ATTEMPTED must not be reported as truncated just
+    # because it exists -- the remaining (capped or not) servers were
+    # never going to be queried once the first one gave a definitive
+    # answer, so nothing was actually omitted.
+    servers = tuple(f"dns{i}" for i in range(1, MAX_SERVERS_ATTEMPTED + 2))
+    assert len(servers) > MAX_SERVERS_ATTEMPTED
+    responses = {servers[0]: _ok("A", ["172.30.10.15"])}
+    called = _patch_send_query(monkeypatch, responses)
+
+    result = resolve_dns("app.example.net", "A", servers)
+
+    assert called == [servers[0]]
+    assert result.status == "ok"
+    assert result.responding_resolver == servers[0]
+    assert result.truncated is False
+
+
+def test_more_than_server_cap_and_all_attempted_nondefinitive_is_truncated(monkeypatch):
+    # The inverse: once the bounded, attempted set is exhausted with no
+    # definitive answer, a profile configuring more servers than the
+    # cap genuinely did have evidence omitted because of it.
+    servers = tuple(f"dns{i}" for i in range(1, MAX_SERVERS_ATTEMPTED + 2))
+    assert len(servers) > MAX_SERVERS_ATTEMPTED
+    non_definitive_outcomes = [
+        _rcode_only(dns.rcode.SERVFAIL),
+        dns_integration.dns.exception.Timeout(),
+        _rcode_only(dns.rcode.REFUSED),
+        dns_integration.dns.exception.Timeout(),
+    ]
+    responses = dict(zip(servers[:MAX_SERVERS_ATTEMPTED], non_definitive_outcomes))
+    called = _patch_send_query(monkeypatch, responses)
+
+    result = resolve_dns("app.example.net", "A", servers)
+
+    assert called == list(servers[:MAX_SERVERS_ATTEMPTED])
+    assert result.status == "refused"  # highest-precedence protocol failure observed
+    assert result.truncated is True
+
+
 # ---------------------------------------------------------------------------
 # Deadline semantics (#15) -- mirrors tests/test_network.py's pattern
 # exactly.

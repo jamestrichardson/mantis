@@ -470,7 +470,14 @@ def resolve_dns(
     **Ordering**: servers are tried strictly in the order given (the
     order an operator configured them in), up to
     :data:`MAX_SERVERS_ATTEMPTED`. The same server is never queried
-    twice.
+    twice. ``DNSLookupResult.truncated`` reflects this cap only when it
+    actually mattered: a profile configuring more servers than the cap
+    allowed trying is *not* truncation by itself if a definitive answer
+    (see below) arrives before the cap is ever reached — the remaining
+    servers, capped or not, were never going to be queried anyway once
+    that happens, so nothing was actually omitted. It becomes
+    truncation only once the bounded, attempted set is exhausted with
+    no definitive answer and more servers existed beyond the cap.
 
     **Which failures permit trying the next server / when a response is
     definitive**: each attempt is classified by :func:`_classify_response`
@@ -544,14 +551,22 @@ def resolve_dns(
     qname = dns.name.from_text(name)
     rdtype = _RECORD_TYPE_TO_RDATATYPE[record_type]
 
-    truncated = len(servers) > MAX_SERVERS_ATTEMPTED
+    # A *fact* about the configured profile, not yet a truncation
+    # verdict: whether a definitive answer arrives before the cap is
+    # ever reached, nothing beyond it was actually omitted. Only folded
+    # into a returned `truncated=True` in the branch below where the
+    # bounded set was genuinely exhausted without a definitive answer
+    # -- never on the definitive-answer early return, where the
+    # remaining (whether within-cap or beyond-cap) servers were never
+    # going to be queried anyway (see #109's "don't query all servers"
+    # rule) and so nothing was actually omitted because of this cap.
+    capped_by_server_limit = len(servers) > MAX_SERVERS_ATTEMPTED
     attempted_servers = servers[:MAX_SERVERS_ATTEMPTED]
 
     attempts: list[DNSServerAttempt] = []
     deadline_stopped = False
     for server in attempted_servers:
         if deadline is not None and deadline.expired():
-            truncated = True
             deadline_stopped = True
             break
 
@@ -559,7 +574,6 @@ def resolve_dns(
         if deadline is not None:
             timeout_seconds = min(timeout_seconds, deadline.remaining())
             if timeout_seconds <= 0:
-                truncated = True
                 deadline_stopped = True
                 break
 
@@ -576,7 +590,7 @@ def resolve_dns(
                 responding_resolver=server,
                 answers=answers,
                 attempts=attempts,
-                truncated=truncated or answers_truncated,
+                truncated=answers_truncated,
                 observed_at=observed_at,
             )
         # servfail/refused/timeout/connection_error/malformed_response/
@@ -588,16 +602,22 @@ def resolve_dns(
         # wasn't fully evaluated. A later, untried server might have
         # answered definitively; reporting a precedence-derived status
         # from an incomplete set would overstate what's actually known.
+        # Always truncated: something (a within-cap or beyond-cap
+        # server) was genuinely never tried because of the deadline.
         return DNSLookupResult(
             name=name,
             record_type=record_type,
             status="budget_exceeded",
             responding_resolver=None,
             attempts=attempts,
-            truncated=truncated,
+            truncated=True,
             observed_at=observed_at,
         )
 
+    # Every attempted (within-cap) server was tried, in full, with no
+    # definitive answer and no deadline stop. *Now* the server-count
+    # cap fact matters: if the profile configured more servers than the
+    # cap allowed trying, some genuinely went untried because of it.
     final_status = _select_final_status(attempts)
     if final_status in PROTOCOL_FAILURE_STATUSES:
         responding_server = next(
@@ -609,7 +629,7 @@ def resolve_dns(
             status=final_status,
             responding_resolver=responding_server,
             attempts=attempts,
-            truncated=truncated,
+            truncated=capped_by_server_limit,
             observed_at=observed_at,
         )
 
