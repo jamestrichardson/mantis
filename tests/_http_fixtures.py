@@ -31,7 +31,13 @@ class HTTPTestServer:
     A path with no matching route gets a plain 404.
     """
 
-    def __init__(self, routes: dict[str, Callable[[BaseHTTPRequestHandler], None]], *, tls_context: ssl.SSLContext | None = None) -> None:
+    def __init__(
+        self,
+        routes: dict[str, Callable[[BaseHTTPRequestHandler], None]],
+        *,
+        tls_context: ssl.SSLContext | None = None,
+        host: str = "127.0.0.1",
+    ) -> None:
         self.routes = routes
         outer_self = self
 
@@ -56,7 +62,10 @@ class HTTPTestServer:
             def log_message(self, fmt: str, *args: object) -> None:  # silence test output
                 pass
 
-        self._server = HTTPServer(("127.0.0.1", 0), Handler)
+        class _Server(HTTPServer):
+            address_family = socket.AF_INET6 if ":" in host else socket.AF_INET
+
+        self._server = _Server((host, 0), Handler)
         if tls_context is not None:
             self._server.socket = tls_context.wrap_socket(self._server.socket, server_side=True)
         self.port = self._server.server_port

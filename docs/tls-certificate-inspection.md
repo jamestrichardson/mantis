@@ -119,19 +119,32 @@ address, both drawing from the same overall `Deadline` budget:
    this is the call that actually makes the certificate retrievable.
 2. **Verification handshake** (a separate `ssl.SSLContext` with
    `verify_mode=CERT_REQUIRED`, `check_hostname=False`): against the
-   *same* address, determines chain trust **alone** — using the
-   system/default trust store, or a configured `ca_file` — with
-   hostname checking explicitly turned off so this handshake's
-   pass/fail reflects chain trust only, never conflated with a
-   hostname-match failure.
+   *same* address, using the system/default trust store or a
+   configured `ca_file`, with hostname checking explicitly turned off
+   so this handshake's outcome is never conflated with a hostname-match
+   failure.
 
 `hostname_matches` and `time_valid` are **not** derived from either
 handshake's pass/fail at all — they're computed directly, in Python,
 from the certificate already parsed in phase 1 (SAN entries vs.
-`server_name`; not-before/not-after vs. the current time). This is what
-keeps all three verification dimensions genuinely independent, rather
-than all being downstream of one opaque OpenSSL verification error (see
-"Verification dimensions" below).
+`server_name`; not-before/not-after vs. the current time). This is
+necessary, not just tidy: a single `CERT_REQUIRED` handshake's
+pass/fail is *not* "chain trust alone" on its own — OpenSSL's
+certificate verification also checks the validity period as part of
+the same walk, so a certificate signed by a fully trusted CA but
+expired (or not yet valid) fails this handshake for a reason that has
+nothing to do with chain trust. `mantis.integrations.tls._verify_one_address`
+tells these apart using the underlying OpenSSL error code
+(`ssl.SSLCertVerificationError.verify_code`): a failure specifically
+due to `X509_V_ERR_CERT_HAS_EXPIRED`/`X509_V_ERR_CERT_NOT_YET_VALID`
+(codes 10/9) reports `chain_trusted=None` (not determined) rather than
+a false `False` — the independently-computed `time_valid=False`
+already reports the real problem. Every other verification failure
+(untrusted issuer, self-signed, ...) genuinely is a chain-trust failure
+and reports `chain_trusted=False`. This is what keeps all three
+verification dimensions genuinely independent, rather than all being
+downstream of one opaque OpenSSL verification error (see "Verification
+dimensions" below).
 
 ## Certificate parsing
 
@@ -160,7 +173,7 @@ independent fields, all visible in every result:
 
 | Field | Meaning | Independent of |
 |---|---|---|
-| `chain_trusted` | Does the certificate chain to a trusted root (system/default store, or configured `ca_file`)? `None` only if the verification handshake couldn't be attempted at all (deadline exhausted after phase 1 succeeded) — an honest "not determined," never coerced to `True`/`False`. | Hostname, validity period. |
+| `chain_trusted` | Does the certificate chain to a trusted root (system/default store, or configured `ca_file`)? `None` when the verification handshake couldn't be attempted at all (deadline exhausted after phase 1 succeeded), *or* when it failed specifically for a validity-period reason (`X509_V_ERR_CERT_HAS_EXPIRED`/`_NOT_YET_VALID`) that OpenSSL's own verification walk can't distinguish from a trust decision — an honest "not determined" in both cases, never coerced to `True`/`False`. | Hostname, validity period. |
 | `hostname_matches` | Does the certificate's SAN (DNS or IP) actually cover `server_name`? Computed via RFC 6125 leftmost-single-label wildcard matching (`*.example.com` matches `foo.example.com`, not `foo.bar.example.com`), hand-implemented rather than relying on the deprecated `ssl.match_hostname`. | Chain trust, validity period. |
 | `time_valid` | Is "now" within `[not_before, not_after]`? | Chain trust, hostname. |
 
@@ -176,7 +189,7 @@ trust, then hostname:
 | `hostname_mismatch` | `time_valid=True`, `chain_trusted=True`, `hostname_matches=False`. |
 | `untrusted` | `time_valid=True`, `chain_trusted=False` (regardless of hostname match). |
 | `expired_or_not_yet_valid` | `time_valid=False` (regardless of the other two). |
-| `unknown` | `chain_trusted=None` (verification handshake not attempted — deadline exhausted after phase 1 succeeded). |
+| `unknown` | `chain_trusted=None` (verification handshake not attempted — deadline exhausted after phase 1 succeeded — or attempted but unable to determine trust independent of time, see below). |
 
 Concrete worked examples (all real, verified outcomes — see
 `tests/test_tls.py`):
@@ -188,9 +201,21 @@ self-signed certificate, correct name:
 certificate for a different hostname, trusted issuer:
     chain_trusted=true, hostname_matches=false, time_valid=true -> status="hostname_mismatch"
 
-expired certificate, otherwise trusted and correctly named:
-    chain_trusted=true, hostname_matches=true, time_valid=false -> status="expired_or_not_yet_valid"
+expired certificate, signed by the CA the verification handshake trusts, correctly named:
+    chain_trusted=null, hostname_matches=true, time_valid=false -> status="expired_or_not_yet_valid"
 ```
+
+Note `chain_trusted=null` (not `true`) in the expired example above: a
+single `CERT_REQUIRED` handshake against an expired-but-otherwise-
+trusted certificate fails, and OpenSSL's own error for that failure
+(`X509_V_ERR_CERT_HAS_EXPIRED`) reports only that the certificate's
+validity period is the problem — it does not confirm the chain would
+otherwise have been trusted. Reporting `chain_trusted=true` here would
+be fabricating a trust claim from a handshake that never actually
+established one; `null` ("not determined") is the honest answer, and
+`time_valid=false` already reports the real, independently-computed
+problem. See `tests/test_tls.py::test_expired_certificate_still_returns_metadata`/
+`test_not_yet_valid_certificate_still_returns_metadata`.
 
 ## SNI and IP-literal targets
 
@@ -274,7 +299,7 @@ beyond what's listed here:
 | `sha256_fingerprint` | `cert.fingerprint(hashes.SHA256()).hex()`. |
 | `not_before` / `not_after` | `cert.not_valid_before_utc`/`not_valid_after_utc`, ISO 8601. |
 | `san_dns` | DNS-typed Subject Alternative Name entries, each bounded to `MAX_SAN_STRING_CHARS` (253, RFC 1035's own domain-name limit), capped at `MAX_SAN_ENTRIES` (25) entries. |
-| `san_ip` | IP-typed SAN entries, same bounds. |
+| `san_ip` | IP-typed SAN entries, same per-entry bound and separately capped at `MAX_SAN_ENTRIES` (25) entries of its own — a certificate with both DNS and IP SANs can therefore return up to 50 SAN entries total (25 of each kind), never more. `MAX_SAN_ENTRIES` is deliberately a per-*kind* cap, not a combined one: `san_dns`/`san_ip` are reported as two separate, independently-bounded lists. |
 
 Where practical, the result also reports `tls_version`
 (`ssl.SSLSocket.version()`) and `cipher` (`ssl.SSLSocket.cipher()`'s
@@ -390,7 +415,7 @@ Every named bound:
 | Bound | Value | Protects against |
 |---|---|---|
 | `MAX_ADDRESSES_ATTEMPTED` | 4 | Unbounded worst-case latency from a host resolving to many addresses. |
-| `MAX_SAN_ENTRIES` | 25 | A malicious/misbehaving certificate flooding the model with SAN entries. |
+| `MAX_SAN_ENTRIES` | 25 *(applied separately to `san_dns` and `san_ip` — up to 50 total)* | A malicious/misbehaving certificate flooding the model with SAN entries. |
 | `MAX_SAN_STRING_CHARS` | 253 | An oversized individual SAN entry. |
 | `MAX_SUBJECT_CHARS` / `MAX_ISSUER_CHARS` | 500 each | An oversized subject/issuer distinguished name. |
 | `DEFAULT_TLS_TIMEOUT_SECONDS` | 5.0s | An unbounded wait on a slow/unresponsive endpoint per handshake attempt (further capped by the caller's remaining `Deadline`). |

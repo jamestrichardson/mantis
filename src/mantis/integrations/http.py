@@ -368,7 +368,12 @@ def probe_http(
         read_timeout = min(read_timeout, remaining)
 
     full_path = _join_path(base_path, path)
-    url = f"{scheme}://{host}:{port}{full_path}"
+    # Never hand-format the authority: an IPv6 literal host (e.g.
+    # "::1") requires bracket syntax ("http://[::1]:8080/") that plain
+    # f-string interpolation does not produce, which httpx then rejects
+    # outright as an invalid URL. httpx.URL's constructor brackets an
+    # IPv6 host automatically.
+    url = httpx.URL(scheme=scheme, host=host, port=port, path=full_path)
 
     start = clock()
     try:

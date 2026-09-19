@@ -628,6 +628,8 @@ def _build_tls_target(
                 "there is no hostname to default it from, and SNI must never be guessed"
             )
         server_name = host
+    elif not _is_valid_host(server_name):
+        raise ConfigurationError(f"TLS target '{alias}' has an invalid server_name (SNI): {server_name!r}")
     return TLSTargetConfig(alias=alias, host=host, port=port, server_name=server_name, ca_file=ca_file or None)
 
 

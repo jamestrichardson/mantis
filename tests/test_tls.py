@@ -14,6 +14,7 @@ import socket
 import pytest
 
 from mantis.integrations.tls import (
+    MAX_ADDRESSES_ATTEMPTED,
     MAX_SAN_ENTRIES,
     CertificateParseError,
     TLSError,
@@ -21,7 +22,8 @@ from mantis.integrations.tls import (
     inspect_tls,
 )
 from mantis.reliability import Deadline, IntegrationErrorKind
-from tests._tls_fixtures import (
+
+from _tls_fixtures import (
     NonTLSTCPServer,
     SilentTCPServer,
     TLSTestServer,
@@ -133,6 +135,15 @@ def test_expired_certificate_still_returns_metadata():
     assert result.certificate.subject == "CN=expired.example.com"
     assert result.verification.time_valid is False
     assert result.verification.status == "expired_or_not_yet_valid"
+    # PR #119 review: this leaf is signed by the CA the verification
+    # handshake is told to trust -- a single CERT_REQUIRED handshake
+    # fails for this certificate because OpenSSL's own verification
+    # walk checks validity period as part of chain verification, not
+    # because the chain itself is untrusted. chain_trusted must never
+    # come back False here (a false claim about trust); "not
+    # determined" (None) is the honest answer, since time_valid=False
+    # already reports the real problem independently.
+    assert result.verification.chain_trusted is None
 
 
 def test_not_yet_valid_certificate_still_returns_metadata():
@@ -152,6 +163,10 @@ def test_not_yet_valid_certificate_still_returns_metadata():
     assert result.certificate.subject == "CN=future.example.com"
     assert result.verification.time_valid is False
     assert result.verification.status == "expired_or_not_yet_valid"
+    # PR #119 review: same "trusted CA, but the handshake still fails
+    # for a time reason, not a trust reason" case as the expired-leaf
+    # test above -- chain_trusted must be None, never a false "False".
+    assert result.verification.chain_trusted is None
 
 
 def test_hostname_mismatch_still_returns_metadata():
@@ -362,6 +377,33 @@ def test_san_count_under_the_cap_is_not_flagged_truncated():
     with TLSTestServer(cert, key) as server:
         result = inspect_tls("127.0.0.1", server.port, "few-sans.example.com")
 
+    assert result.truncated is False
+
+
+def test_more_resolved_addresses_than_the_cap_but_first_success_is_not_truncated(monkeypatch):
+    # PR #119 review: inspect_tls() previously computed
+    # `truncated = len(candidates) > MAX_ADDRESSES_ATTEMPTED` up front,
+    # before the address loop ran, so a host resolving to more
+    # addresses than the cap still reported meta.truncated=true even
+    # though the first candidate already succeeded -- the remaining
+    # addresses (within-cap or beyond it) were never going to be tried
+    # anyway once that happens, so nothing was actually omitted.
+    import mantis.integrations.tls as tls_integration
+
+    cert, key = make_leaf("many-addrs.example.com", san_dns=["many-addrs.example.com"])
+    with TLSTestServer(cert, key) as server:
+        real_sockaddr = (socket.AF_INET, ("127.0.0.1", server.port))
+        # Fake, never-dialed candidates beyond the real one -- if any of
+        # these were ever actually attempted the test would hang/fail on
+        # connection to an unroutable test address.
+        fake_sockaddrs = [(socket.AF_INET, ("192.0.2.1", server.port)) for _ in range(MAX_ADDRESSES_ATTEMPTED + 2)]
+        candidates = [real_sockaddr] + fake_sockaddrs
+        assert len(candidates) > MAX_ADDRESSES_ATTEMPTED
+        monkeypatch.setattr(tls_integration, "_resolve_candidates", lambda host, port: candidates)
+
+        result = inspect_tls("many-addrs.example.com", server.port, "many-addrs.example.com")
+
+    assert result.connected_address == "127.0.0.1"
     assert result.truncated is False
 
 

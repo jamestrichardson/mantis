@@ -66,9 +66,12 @@ when no :class:`~mantis.reliability.Deadline` further caps it, or
 further capped by whatever remains of one when it is."""
 
 MAX_SAN_ENTRIES = 25
-"""Cap on the number of DNS/IP SAN entries returned, each counted
-separately — a certificate is external, presenter-controlled data and
-could otherwise hand the model an unbounded number of SAN entries."""
+"""Cap on the number of SAN entries returned -- applied *separately* to
+``san_dns`` and ``san_ip`` (each list independently capped at this
+value, so a certificate with both kinds of SAN can return up to 50
+total entries, never a single combined cap of 25). A certificate is
+external, presenter-controlled data and could otherwise hand the model
+an unbounded number of SAN entries of either kind."""
 
 MAX_SAN_STRING_CHARS = 253
 """Cap on each individual SAN entry's string length (RFC 1035's own
@@ -365,20 +368,50 @@ def _inspect_one_address(
         raise
 
 
+_TIME_RELATED_VERIFY_CODES = (9, 10)
+"""OpenSSL's ``X509_V_ERR_CERT_NOT_YET_VALID`` (9) and
+``X509_V_ERR_CERT_HAS_EXPIRED`` (10), exposed via
+``ssl.SSLCertVerificationError.verify_code``. A verification handshake
+that fails with one of these codes has told us *only* that the
+certificate's validity period is the problem it stopped on -- it does
+not tell us whether the chain would otherwise have been trusted, since
+OpenSSL never got far enough to say. See :func:`_verify_one_address`."""
+
+
 def _verify_one_address(
     family: int, sockaddr: tuple, *, server_name: str, timeout_seconds: float, ca_file: str | None
-) -> bool:
+) -> bool | None:
     """Phase 2: a *separate* handshake against the same address,
     performing full chain validation (system/default trust store, or
     ``ca_file`` if configured) but with ``check_hostname=False`` so
-    this handshake's success/failure reflects **chain trust alone**,
-    never conflated with a hostname-match failure (see this module's
-    docstring and :func:`inspect_tls`). Returns ``True``/``False``;
-    never raises for an untrusted chain (that's the expected, useful
-    "not trusted" outcome, not a retrieval failure) — only a genuine
-    connect-level failure propagates, which the caller treats as
-    "verification not determined" rather than failing the whole call
-    (the certificate was already obtained in phase 1).
+    this handshake's outcome is never conflated with a hostname-match
+    failure (see this module's docstring and :func:`inspect_tls`).
+
+    A single ``CERT_REQUIRED`` handshake's pass/fail is **not** "chain
+    trust alone" on its own -- OpenSSL's certificate verification also
+    checks the validity period as part of the same walk, so a
+    certificate signed by a fully trusted CA but expired (or not yet
+    valid) fails this handshake for a reason that has nothing to do
+    with chain trust. Reporting that as ``chain_trusted=False`` would
+    be a false claim about trust, not just about time -- exactly the
+    thing #111's "independent dimensions" requirement forbids.
+
+    ``exc.verify_code`` (the underlying OpenSSL ``X509_V_ERR_*`` code)
+    is used to tell those cases apart: a
+    :data:`_TIME_RELATED_VERIFY_CODES` failure means only "the
+    certificate isn't within its time window" was determined, not
+    anything about trust, so the honest answer is ``None`` ("not
+    determined") -- the caller already reports ``time_valid=False``
+    from its own independent date computation, so nothing is lost.
+    Every other verification failure code (untrusted issuer,
+    self-signed, unable to get local issuer certificate, ...) really is
+    a chain-trust failure and returns ``False``.
+
+    Never raises for an untrusted chain -- that's the expected, useful
+    outcome, not a retrieval failure. Only a genuine connect-level
+    failure propagates, which the caller treats as "verification not
+    determined" rather than failing the whole call (the certificate was
+    already obtained in phase 1).
     """
     ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
     ctx.check_hostname = False
@@ -394,7 +427,9 @@ def _verify_one_address(
         raw_sock.connect(sockaddr)
         try:
             tls_sock = ctx.wrap_socket(raw_sock, server_hostname=server_name)
-        except ssl.SSLCertVerificationError:
+        except ssl.SSLCertVerificationError as exc:
+            if exc.verify_code in _TIME_RELATED_VERIFY_CODES:
+                return None
             return False
         tls_sock.close()
         return True
@@ -477,7 +512,18 @@ def inspect_tls(
     if not candidates:
         raise TLSError(f"DNS resolution returned no usable address for {host!r}", kind=IntegrationErrorKind.CONNECTION)
 
-    truncated = len(candidates) > MAX_ADDRESSES_ATTEMPTED
+    # Unlike a server-count cap that can leave a *returned* result
+    # incomplete (see mantis.integrations.dns's identical fix), capping
+    # the address list here can never omit evidence from a result this
+    # function actually returns: a successful inspection stops at the
+    # first address that presents a certificate (see the loop below),
+    # so the remaining candidates -- within the cap or beyond it --
+    # were never going to be tried anyway once that happens. The only
+    # path where the cap could matter is every attempted candidate
+    # failing, which raises TLSError below rather than returning a
+    # result, so there is no result-shaped case where this cap
+    # legitimately means "evidence was omitted" -- it is deliberately
+    # never folded into `truncated`.
     candidates = candidates[:MAX_ADDRESSES_ATTEMPTED]
 
     last_error: Exception | None = None
@@ -560,6 +606,6 @@ def inspect_tls(
         cipher=cipher,
         certificate=certificate,
         verification=verification,
-        truncated=truncated or cert_truncated,
+        truncated=cert_truncated,
         observed_at=observed_at,
     )

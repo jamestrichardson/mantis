@@ -18,7 +18,8 @@ from mantis.integrations.http import HTTPProbeResult
 from mantis.registry import default_registry
 from mantis.security import make_model_safe
 from mantis.tools.http import http_probe
-from tests._http_fixtures import HTTPTestServer, send_simple
+
+from _http_fixtures import HTTPTestServer, send_simple
 
 
 def _config(**targets) -> HTTPProfilesConfig:
@@ -247,6 +248,22 @@ def test_cross_origin_redirect_is_reported_but_never_followed():
 def test_full_stack_against_a_real_local_server():
     with HTTPTestServer({"/api/health": lambda h: send_simple(h, 200, headers={"Content-Type": "application/json"}, body=b'{"ok":true}')}) as server:
         config = _config(realtarget=_target(alias="realtarget", scheme="http", host="127.0.0.1", port=server.port))
+        result = http_probe("realtarget", "/api/health", "GET", _config=config)
+
+    assert result["error"] is None
+    assert result["status_code"] == 200
+    assert result["body_excerpt"] == '{"ok":true}'
+
+
+def test_full_stack_against_a_real_local_ipv6_server():
+    # PR #119 review: an IPv6-literal target profile must resolve to a
+    # working, bracketed request URL end to end through the tool layer,
+    # not just the integration layer.
+    with HTTPTestServer(
+        {"/api/health": lambda h: send_simple(h, 200, headers={"Content-Type": "application/json"}, body=b'{"ok":true}')},
+        host="::1",
+    ) as server:
+        config = _config(realtarget=_target(alias="realtarget", scheme="http", host="::1", port=server.port))
         result = http_probe("realtarget", "/api/health", "GET", _config=config)
 
     assert result["error"] is None

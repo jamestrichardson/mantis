@@ -19,7 +19,8 @@ from mantis.integrations.tls import CertificateInfo, TLSInspectionResult, Verifi
 from mantis.registry import default_registry
 from mantis.security import make_model_safe
 from mantis.tools.tls import tls_certificate_inspect
-from tests._tls_fixtures import TLSTestServer, make_leaf
+
+from _tls_fixtures import TLSTestServer, make_leaf
 
 
 def _config(**targets) -> TLSProfilesConfig:

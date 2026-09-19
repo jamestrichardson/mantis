@@ -719,6 +719,21 @@ def test_http_config_parses_a_base_path(monkeypatch):
     assert cfg.resolve_target("grafana").base_path == "/grafana"
 
 
+def test_http_config_parses_a_bracketed_ipv6_host(monkeypatch):
+    # PR #119 review: an IPv6 literal host must be accepted (in
+    # bracketed URL-authority form) and stored unbracketed, matching
+    # what ipaddress.ip_address() and httpx.URL(host=...) both expect.
+    _clear_http_target_env(monkeypatch)
+    monkeypatch.setenv("MANTIS_HTTP_TARGET_IPV6_URL", "http://[::1]:8443/base")
+
+    cfg = HTTPProfilesConfig.from_env()
+    target = cfg.resolve_target("ipv6")
+
+    assert target.host == "::1"
+    assert target.port == 8443
+    assert target.base_path == "/base"
+
+
 def test_http_config_verify_ssl_defaults_true_and_is_overridable(monkeypatch):
     _clear_http_target_env(monkeypatch)
     monkeypatch.setenv("MANTIS_HTTP_TARGET_A_URL", "https://a.example.net")
@@ -878,6 +893,18 @@ def test_tls_config_rejects_an_out_of_range_port(monkeypatch):
     monkeypatch.setenv("MANTIS_TLS_TARGET_GRAFANA_PORT", "70000")
 
     with pytest.raises(ConfigurationError):
+        TLSProfilesConfig.from_env()
+
+
+def test_tls_config_rejects_an_invalid_explicit_server_name(monkeypatch):
+    # PR #119 review: an explicitly configured server_name (SNI) must
+    # be validated the same as host is -- it was previously accepted
+    # unchecked.
+    _clear_tls_target_env(monkeypatch)
+    monkeypatch.setenv("MANTIS_TLS_TARGET_GRAFANA_HOST", "grafana.example.net")
+    monkeypatch.setenv("MANTIS_TLS_TARGET_GRAFANA_SERVER_NAME", "not a valid server name!!")
+
+    with pytest.raises(ConfigurationError, match="server_name"):
         TLSProfilesConfig.from_env()
 
 

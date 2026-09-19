@@ -24,8 +24,9 @@ from mantis.integrations.http import (
     validate_http_path,
 )
 from mantis.reliability import Deadline, IntegrationErrorKind
-from tests._http_fixtures import HTTPTestServer, SilentTCPServer, send_simple
-from tests._tls_fixtures import make_leaf
+
+from _http_fixtures import HTTPTestServer, SilentTCPServer, send_simple
+from _tls_fixtures import make_leaf
 
 
 def _probe(host, port, path="/", method="GET", **kwargs):
@@ -107,6 +108,20 @@ def test_get_200():
     assert result.status_code == 200
     assert result.body_excerpt == "hello"
     assert result.truncated is False
+
+
+def test_get_200_against_an_ipv6_literal_target():
+    # PR #119 review: probe_http hand-formatted the request URL as
+    # f"{scheme}://{host}:{port}...", which produces an invalid
+    # authority for an IPv6 literal host ("http://::1:8080/", missing
+    # the required "[...]" brackets) that httpx rejects outright.
+    with HTTPTestServer(
+        {"/ok": lambda h: send_simple(h, 200, headers={"Content-Type": "text/plain"}, body=b"hello")}, host="::1"
+    ) as server:
+        result = _probe("::1", server.port, "/ok")
+
+    assert result.status_code == 200
+    assert result.body_excerpt == "hello"
 
 
 def test_head_200_never_reads_a_body():
