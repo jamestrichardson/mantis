@@ -10,6 +10,7 @@ Importing a tool module registers its tools as a side effect, via
 """
 
 from mantis.tools import awx as _awx  # noqa: F401  (registers AWX tools)
+from mantis.tools import dns as _dns  # noqa: F401  (registers DNS tools)
 from mantis.tools import kubernetes as _kubernetes  # noqa: F401  (registers Kubernetes tools)
 from mantis.tools import loki as _loki  # noqa: F401  (registers Loki tools)
 from mantis.tools import network as _network  # noqa: F401  (registers network tools)
