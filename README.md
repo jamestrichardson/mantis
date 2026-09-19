@@ -247,6 +247,8 @@ mantis run system-troubleshooter "Investigate why db-primary-02 keeps failing he
 - [docs/awx-job-failure.md](docs/awx-job-failure.md) — structured AWX job-event failure evidence: selection rules, bounding/pagination, provenance, stdout fallback
 - [docs/network-tcp-connectivity.md](docs/network-tcp-connectivity.md) — current-state TCP connectivity tool: status vocabulary, IPv4/IPv6 multi-address behavior, deadline handling, SSRF posture
 - [docs/dns-lookup.md](docs/dns-lookup.md) — DNS evidence tool: resolver profiles, split-horizon semantics, supported record types, status vocabulary, deterministic multi-server failover
+- [docs/http-probe.md](docs/http-probe.md) — bounded HTTP(S) probe tool: target profiles, redirect/proxy/auth posture, body/header bounds, any-status-is-evidence semantics
+- [docs/tls-certificate-inspection.md](docs/tls-certificate-inspection.md) — TLS certificate inspection tool: inspect-vs-verify, the two-handshake mechanism, independent verification dimensions
 - [docs/prometheus.md](docs/prometheus.md) — time-series evidence tool: instant/range PromQL, result bounding/truncation, query errors vs. retrieval failures, `up` semantics
 - [docs/loki.md](docs/loki.md) — log evidence tool: bounded LogQL range queries, stream/line bounding, truncation semantics, why Loki is treated as the highest-risk untrusted-text source
 - [docs/system-troubleshooter.md](docs/system-troubleshooter.md) — first multi-source investigation agent: tool allowlist, budgets, investigation/output contract, worked `ferros-c01` example

@@ -17,9 +17,11 @@ from mantis.config import (
     AWXConfig,
     ConfigurationError,
     DNSConfig,
+    HTTPProfilesConfig,
     LiteLLMConfig,
     ReliabilityConfig,
     Secret,
+    TLSProfilesConfig,
     get_metrics_enabled,
 )
 
@@ -668,3 +670,267 @@ def test_dns_config_parsing_performs_no_network_access(monkeypatch):
     cfg = DNSConfig.from_env()
 
     assert cfg.resolve_profile("internal") == ("172.30.0.53", "172.30.0.54")
+
+
+# ---------------------------------------------------------------------------
+# HTTPProfilesConfig (#110): server-side HTTP target profiles for
+# http_probe. Parsing must never touch the network -- every test here
+# is pure environment-variable/string handling.
+# ---------------------------------------------------------------------------
+
+
+def _clear_http_target_env(monkeypatch):
+    for key in list(os.environ):
+        if key.startswith("MANTIS_HTTP_TARGET_"):
+            monkeypatch.delenv(key, raising=False)
+
+
+def test_http_config_from_env_parses_a_basic_target(monkeypatch):
+    _clear_http_target_env(monkeypatch)
+    monkeypatch.setenv("MANTIS_HTTP_TARGET_GRAFANA_URL", "https://grafana.example.net:3000")
+
+    cfg = HTTPProfilesConfig.from_env()
+    target = cfg.resolve_target("grafana")
+
+    assert target.scheme == "https"
+    assert target.host == "grafana.example.net"
+    assert target.port == 3000
+    assert target.base_path == ""
+    assert target.verify_ssl is True
+
+
+def test_http_config_defaults_port_from_scheme(monkeypatch):
+    _clear_http_target_env(monkeypatch)
+    monkeypatch.setenv("MANTIS_HTTP_TARGET_A_URL", "http://a.example.net")
+    monkeypatch.setenv("MANTIS_HTTP_TARGET_B_URL", "https://b.example.net")
+
+    cfg = HTTPProfilesConfig.from_env()
+
+    assert cfg.resolve_target("a").port == 80
+    assert cfg.resolve_target("b").port == 443
+
+
+def test_http_config_parses_a_base_path(monkeypatch):
+    _clear_http_target_env(monkeypatch)
+    monkeypatch.setenv("MANTIS_HTTP_TARGET_GRAFANA_URL", "https://grafana.example.net/grafana/")
+
+    cfg = HTTPProfilesConfig.from_env()
+
+    assert cfg.resolve_target("grafana").base_path == "/grafana"
+
+
+def test_http_config_verify_ssl_defaults_true_and_is_overridable(monkeypatch):
+    _clear_http_target_env(monkeypatch)
+    monkeypatch.setenv("MANTIS_HTTP_TARGET_A_URL", "https://a.example.net")
+    monkeypatch.setenv("MANTIS_HTTP_TARGET_B_URL", "https://b.example.net")
+    monkeypatch.setenv("MANTIS_HTTP_TARGET_B_VERIFY_SSL", "false")
+
+    cfg = HTTPProfilesConfig.from_env()
+
+    assert cfg.resolve_target("a").verify_ssl is True
+    assert cfg.resolve_target("b").verify_ssl is False
+
+
+def test_http_config_resolve_target_is_case_insensitive(monkeypatch):
+    _clear_http_target_env(monkeypatch)
+    monkeypatch.setenv("MANTIS_HTTP_TARGET_GRAFANA_URL", "https://grafana.example.net")
+
+    cfg = HTTPProfilesConfig.from_env()
+
+    assert cfg.resolve_target("GRAFANA") is not None
+    assert cfg.resolve_target("Grafana") is not None
+
+
+def test_http_config_resolve_target_returns_none_for_unknown_alias(monkeypatch):
+    _clear_http_target_env(monkeypatch)
+    monkeypatch.setenv("MANTIS_HTTP_TARGET_GRAFANA_URL", "https://grafana.example.net")
+
+    cfg = HTTPProfilesConfig.from_env()
+
+    assert cfg.resolve_target("nonexistent") is None
+
+
+@pytest.mark.parametrize("alias", [123, None, [], {}])
+def test_http_config_resolve_target_returns_none_for_a_non_string_alias(monkeypatch, alias):
+    _clear_http_target_env(monkeypatch)
+    monkeypatch.setenv("MANTIS_HTTP_TARGET_GRAFANA_URL", "https://grafana.example.net")
+
+    cfg = HTTPProfilesConfig.from_env()
+
+    assert cfg.resolve_target(alias) is None
+
+
+@pytest.mark.parametrize(
+    "url",
+    [
+        "ftp://host.example.net",
+        "grafana.example.net",  # no scheme at all
+        "https://user:pass@host.example.net",
+        "https://host.example.net?query=1",
+        "https://host.example.net/#fragment",
+        "https:// /path",  # empty host
+    ],
+)
+def test_http_config_rejects_invalid_target_urls(monkeypatch, url):
+    _clear_http_target_env(monkeypatch)
+    monkeypatch.setenv("MANTIS_HTTP_TARGET_BAD_URL", url)
+
+    with pytest.raises(ConfigurationError):
+        HTTPProfilesConfig.from_env()
+
+
+def test_http_config_from_env_ignores_unrelated_variables(monkeypatch):
+    _clear_http_target_env(monkeypatch)
+    monkeypatch.setenv("MANTIS_HTTP_TARGET_GRAFANA_URL", "https://grafana.example.net")
+    monkeypatch.setenv("LITELLM_MODEL", "some-model")
+
+    cfg = HTTPProfilesConfig.from_env()
+
+    assert set(cfg.targets.keys()) == {"grafana"}
+
+
+def test_http_config_parsing_performs_no_network_access(monkeypatch):
+    import socket
+
+    def _forbidden(*args, **kwargs):
+        raise AssertionError("HTTPProfilesConfig parsing must never touch the network")
+
+    monkeypatch.setattr(socket.socket, "connect", _forbidden)
+    _clear_http_target_env(monkeypatch)
+    monkeypatch.setenv("MANTIS_HTTP_TARGET_GRAFANA_URL", "https://grafana.example.net:3000/grafana")
+
+    cfg = HTTPProfilesConfig.from_env()
+
+    assert cfg.resolve_target("grafana").host == "grafana.example.net"
+
+
+# ---------------------------------------------------------------------------
+# TLSProfilesConfig (#111): server-side TLS target profiles for
+# tls_certificate_inspect. Parsing must never touch the network.
+# ---------------------------------------------------------------------------
+
+
+def _clear_tls_target_env(monkeypatch):
+    for key in list(os.environ):
+        if key.startswith("MANTIS_TLS_TARGET_"):
+            monkeypatch.delenv(key, raising=False)
+
+
+def test_tls_config_from_env_parses_a_basic_target(monkeypatch):
+    _clear_tls_target_env(monkeypatch)
+    monkeypatch.setenv("MANTIS_TLS_TARGET_GRAFANA_HOST", "grafana.example.net")
+
+    cfg = TLSProfilesConfig.from_env()
+    target = cfg.resolve_target("grafana")
+
+    assert target.host == "grafana.example.net"
+    assert target.port == 443
+    assert target.server_name == "grafana.example.net"
+    assert target.ca_file is None
+
+
+def test_tls_config_port_and_server_name_and_ca_file_are_overridable(monkeypatch):
+    _clear_tls_target_env(monkeypatch)
+    monkeypatch.setenv("MANTIS_TLS_TARGET_GRAFANA_HOST", "grafana.example.net")
+    monkeypatch.setenv("MANTIS_TLS_TARGET_GRAFANA_PORT", "8443")
+    monkeypatch.setenv("MANTIS_TLS_TARGET_GRAFANA_SERVER_NAME", "internal-grafana.example.net")
+    monkeypatch.setenv("MANTIS_TLS_TARGET_GRAFANA_CA_FILE", "/etc/mantis/ca.pem")
+
+    cfg = TLSProfilesConfig.from_env()
+    target = cfg.resolve_target("grafana")
+
+    assert target.port == 8443
+    assert target.server_name == "internal-grafana.example.net"
+    assert target.ca_file == "/etc/mantis/ca.pem"
+
+
+def test_tls_config_requires_explicit_server_name_for_an_ip_literal_host(monkeypatch):
+    _clear_tls_target_env(monkeypatch)
+    monkeypatch.setenv("MANTIS_TLS_TARGET_RAWIP_HOST", "172.30.10.20")
+
+    with pytest.raises(ConfigurationError, match="server_name"):
+        TLSProfilesConfig.from_env()
+
+
+def test_tls_config_ip_literal_host_with_explicit_server_name_is_accepted(monkeypatch):
+    _clear_tls_target_env(monkeypatch)
+    monkeypatch.setenv("MANTIS_TLS_TARGET_RAWIP_HOST", "172.30.10.20")
+    monkeypatch.setenv("MANTIS_TLS_TARGET_RAWIP_SERVER_NAME", "grafana.internal")
+
+    cfg = TLSProfilesConfig.from_env()
+    target = cfg.resolve_target("rawip")
+
+    assert target.host == "172.30.10.20"
+    assert target.server_name == "grafana.internal"
+
+
+def test_tls_config_rejects_an_invalid_host(monkeypatch):
+    _clear_tls_target_env(monkeypatch)
+    monkeypatch.setenv("MANTIS_TLS_TARGET_BAD_HOST", "not a valid host!!")
+
+    with pytest.raises(ConfigurationError):
+        TLSProfilesConfig.from_env()
+
+
+def test_tls_config_rejects_an_out_of_range_port(monkeypatch):
+    _clear_tls_target_env(monkeypatch)
+    monkeypatch.setenv("MANTIS_TLS_TARGET_GRAFANA_HOST", "grafana.example.net")
+    monkeypatch.setenv("MANTIS_TLS_TARGET_GRAFANA_PORT", "70000")
+
+    with pytest.raises(ConfigurationError):
+        TLSProfilesConfig.from_env()
+
+
+def test_tls_config_resolve_target_is_case_insensitive(monkeypatch):
+    _clear_tls_target_env(monkeypatch)
+    monkeypatch.setenv("MANTIS_TLS_TARGET_GRAFANA_HOST", "grafana.example.net")
+
+    cfg = TLSProfilesConfig.from_env()
+
+    assert cfg.resolve_target("GRAFANA") is not None
+
+
+def test_tls_config_resolve_target_returns_none_for_unknown_alias(monkeypatch):
+    _clear_tls_target_env(monkeypatch)
+    monkeypatch.setenv("MANTIS_TLS_TARGET_GRAFANA_HOST", "grafana.example.net")
+
+    cfg = TLSProfilesConfig.from_env()
+
+    assert cfg.resolve_target("nonexistent") is None
+
+
+@pytest.mark.parametrize("alias", [123, None, [], {}])
+def test_tls_config_resolve_target_returns_none_for_a_non_string_alias(monkeypatch, alias):
+    _clear_tls_target_env(monkeypatch)
+    monkeypatch.setenv("MANTIS_TLS_TARGET_GRAFANA_HOST", "grafana.example.net")
+
+    cfg = TLSProfilesConfig.from_env()
+
+    assert cfg.resolve_target(alias) is None
+
+
+def test_tls_config_from_env_ignores_unrelated_variables(monkeypatch):
+    _clear_tls_target_env(monkeypatch)
+    monkeypatch.setenv("MANTIS_TLS_TARGET_GRAFANA_HOST", "grafana.example.net")
+    monkeypatch.setenv("LITELLM_MODEL", "some-model")
+
+    cfg = TLSProfilesConfig.from_env()
+
+    assert set(cfg.targets.keys()) == {"grafana"}
+
+
+def test_tls_config_parsing_performs_no_network_access(monkeypatch):
+    import socket
+
+    def _forbidden(*args, **kwargs):
+        raise AssertionError("TLSProfilesConfig parsing must never touch the network")
+
+    monkeypatch.setattr(socket.socket, "connect", _forbidden)
+    _clear_tls_target_env(monkeypatch)
+    monkeypatch.setenv("MANTIS_TLS_TARGET_GRAFANA_HOST", "grafana.example.net")
+    monkeypatch.setenv("MANTIS_TLS_TARGET_GRAFANA_CA_FILE", "/does/not/exist.pem")
+
+    cfg = TLSProfilesConfig.from_env()
+
+    # ca_file's existence is never checked at config-parse time either.
+    assert cfg.resolve_target("grafana").ca_file == "/does/not/exist.pem"
