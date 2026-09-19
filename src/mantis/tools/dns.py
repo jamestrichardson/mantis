@@ -72,7 +72,16 @@ def _attempt_to_dict(attempt: DNSServerAttempt) -> dict[str, Any]:
 def _invalid_input_result(
     name: Any, record_type: Any, resolver_alias: Any, message: str
 ) -> dict[str, Any]:
-    logger.info("dns_lookup rejected invalid input: %s", message)
+    # Deliberately never interpolates `message` (or name/record_type/
+    # resolver_alias) into the log line -- several validators embed the
+    # raw, untrusted, model-supplied value in their exception text (by
+    # design: that text is meant for the *returned* "message" field,
+    # which goes through mantis.security.make_model_safe() like any
+    # other tool result). A plain logger.info(..., message) call would
+    # instead write that same raw text straight to container stdout/
+    # Loki, bypassing the bounded/redacted mantis_tool_call logging
+    # path entirely. See docs/security.md.
+    logger.info("dns_lookup rejected invalid input")
     meta = QueryMeta(source_system="dns", derived_fields=list(DERIVED_RESULT_FIELDS))
     return {
         "meta": meta.to_dict(),
