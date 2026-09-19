@@ -304,6 +304,20 @@ involving this tool is the fixed string `tool="check_tcp_connectivity"`),
 and any attempt `message` logged is already bounded (see "Attempt
 evidence").
 
+## Correlating with DNS evidence (#109)
+
+`check_tcp_connectivity` resolves a name internally (via
+`socket.getaddrinfo()`) as a means to an end — connecting — and reports
+nothing about *which resolver* or *what DNS state* produced the address
+it tried. [`dns_lookup`](dns-lookup.md) (#109) is what makes the DNS
+layer independently inspectable, from a specific, chosen resolver
+perspective: "does this name resolve internally, and does it resolve to
+the address I expect?" is a distinct question from "can Mantis reach
+that address over TCP right now?" — a TCP failure and a DNS answer for
+the same name are two different kinds of evidence, gathered by two
+separate tool calls; never assume one explains the other without
+checking.
+
 ## Correlating with historical AWX evidence (#28)
 
 `check_tcp_connectivity` (current state) and `awx_get_job_failure`

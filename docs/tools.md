@@ -276,6 +276,22 @@ evaluation scenario). DNS/socket mechanics live in
 `mantis/integrations/network.py`; semantic shaping in
 `mantis/tools/network.py`.
 
+### `dns_lookup` (#109): DNS evidence from a chosen resolver perspective
+
+`dns_lookup(name: str, record_type: str = "A", resolver_alias: str = "internal")`
+is Mantis's first DNS evidence tool — a bounded, deadline-aware query
+against exactly one server-side-configured resolver *profile*,
+answering "what does this specific resolver perspective report for
+this name right now?" — deliberately not "what is the globally correct
+answer" (there often isn't one; see split-horizon DNS). See
+[docs/dns-lookup.md](dns-lookup.md) for the full design (resolver
+profile configuration, split-horizon semantics, supported record types,
+the `ok`/`nxdomain`/`no_data`/`servfail`/`refused` status vocabulary and
+how it stays distinct from transport failures, deterministic
+multi-server failover, CNAME-chain bounding, and security rationale for
+alias-only resolver selection). Query/failover mechanics live in
+`mantis/integrations/dns.py`; semantic shaping in `mantis/tools/dns.py`.
+
 ## Prometheus tool behavior
 
 ### `prometheus_query` / `prometheus_query_range` (#9): time-series evidence

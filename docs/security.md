@@ -1,6 +1,6 @@
 # Security
 
-Mantis operates against real infrastructure (AWX, network/TCP,
+Mantis operates against real infrastructure (AWX, network/TCP, DNS,
 Prometheus, Loki, and Kubernetes today; others planned). These
 principles govern how it's built, and are enforced architecturally, not
 just by convention.
@@ -27,8 +27,8 @@ just by convention.
 
 ## Untrusted tool-output trust boundary
 
-Mantis has expanded beyond AWX into network/TCP diagnostics, Prometheus,
-Loki, and Kubernetes, with Git and other systems planned — every one of
+Mantis has expanded beyond AWX into network/TCP diagnostics, DNS,
+Prometheus, Loki, and Kubernetes, with Git and other systems planned — every one of
 these produces output that is, by construction, arbitrary external text
 Mantis does not control. Loki log text is treated as the highest-risk
 untrusted-text source implemented so far (see

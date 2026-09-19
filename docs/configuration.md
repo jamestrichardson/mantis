@@ -178,6 +178,44 @@ example manifest. Never grant `create`/`update`/`patch`/`delete`, `exec`,
 or access to `secrets` — Mantis has no code path that would use it, and
 granting it anyway widens blast radius for no benefit.
 
+## DNS
+
+See [docs/dns-lookup.md](dns-lookup.md) for the full contract: split-
+horizon semantics, supported record types, the status vocabulary,
+deterministic multi-server failover, and bounds/timeouts.
+
+Unlike every other integration in this file, DNS has no fixed set of
+named environment variables — an operator configures an open-ended set
+of named **resolver profiles**, one environment variable per alias:
+
+```bash
+MANTIS_DNS_RESOLVER_<ALIAS>=server1,server2,...
+```
+
+| Example | Meaning |
+|---|---|
+| `MANTIS_DNS_RESOLVER_INTERNAL=172.30.0.53,172.30.0.54` | Defines the `internal` resolver profile (`dns_lookup`'s default `resolver_alias`), with two servers. |
+| `MANTIS_DNS_RESOLVER_CLOUDFLARE=1.1.1.1,1.0.0.1` | Defines an example public resolver profile named `cloudflare`. |
+| `MANTIS_DNS_RESOLVER_GOOGLE=8.8.8.8,8.8.4.4` | Defines an example public resolver profile named `google`. |
+
+`<ALIAS>` is case-insensitive and becomes exactly the `resolver_alias`
+value `dns_lookup` accepts. **None of `internal`/`cloudflare`/`google`
+is required, hardcoded, or special-cased** — they're only example alias
+names; configure whichever profiles are actually useful in your
+environment (including none at all, though `dns_lookup`'s
+`resolver_alias` default is `"internal"`, so at least that alias needs
+configuring for the tool's zero-argument default to resolve anything).
+Each server must be an IP literal (IPv4 or IPv6), never a hostname — a
+resolver's own address must not itself require DNS resolution to reach.
+`resolver_alias` is the **only** resolver-selecting input a model/API
+caller may supply; a caller can never provide a resolver IP, hostname,
+port, or any other DNS endpoint directly, and an alias with no matching
+configured profile is rejected before any query is attempted — see
+[docs/dns-lookup.md](dns-lookup.md#security-and-bounds).
+
+`DNSConfig.from_env()` performs no network access; it only parses and
+validates these variables.
+
 ## Reliability
 
 See [docs/reliability.md](reliability.md) for the full contract:

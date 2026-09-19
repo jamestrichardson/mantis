@@ -16,6 +16,7 @@ from mantis.config import (
     ApiServerConfig,
     AWXConfig,
     ConfigurationError,
+    DNSConfig,
     LiteLLMConfig,
     ReliabilityConfig,
     Secret,
@@ -541,3 +542,129 @@ def test_get_metrics_enabled_true_values(monkeypatch, value):
 def test_get_metrics_enabled_false_values(monkeypatch, value):
     monkeypatch.setenv("MANTIS_METRICS_ENABLED", value)
     assert get_metrics_enabled(default=True) is False
+
+
+# ---------------------------------------------------------------------------
+# DNSConfig (#109): server-side resolver profiles for dns_lookup.
+# Parsing must never touch the network -- every test here is pure
+# environment-variable/string handling.
+# ---------------------------------------------------------------------------
+
+
+def _clear_dns_resolver_env(monkeypatch):
+    for key in list(os.environ):
+        if key.startswith("MANTIS_DNS_RESOLVER_"):
+            monkeypatch.delenv(key, raising=False)
+
+
+def test_dns_config_from_env_parses_a_single_profile(monkeypatch):
+    _clear_dns_resolver_env(monkeypatch)
+    monkeypatch.setenv("MANTIS_DNS_RESOLVER_INTERNAL", "172.30.0.53,172.30.0.54")
+
+    cfg = DNSConfig.from_env()
+
+    assert cfg.resolve_profile("internal") == ("172.30.0.53", "172.30.0.54")
+
+
+def test_dns_config_from_env_parses_multiple_profiles(monkeypatch):
+    _clear_dns_resolver_env(monkeypatch)
+    monkeypatch.setenv("MANTIS_DNS_RESOLVER_INTERNAL", "172.30.0.53")
+    monkeypatch.setenv("MANTIS_DNS_RESOLVER_CLOUDFLARE", "1.1.1.1,1.0.0.1")
+    monkeypatch.setenv("MANTIS_DNS_RESOLVER_GOOGLE", "8.8.8.8,8.8.4.4")
+
+    cfg = DNSConfig.from_env()
+
+    assert cfg.resolve_profile("internal") == ("172.30.0.53",)
+    assert cfg.resolve_profile("cloudflare") == ("1.1.1.1", "1.0.0.1")
+    assert cfg.resolve_profile("google") == ("8.8.8.8", "8.8.4.4")
+
+
+def test_dns_config_resolve_profile_is_case_insensitive(monkeypatch):
+    _clear_dns_resolver_env(monkeypatch)
+    monkeypatch.setenv("MANTIS_DNS_RESOLVER_INTERNAL", "172.30.0.53")
+
+    cfg = DNSConfig.from_env()
+
+    assert cfg.resolve_profile("INTERNAL") == ("172.30.0.53",)
+    assert cfg.resolve_profile("Internal") == ("172.30.0.53",)
+
+
+def test_dns_config_resolve_profile_returns_none_for_unknown_alias(monkeypatch):
+    _clear_dns_resolver_env(monkeypatch)
+    monkeypatch.setenv("MANTIS_DNS_RESOLVER_INTERNAL", "172.30.0.53")
+
+    cfg = DNSConfig.from_env()
+
+    assert cfg.resolve_profile("nonexistent") is None
+
+
+@pytest.mark.parametrize("alias", [123, None, [], {}])
+def test_dns_config_resolve_profile_returns_none_for_a_non_string_alias(monkeypatch, alias):
+    _clear_dns_resolver_env(monkeypatch)
+    monkeypatch.setenv("MANTIS_DNS_RESOLVER_INTERNAL", "172.30.0.53")
+
+    cfg = DNSConfig.from_env()
+
+    assert cfg.resolve_profile(alias) is None
+
+
+def test_dns_config_from_env_ignores_unrelated_variables(monkeypatch):
+    _clear_dns_resolver_env(monkeypatch)
+    monkeypatch.setenv("MANTIS_DNS_RESOLVER_INTERNAL", "172.30.0.53")
+    monkeypatch.setenv("LITELLM_MODEL", "some-model")
+
+    cfg = DNSConfig.from_env()
+
+    assert set(cfg.profiles.keys()) == {"internal"}
+
+
+def test_dns_config_from_env_with_no_profiles_configured_is_empty(monkeypatch):
+    _clear_dns_resolver_env(monkeypatch)
+
+    cfg = DNSConfig.from_env()
+
+    assert cfg.profiles == {}
+    assert cfg.resolve_profile("internal") is None
+
+
+def test_dns_config_rejects_a_hostname_server_not_an_ip_literal():
+    # A resolver's own address must never itself require DNS resolution
+    # to reach -- this is caught at config-construction time, not
+    # discovered later when a query inexplicably fails.
+    with pytest.raises(ConfigurationError, match="internal"):
+        DNSConfig(profiles={"internal": ("resolver.example.com",)})
+
+
+def test_dns_config_rejects_an_empty_server_list():
+    with pytest.raises(ConfigurationError):
+        DNSConfig(profiles={"internal": ()})
+
+
+def test_dns_config_rejects_an_empty_alias():
+    with pytest.raises(ConfigurationError):
+        DNSConfig(profiles={"": ("172.30.0.53",)})
+
+
+def test_dns_config_accepts_ipv6_servers():
+    cfg = DNSConfig(profiles={"internal": ("2001:db8::1", "::1")})
+    assert cfg.resolve_profile("internal") == ("2001:db8::1", "::1")
+
+
+def test_dns_config_parsing_performs_no_network_access(monkeypatch):
+    # Constructing/parsing DNSConfig must never itself attempt to
+    # contact a resolver -- proven by making any socket-level UDP send
+    # fail loudly if it's ever attempted during from_env()/__post_init__.
+    import socket
+
+    def _forbidden(*args, **kwargs):
+        raise AssertionError("DNSConfig parsing must never touch the network")
+
+    monkeypatch.setattr(socket.socket, "sendto", _forbidden)
+    monkeypatch.setattr(socket.socket, "connect", _forbidden)
+    _clear_dns_resolver_env(monkeypatch)
+    monkeypatch.setenv("MANTIS_DNS_RESOLVER_INTERNAL", "172.30.0.53,172.30.0.54")
+    monkeypatch.setenv("MANTIS_DNS_RESOLVER_CLOUDFLARE", "1.1.1.1")
+
+    cfg = DNSConfig.from_env()
+
+    assert cfg.resolve_profile("internal") == ("172.30.0.53", "172.30.0.54")
