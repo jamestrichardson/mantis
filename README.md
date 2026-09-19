@@ -19,7 +19,8 @@ investigate real infrastructure, not a generic chatbot wrapper. Concretely:
   evidence-based summary, so a human's time goes to judgment calls, not
   log spelunking.
 - **Build a reusable operational toolset, not one-off scripts.** Every
-  tool (AWX, TCP connectivity, Prometheus, Loki, and Kubernetes today) is
+  tool (AWX, TCP connectivity, DNS, Prometheus, Loki, and Kubernetes
+  today) is
   written once and shared across every agent that needs it — see
   [Philosophy](#philosophy) below.
 - **Stay evidence-based and honest about uncertainty.** Agents are
@@ -245,6 +246,7 @@ mantis run system-troubleshooter "Investigate why db-primary-02 keeps failing he
 - [docs/tools.md](docs/tools.md) — what a tool is, how to add one
 - [docs/awx-job-failure.md](docs/awx-job-failure.md) — structured AWX job-event failure evidence: selection rules, bounding/pagination, provenance, stdout fallback
 - [docs/network-tcp-connectivity.md](docs/network-tcp-connectivity.md) — current-state TCP connectivity tool: status vocabulary, IPv4/IPv6 multi-address behavior, deadline handling, SSRF posture
+- [docs/dns-lookup.md](docs/dns-lookup.md) — DNS evidence tool: resolver profiles, split-horizon semantics, supported record types, status vocabulary, deterministic multi-server failover
 - [docs/prometheus.md](docs/prometheus.md) — time-series evidence tool: instant/range PromQL, result bounding/truncation, query errors vs. retrieval failures, `up` semantics
 - [docs/loki.md](docs/loki.md) — log evidence tool: bounded LogQL range queries, stream/line bounding, truncation semantics, why Loki is treated as the highest-risk untrusted-text source
 - [docs/system-troubleshooter.md](docs/system-troubleshooter.md) — first multi-source investigation agent: tool allowlist, budgets, investigation/output contract, worked `ferros-c01` example

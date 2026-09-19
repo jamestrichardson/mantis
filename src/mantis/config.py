@@ -33,7 +33,8 @@ from __future__ import annotations
 
 import math
 import os
-from dataclasses import dataclass
+from dataclasses import dataclass, field
+from ipaddress import ip_address
 from pathlib import Path
 
 from dotenv import load_dotenv
@@ -366,6 +367,93 @@ class KubernetesConfig:
             cluster_name=_require("MANTIS_KUBERNETES_CLUSTER_NAME"),
             verify_ssl=_getenv_bool("MANTIS_KUBERNETES_VERIFY_SSL", True),
         )
+
+
+_DNS_RESOLVER_PROFILE_ENV_PREFIX = "MANTIS_DNS_RESOLVER_"
+"""Every environment variable ``MANTIS_DNS_RESOLVER_<ALIAS>=server1,server2,...``
+defines one named resolver profile (#109) — ``<ALIAS>`` (case-insensitive)
+becomes the ``resolver_alias`` a caller may request, e.g.
+``MANTIS_DNS_RESOLVER_INTERNAL=...`` for ``resolver_alias="internal"``.
+Unlike every other integration config in this module, the *set* of
+profiles an operator configures is open-ended (there is no fixed list
+of alias names to declare fields for), so :meth:`DNSConfig.from_env`
+scans the environment for this prefix rather than reading a fixed set
+of named variables — the only place this module does that. This is
+still config *parsing*, not a network call: nothing here contacts a
+resolver or validates that a configured server is actually reachable."""
+
+
+@dataclass(frozen=True)
+class DNSConfig:
+    """Server-side DNS resolver profile configuration for ``dns_lookup``
+    (#109) — see ``mantis.integrations.dns`` and ``docs/dns-lookup.md``.
+
+    A caller (model or API client) may only ever select a profile by its
+    ``resolver_alias`` *name* — never a resolver IP/hostname/port
+    directly. This is the whole point of resolver profiles being
+    server-side configuration: split-horizon diagnostics (comparing an
+    ``internal`` perspective against a ``cloudflare``/``google``/etc.
+    public one) requires the *set* of available perspectives to be
+    fixed by the operator, not expandable by whatever a model decides
+    to ask for.
+
+    ``profiles`` maps a lowercase alias to an ordered tuple of one or
+    more server IP literals (never hostnames — a resolver's own address
+    must not itself require DNS resolution to reach). There is no
+    special-cased "system"/"cloudflare"/"google" behavior anywhere in
+    this class: those are just example alias *names* an operator is
+    free to configure like any other (see ``deploy/standalone/runtime.env.example``)
+    — Cloudflare/Google are never hardcoded as a mandatory default
+    resolver.
+    """
+
+    profiles: dict[str, tuple[str, ...]] = field(default_factory=dict)
+
+    def __post_init__(self) -> None:
+        for alias, servers in self.profiles.items():
+            if not alias:
+                raise ConfigurationError("A DNS resolver profile alias must not be empty")
+            if not servers:
+                raise ConfigurationError(
+                    f"DNS resolver profile '{alias}' must configure at least one server"
+                )
+            for server in servers:
+                try:
+                    ip_address(server)
+                except ValueError as exc:
+                    raise ConfigurationError(
+                        f"DNS resolver profile '{alias}' has an invalid server address "
+                        f"{server!r} -- resolver servers must be IP literals, never hostnames"
+                    ) from exc
+
+    @classmethod
+    def from_env(cls) -> "DNSConfig":
+        """Scan the environment for every ``MANTIS_DNS_RESOLVER_<ALIAS>``
+        variable and build the corresponding profile map. Performs no
+        network access — see :data:`_DNS_RESOLVER_PROFILE_ENV_PREFIX`.
+        """
+        profiles: dict[str, tuple[str, ...]] = {}
+        for key, value in os.environ.items():
+            if not key.startswith(_DNS_RESOLVER_PROFILE_ENV_PREFIX):
+                continue
+            alias = key[len(_DNS_RESOLVER_PROFILE_ENV_PREFIX) :].lower()
+            if not alias:
+                continue
+            servers = tuple(s.strip() for s in value.split(",") if s.strip())
+            if servers:
+                profiles[alias] = servers
+        return cls(profiles=profiles)
+
+    def resolve_profile(self, alias: object) -> tuple[str, ...] | None:
+        """Look up ``alias`` (case-insensitive), returning its
+        configured server tuple or ``None`` if unknown. Never raises —
+        an unrecognized alias is exactly as "not found" as a
+        non-string/malformed value; the caller (``mantis.tools.dns``)
+        turns either into the same safe, no-network-access
+        ``invalid_input`` tool result (#109)."""
+        if not isinstance(alias, str):
+            return None
+        return self.profiles.get(alias.lower())
 
 
 _API_AUTH_MODES = ("bearer_token", "disabled")
