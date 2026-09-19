@@ -1,5 +1,21 @@
 # Changelog
 
+## [1.8.0](https://github.com/jamestrichardson/mantis/compare/mantis-v1.7.0...mantis-v1.8.0) (2026-09-18)
+
+
+### Features
+
+* **config:** add minimal per-agent LiteLLM model override ([#16](https://github.com/jamestrichardson/mantis/issues/16) precursor) ([477e96b](https://github.com/jamestrichardson/mantis/commit/477e96bc40afb0f81b9e525fc43ae8a6ae9a1d70))
+* **config:** add minimal per-agent LiteLLM model override ([#16](https://github.com/jamestrichardson/mantis/issues/16) precursor) ([acd2bb0](https://github.com/jamestrichardson/mantis/commit/acd2bb0c43876862749084c06bb18f81f0eafdda))
+
+
+### Bug Fixes
+
+* **deploy:** add a deployment-contract version so rollback can't combine an incompatible old image with the current lifecycle ([64d34a2](https://github.com/jamestrichardson/mantis/commit/64d34a29aebdaa03ffda6ba4e9a2f86d172ba615))
+* **deploy:** reliable standalone healthcheck + lifecycle-safe rollback ([#97](https://github.com/jamestrichardson/mantis/issues/97), [#98](https://github.com/jamestrichardson/mantis/issues/98)) ([0aab70c](https://github.com/jamestrichardson/mantis/commit/0aab70c6ce6561e4425b6b4322a3a3573911bae4))
+* **deploy:** replace slow Python healthcheck probe with a bash-only one ([eeb89b9](https://github.com/jamestrichardson/mantis/commit/eeb89b907f60d5e568a26c23a6d75144b6ddf4b7))
+* **deploy:** stop suggesting the mutable tag as incompatible-rollback recovery ([99f770c](https://github.com/jamestrichardson/mantis/commit/99f770c7af6672343e0568f7dc02c3231859fe9a))
+
 ## [1.7.0](https://github.com/jamestrichardson/mantis/compare/mantis-v1.6.0...mantis-v1.7.0) (2026-09-18)
 
 
