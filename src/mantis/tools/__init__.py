@@ -16,3 +16,4 @@ from mantis.tools import kubernetes as _kubernetes  # noqa: F401  (registers Kub
 from mantis.tools import loki as _loki  # noqa: F401  (registers Loki tools)
 from mantis.tools import network as _network  # noqa: F401  (registers network tools)
 from mantis.tools import prometheus as _prometheus  # noqa: F401  (registers Prometheus tools)
+from mantis.tools import tls as _tls  # noqa: F401  (registers TLS tools)
