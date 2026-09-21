@@ -20,6 +20,7 @@ dependencies = [
     "uvicorn[standard]>=0.30.0",
     "dnspython>=2.8.0",
     "cryptography>=42.0.0",
+    "dulwich>=0.22.1",
 ]
 
 [project.optional-dependencies]

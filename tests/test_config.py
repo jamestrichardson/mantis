@@ -17,6 +17,7 @@ from mantis.config import (
     AWXConfig,
     ConfigurationError,
     DNSConfig,
+    GitRepositoriesConfig,
     HTTPProfilesConfig,
     LiteLLMConfig,
     ReliabilityConfig,
@@ -967,3 +968,118 @@ def test_tls_config_parsing_performs_no_network_access(monkeypatch):
 
     # ca_file's existence is never checked at config-parse time either.
     assert cfg.resolve_target("grafana").ca_file == "/does/not/exist.pem"
+
+
+# ---------------------------------------------------------------------------
+# GitRepositoriesConfig (#17): server-side local repository alias
+# profiles for git_recent_changes. Parsing must never touch the
+# filesystem/Git/network -- every test here is pure environment-
+# variable/string handling.
+# ---------------------------------------------------------------------------
+
+
+def _clear_git_repository_env(monkeypatch):
+    for key in list(os.environ):
+        if key.startswith("MANTIS_GIT_REPOSITORY_"):
+            monkeypatch.delenv(key, raising=False)
+
+
+def test_git_config_from_env_parses_a_single_repository(monkeypatch):
+    _clear_git_repository_env(monkeypatch)
+    monkeypatch.setenv("MANTIS_GIT_REPOSITORY_INFRA_CORE", "/repos/infra-core")
+
+    cfg = GitRepositoriesConfig.from_env()
+
+    assert cfg.resolve_repository("infra_core") == "/repos/infra-core"
+
+
+def test_git_config_from_env_parses_multiple_repositories(monkeypatch):
+    _clear_git_repository_env(monkeypatch)
+    monkeypatch.setenv("MANTIS_GIT_REPOSITORY_INFRA_CORE", "/repos/infra-core")
+    monkeypatch.setenv("MANTIS_GIT_REPOSITORY_APP", "/repos/app")
+
+    cfg = GitRepositoriesConfig.from_env()
+
+    assert cfg.resolve_repository("infra_core") == "/repos/infra-core"
+    assert cfg.resolve_repository("app") == "/repos/app"
+
+
+def test_git_config_resolve_repository_is_case_insensitive(monkeypatch):
+    _clear_git_repository_env(monkeypatch)
+    monkeypatch.setenv("MANTIS_GIT_REPOSITORY_INFRA_CORE", "/repos/infra-core")
+
+    cfg = GitRepositoriesConfig.from_env()
+
+    assert cfg.resolve_repository("INFRA_CORE") == "/repos/infra-core"
+    assert cfg.resolve_repository("Infra_Core") == "/repos/infra-core"
+
+
+def test_git_config_resolve_repository_returns_none_for_unknown_alias(monkeypatch):
+    _clear_git_repository_env(monkeypatch)
+    monkeypatch.setenv("MANTIS_GIT_REPOSITORY_INFRA_CORE", "/repos/infra-core")
+
+    cfg = GitRepositoriesConfig.from_env()
+
+    assert cfg.resolve_repository("nonexistent") is None
+
+
+@pytest.mark.parametrize("alias", [123, None, [], {}])
+def test_git_config_resolve_repository_returns_none_for_a_non_string_alias(monkeypatch, alias):
+    _clear_git_repository_env(monkeypatch)
+    monkeypatch.setenv("MANTIS_GIT_REPOSITORY_INFRA_CORE", "/repos/infra-core")
+
+    cfg = GitRepositoriesConfig.from_env()
+
+    assert cfg.resolve_repository(alias) is None
+
+
+def test_git_config_from_env_ignores_unrelated_variables(monkeypatch):
+    _clear_git_repository_env(monkeypatch)
+    monkeypatch.setenv("MANTIS_GIT_REPOSITORY_INFRA_CORE", "/repos/infra-core")
+    monkeypatch.setenv("LITELLM_MODEL", "some-model")
+
+    cfg = GitRepositoriesConfig.from_env()
+
+    assert set(cfg.repositories.keys()) == {"infra_core"}
+
+
+def test_git_config_from_env_with_no_repositories_configured_is_empty(monkeypatch):
+    _clear_git_repository_env(monkeypatch)
+
+    cfg = GitRepositoriesConfig.from_env()
+
+    assert cfg.repositories == {}
+    assert cfg.resolve_repository("infra_core") is None
+
+
+def test_git_config_from_env_skips_an_empty_value(monkeypatch):
+    _clear_git_repository_env(monkeypatch)
+    monkeypatch.setenv("MANTIS_GIT_REPOSITORY_INFRA_CORE", "")
+
+    cfg = GitRepositoriesConfig.from_env()
+
+    assert cfg.repositories == {}
+
+
+def test_git_config_parsing_performs_no_filesystem_or_network_access(monkeypatch):
+    # Constructing/parsing GitRepositoriesConfig must never itself open
+    # a repository, stat a path, or touch the network -- proven by
+    # making filesystem/socket access fail loudly if ever attempted
+    # during from_env().
+    import socket
+
+    def _forbidden(*args, **kwargs):
+        raise AssertionError("GitRepositoriesConfig parsing must never touch the filesystem or network")
+
+    monkeypatch.setattr(socket.socket, "connect", _forbidden)
+    monkeypatch.setattr(os.path, "exists", _forbidden)
+    monkeypatch.setattr(os, "stat", _forbidden)
+    _clear_git_repository_env(monkeypatch)
+    # A path that does not exist on this machine -- proves existence is
+    # never checked at config-parse time either (see #17: "Repository
+    # validation/opening occurs only when the integration is used").
+    monkeypatch.setenv("MANTIS_GIT_REPOSITORY_INFRA_CORE", "/does/not/exist/anywhere")
+
+    cfg = GitRepositoriesConfig.from_env()
+
+    assert cfg.resolve_repository("infra_core") == "/does/not/exist/anywhere"
