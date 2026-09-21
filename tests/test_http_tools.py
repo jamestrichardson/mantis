@@ -132,6 +132,8 @@ def test_invalid_path_causes_no_network_request(monkeypatch):
     http_probe("grafana", "/\r\nHost: evil.example", "GET", _config=config)
     http_probe("grafana", "/../admin", "GET", _config=config)
     http_probe("grafana", "/%2e%2e/admin", "GET", _config=config)
+    http_probe("grafana", "/%2e%2e%2fadmin", "GET", _config=config)
+    http_probe("grafana", "/%2e%2e%5cadmin", "GET", _config=config)
 
     assert called["build_client"] is False
 
@@ -271,6 +273,25 @@ def test_path_traversal_cannot_escape_a_configured_base_path_end_to_end():
     ) as server:
         config = _config(realtarget=_target(alias="realtarget", scheme="http", host="127.0.0.1", port=server.port, base_path="/grafana"))
         result = http_probe("realtarget", "/../admin", "GET", _config=config)
+
+    assert result["error"]["type"] == "invalid_input"
+    assert result["status_code"] is None
+
+
+def test_percent_encoded_separator_traversal_cannot_escape_a_configured_base_path_end_to_end():
+    # PR #119 re-review: the encoded-path-separator bypass
+    # ("/%2e%2e%2fadmin") of the literal-dot-segment check -- rejected
+    # outright (any '%' is invalid input) before any request, so the
+    # "/admin" route is never hit even though httpx itself would have
+    # preserved the encoded separator verbatim on the wire.
+    with HTTPTestServer(
+        {
+            "/grafana/health": lambda h: send_simple(h, 200, body=b"grafana-ok"),
+            "/admin": lambda h: send_simple(h, 200, body=b"admin-secret"),
+        }
+    ) as server:
+        config = _config(realtarget=_target(alias="realtarget", scheme="http", host="127.0.0.1", port=server.port, base_path="/grafana"))
+        result = http_probe("realtarget", "/%2e%2e%2fadmin", "GET", _config=config)
 
     assert result["error"]["type"] == "invalid_input"
     assert result["status_code"] is None

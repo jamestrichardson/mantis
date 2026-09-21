@@ -115,6 +115,15 @@ allowlist-not-blocklist approach
   this first implementation rather than validating/bounding them.
 - A fragment (`#`) — fragments are never sent over the wire anyway;
   rejecting one outright here is simpler than silently stripping it.
+- A literal `.`/`..` path-traversal segment (any `/`-separated segment
+  equal to exactly `.` or `..`) — see "Base-path immutability" below.
+- **Any `%` character at all.** `path` is a plain, already-decoded
+  logical path, never a raw URL component, so percent-encoding has no
+  legitimate use here. Rejecting it outright — rather than trying to
+  decode and recognize specific encoded forms — closes every encoding
+  scheme a downstream proxy or origin server might apply on its own,
+  without this tool needing to model any of them (see "Base-path
+  immutability").
 
 Concretely, none of these ever reach `httpx` or cause any network
 activity at all:
@@ -123,6 +132,8 @@ activity at all:
 https://evil.example/          -- absolute URL
 //evil.example/                -- protocol-relative host escape
 /\r\nHost: evil.example         -- CRLF header injection attempt
+/../admin                      -- literal path traversal
+/%2e%2e%2fadmin                -- percent-encoded traversal + encoded separator
 ```
 
 See `tests/test_http_tools.py::test_invalid_path_causes_no_network_request`
@@ -136,6 +147,34 @@ reinterpret a leading `/` as origin-absolute and silently drop the
 base path. `base_path` never ends in `/` (normalized at config-parse
 time) and `path` always starts with exactly one `/`, so concatenation
 can never produce a double slash or an origin escape.
+
+### Base-path immutability
+
+A configured `base_path` is meant to be a genuinely immutable prefix —
+`path` is *appended to* it, never able to replace or escape it. Without
+dot-segment rejection, a caller-supplied `"/../admin"` concatenated
+onto a configured `base_path` of `"/grafana"` and handed to
+`httpx.URL`'s own path normalization would actually request `/admin`,
+silently escaping the configured prefix even though `base_path` itself
+was never touched (`httpx.URL` normalizes literal `..` segments away on
+construction — this is exactly what `_has_dot_segment` closes).
+
+Percent-encoding reopens the same escape through a different door:
+`httpx` does **not** decode `%2f`/`%5c` itself — it preserves an
+encoded separator verbatim on the wire — but a *downstream* component
+(a reverse proxy, framework, or the origin server itself) decoding
+`%2e%2e%2f` before its own path normalization could reconstruct
+`/../admin` from `/grafana/%2e%2e%2fadmin` after Mantis has already
+sent it. Rejecting every `%` character closes this regardless of what
+any downstream component would do with it, without `http_probe` having
+to model every proxy/server's decoding behavior. See
+`tests/test_http.py::test_validate_http_path_rejects_traversal_that_would_escape_a_configured_base_path`/
+`test_validate_http_path_rejects_encoded_separator_traversal_that_httpx_itself_preserves`
+and `tests/test_http_tools.py::test_path_traversal_cannot_escape_a_configured_base_path_end_to_end`/
+`test_percent_encoded_separator_traversal_cannot_escape_a_configured_base_path_end_to_end`
+for the deterministic proofs (a real local server exposing both the
+configured base path and a decoy `/admin` route, confirming the latter
+is never reached).
 
 ## Redirects
 

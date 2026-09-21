@@ -92,16 +92,25 @@ def test_validate_http_path_accepts_valid_paths(path):
         ("/" + "x" * 600, "too long"),
         (123, "not a string"),
         (None, "not a string"),
-        # PR #119 review: dot-segment path traversal, literal and
-        # percent-encoded -- must never let a caller-supplied path
-        # escape the configured target's base_path once concatenated
-        # and normalized by httpx.URL.
+        # PR #119 review: literal dot-segment path traversal -- must
+        # never let a caller-supplied path escape the configured
+        # target's base_path once concatenated and normalized by
+        # httpx.URL.
         ("/../admin", "parent traversal"),
         ("/foo/../../admin", "multi-level parent traversal"),
         ("/./admin", "current-dir segment"),
-        ("/%2e%2e/admin", "percent-encoded parent traversal, lowercase"),
-        ("/%2E%2E/admin", "percent-encoded parent traversal, uppercase"),
+        # PR #119 re-review: any '%' is rejected outright, which also
+        # closes the encoded-path-separator bypass of the literal-dot
+        # check above (%2f/%5c decode to a path separator, not caught
+        # by splitting on a literal '/', only by rejecting '%' itself).
+        ("/%2e%2e/admin", "percent-encoded parent traversal, lowercase dot"),
+        ("/%2E%2E/admin", "percent-encoded parent traversal, uppercase dot"),
         ("/%2e/admin", "percent-encoded current-dir segment"),
+        ("/%2e%2e%2fadmin", "percent-encoded traversal with encoded separator, lowercase"),
+        ("/%2E%2E%2Fadmin", "percent-encoded traversal with encoded separator, uppercase"),
+        ("/foo/%2e%2e%2fadmin", "percent-encoded traversal with encoded separator, nested"),
+        ("/%2e%2e%5cadmin", "percent-encoded traversal with encoded backslash separator"),
+        ("/api/health%20now", "otherwise-benign percent-encoding is still rejected"),
     ],
 )
 def test_validate_http_path_rejects_invalid_paths(path, reason):
@@ -121,6 +130,24 @@ def test_validate_http_path_rejects_traversal_that_would_escape_a_configured_bas
     full_path = "/grafana" + "/../admin"
     escaped_url = httpx.URL(scheme="https", host="host.example", path=full_path)
     assert str(escaped_url) == "https://host.example/admin"
+
+
+def test_validate_http_path_rejects_encoded_separator_traversal_that_httpx_itself_preserves():
+    # PR #119 re-review: httpx does NOT decode %2f/%5c itself (unlike
+    # the literal ".." case above, which httpx.URL normalizes away on
+    # its own) -- it preserves the encoded separator on the wire
+    # verbatim. The danger is a *downstream* component (reverse proxy,
+    # framework, origin server) decoding %2f/%5c before its own path
+    # normalization, reconstructing "/../admin" from
+    # "/grafana/%2e%2e%2fadmin" after Mantis has already sent it.
+    # Rejecting any '%' closes this before the request is ever sent,
+    # regardless of what any downstream component would do with it.
+    with pytest.raises(HTTPPathValidationError):
+        validate_http_path("/%2e%2e%2fadmin")
+
+    full_path = "/grafana" + "/%2e%2e%2fadmin"
+    preserved_url = httpx.URL(scheme="https", host="host.example", path=full_path)
+    assert str(preserved_url) == "https://host.example/grafana/%2e%2e%2fadmin"
 
 
 # ---------------------------------------------------------------------------

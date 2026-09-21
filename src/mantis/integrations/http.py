@@ -25,7 +25,6 @@ proxy trust, and cookie jar all **explicitly disabled** — see
 
 from __future__ import annotations
 
-import re
 import time
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -102,20 +101,13 @@ class HTTPMethodValidationError(ValueError):
     :data:`SUPPORTED_HTTP_METHODS`."""
 
 
-_PERCENT_ENCODED_DOT_RE = re.compile("%2e", re.IGNORECASE)
-
-
 def _has_dot_segment(path: str) -> bool:
     """True if any ``/``-separated segment of ``path`` is a literal
-    ``.``/``..`` traversal segment, including one spelled with a
-    percent-encoded dot (``%2e``/``%2E``) — deliberately conservative:
-    this only normalizes the specific ``%2e`` -> ``.`` encoding for the
-    purpose of *detecting* a dot segment, never for the path actually
-    sent on the wire (see :func:`validate_http_path`, which rejects the
-    input outright rather than attempting to model every proxy/server
-    percent-decoding behavior)."""
-    normalized = _PERCENT_ENCODED_DOT_RE.sub(".", path)
-    return any(segment in (".", "..") for segment in normalized.split("/"))
+    ``.``/``..`` traversal segment. Only meaningful for *literal* dots —
+    :func:`validate_http_path` rejects every ``%`` character outright
+    (see its docstring), so this never needs to reason about
+    percent-decoding at all."""
+    return any(segment in (".", "..") for segment in path.split("/"))
 
 
 def validate_http_method(method: object) -> str:
@@ -150,15 +142,25 @@ def validate_http_path(path: object) -> str:
     characters (including CR/LF — a path cannot be used to smuggle
     extra header lines into the request), a backslash (some HTTP
     stacks/proxies treat ``\\`` as a path separator equivalent to
-    ``/``), and a ``.``/``..`` path-traversal segment (including one
-    spelled with a percent-encoded dot, ``%2e``/``%2E`` — see
-    :func:`_has_dot_segment`). This last check is what keeps the
-    configured target's ``base_path`` genuinely immutable: without it,
-    a caller-supplied ``path`` like ``"/../admin"`` would, once
+    ``/``), a literal ``.``/``..`` path-traversal segment (see
+    :func:`_has_dot_segment`), and **any** ``%`` character at all.
+
+    These last two checks are what keep the configured target's
+    ``base_path`` genuinely immutable: without the dot-segment check, a
+    caller-supplied ``path`` like ``"/../admin"`` would, once
     concatenated onto a configured ``base_path`` of ``"/grafana"`` and
     handed to ``httpx.URL``'s own path normalization, actually request
     ``/admin`` — escaping the origin's configured prefix even though
-    ``base_path`` itself was never touched.
+    ``base_path`` itself was never touched. Rejecting every ``%``
+    outright — rather than trying to decode and recognize specific
+    encoded forms (``%2e``, or an encoded path separator like ``%2f``/
+    ``%5c`` that reassembles into ``..`` only *after* some downstream
+    proxy or server decodes it, never at this layer) — closes the same
+    escape for every encoding scheme a downstream component might
+    apply, without this tool needing to model any of them. #110's
+    "path" was never meant to carry percent-encoding in the first
+    place (it is a plain, already-decoded logical path, not a raw URL
+    component), so this has no legitimate use case to preserve.
     """
     if not isinstance(path, str):
         raise HTTPPathValidationError(f"path must be a string, got {type(path).__name__}")
@@ -186,6 +188,13 @@ def validate_http_path(path: object) -> str:
         raise HTTPPathValidationError("path must not contain a backslash")
     if _has_dot_segment(path):
         raise HTTPPathValidationError("path must not contain a '.' or '..' path-traversal segment")
+    if "%" in path:
+        raise HTTPPathValidationError(
+            "path must not contain '%' -- percent-encoding of any kind is rejected outright, "
+            "since a downstream proxy/server decoding it (e.g. %2f/%5c reassembling into a "
+            "path separator, or %2e into a dot) could otherwise reconstruct a path-traversal "
+            "segment this layer never sees literally"
+        )
     return path
 
 
