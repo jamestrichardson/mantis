@@ -15,6 +15,8 @@ from mantis.eval.scoring import evaluate_result
 _FULL_INVESTIGATION = "system-troubleshooter-full-investigation"
 _RETRIEVAL_FAILURE = "system-troubleshooter-retrieval-failure"
 _CONTRADICTORY_SIGNALS = "system-troubleshooter-contradictory-signals"
+_GIT_CORRELATION = "system-troubleshooter-git-correlation"
+_ALL_SCENARIOS = (_FULL_INVESTIGATION, _RETRIEVAL_FAILURE, _CONTRADICTORY_SIGNALS, _GIT_CORRELATION)
 
 
 def _load():
@@ -81,7 +83,7 @@ def _score(scenario_name: str, *, loki_outcome: str = "ok"):
     return lambda final_answer: evaluate_result(scenario.expectations, build(final_answer))
 
 
-def test_all_three_scenarios_are_registered_with_the_real_agent_wiring():
+def test_all_scenarios_are_registered_with_the_real_agent_wiring():
     _load()
     from mantis.agents.system_troubleshooter import (
         ALLOWED_TOOLS,
@@ -90,7 +92,7 @@ def test_all_three_scenarios_are_registered_with_the_real_agent_wiring():
         TOOL_CALL_BUDGET,
     )
 
-    for name in (_FULL_INVESTIGATION, _RETRIEVAL_FAILURE, _CONTRADICTORY_SIGNALS):
+    for name in _ALL_SCENARIOS:
         scenario = default_scenarios.get(name)
         assert scenario.agent_tools == ALLOWED_TOOLS
         assert scenario.system_prompt == SYSTEM_PROMPT
@@ -100,14 +102,14 @@ def test_all_three_scenarios_are_registered_with_the_real_agent_wiring():
 
 
 def test_every_scenario_registry_resolves_the_full_real_allowlist():
-    # Regression test: ALLOWED_TOOLS names all six real tools, so every
-    # scenario's fixture registry must provide all six (even the two a
-    # given scenario's golden path doesn't require calling) or
-    # AgentRuntime.__post_init__ raises ToolNotFoundError.
+    # Regression test: ALLOWED_TOOLS names all seven real tools, so
+    # every scenario's fixture registry must provide all seven (even
+    # the ones a given scenario's golden path doesn't require calling)
+    # or AgentRuntime.__post_init__ raises ToolNotFoundError.
     _load()
     from mantis.agents.system_troubleshooter import ALLOWED_TOOLS
 
-    for name in (_FULL_INVESTIGATION, _RETRIEVAL_FAILURE, _CONTRADICTORY_SIGNALS):
+    for name in _ALL_SCENARIOS:
         scenario = default_scenarios.get(name)
         registry = scenario.build_registry()
         resolved = {tool.name for tool in registry.subset(scenario.agent_tools)}
@@ -328,3 +330,136 @@ def test_contradictory_signals_bad_answer_fails_when_it_ignores_the_log_discrepa
 
     assert evaluation.passed is False
     assert "cites_the_later_log_error" in evaluation.hard_failures
+
+
+# ---------------------------------------------------------------------------
+# system-troubleshooter-git-correlation (#17)
+# ---------------------------------------------------------------------------
+
+
+def _git_args() -> dict:
+    return {
+        "repository_alias": "infra_core",
+        "start": "2026-09-14T00:00:00+00:00",
+        "end": "2026-09-16T04:00:00+00:00",
+    }
+
+
+def _score_git_correlation():
+    """Same shape as ``_score``, plus the git_recent_changes call this
+    scenario specifically requires -- kept as its own helper rather than
+    complicating ``_score``'s signature for every other scenario."""
+    _load()
+    scenario = default_scenarios.get(_GIT_CORRELATION)
+    registry = scenario.build_registry()
+
+    job_result = registry.get("awx_get_job_failure").handler(**_job_args())
+    tcp_result = registry.get("check_tcp_connectivity").handler(**_tcp_args())
+    prom_result = registry.get("prometheus_query_range").handler(**_prom_range_args())
+    loki_result = registry.get("loki_query").handler(**_loki_args())
+    git_result = registry.get("git_recent_changes").handler(**_git_args())
+
+    tool_calls = [
+        ToolCallSummary(1, "awx_get_job_failure", _job_args(), "ok", "", job_result),
+        ToolCallSummary(2, "check_tcp_connectivity", _tcp_args(), "ok", "", tcp_result),
+        ToolCallSummary(3, "prometheus_query_range", _prom_range_args(), "ok", "", prom_result),
+        ToolCallSummary(4, "loki_query", _loki_args(), "ok", "", loki_result),
+        ToolCallSummary(5, "git_recent_changes", _git_args(), "ok", "", git_result),
+    ]
+
+    def build(final_answer: str) -> EvalResult:
+        return EvalResult(
+            scenario=scenario.name,
+            scenario_version=scenario.version,
+            model="test",
+            started_at="t0",
+            finished_at="t1",
+            elapsed_seconds=1.0,
+            outcome="ok",
+            final_answer=final_answer,
+            tool_calls=tool_calls,
+            iterations=len(tool_calls) + 1,
+        )
+
+    return lambda final_answer: evaluate_result(scenario.expectations, build(final_answer))
+
+
+def test_git_correlation_good_answer_passes():
+    score = _score_git_correlation()
+    evaluation = score(
+        "AWX previously observed job 7301 fail reaching ferros-c01 on port 22 "
+        "(no route to host) at that time. Prometheus monitoring data for "
+        "ferros-c01:9100 shows the up metric recovered to 1, and a current "
+        "TCP connectivity check now succeeds. Logs show an sshd "
+        "authentication timeout and a kernel link-down/link-up pair around "
+        "the same window.\n\n"
+        "Notably, a commit ('Adjust firewall allowlist for ferros network "
+        "segment', modifying network/firewall_rules.yaml) was committed "
+        "shortly before the incident's reference time. This is a temporal "
+        "correlation worth flagging -- it is possible this change is "
+        "related, but there is no evidence it was deployed, and no evidence "
+        "it is responsible for the incident. Check whether the firewall "
+        "commit was actually rolled out to production around the incident "
+        "window as a next step.",
+    )
+
+    assert evaluation.passed is True
+    assert evaluation.hard_failures == []
+
+
+def test_git_correlation_bad_answer_fails_when_deployment_is_asserted_without_hedging():
+    score = _score_git_correlation()
+    evaluation = score(
+        "AWX previously observed job 7301 fail reaching ferros-c01 on port 22. "
+        "A current TCP check now succeeds, Prometheus shows recovery, and "
+        "logs show a timeout before authentication. The firewall allowlist "
+        "commit was deployed right before the incident.",
+    )
+
+    assert evaluation.passed is False
+    assert "does_not_assert_deployment_without_hedging" in evaluation.hard_failures
+
+
+def test_git_correlation_bad_answer_fails_when_causation_is_asserted():
+    score = _score_git_correlation()
+    evaluation = score(
+        "AWX previously observed job 7301 fail reaching ferros-c01 on port 22. "
+        "A current TCP check now succeeds, Prometheus shows recovery, and "
+        "logs show a timeout before authentication. The firewall allowlist "
+        "commit definitely caused the incident.",
+    )
+
+    assert evaluation.passed is False
+    assert "unsupported_root_cause" in evaluation.hard_failures
+
+
+def test_git_correlation_bad_answer_fails_when_git_tool_was_never_called():
+    _load()
+    scenario = default_scenarios.get(_GIT_CORRELATION)
+    registry = scenario.build_registry()
+    job_result = registry.get("awx_get_job_failure").handler(**_job_args())
+    tcp_result = registry.get("check_tcp_connectivity").handler(**_tcp_args())
+    prom_result = registry.get("prometheus_query_range").handler(**_prom_range_args())
+    loki_result = registry.get("loki_query").handler(**_loki_args())
+    tool_calls = [
+        ToolCallSummary(1, "awx_get_job_failure", _job_args(), "ok", "", job_result),
+        ToolCallSummary(2, "check_tcp_connectivity", _tcp_args(), "ok", "", tcp_result),
+        ToolCallSummary(3, "prometheus_query_range", _prom_range_args(), "ok", "", prom_result),
+        ToolCallSummary(4, "loki_query", _loki_args(), "ok", "", loki_result),
+    ]
+    result = EvalResult(
+        scenario=scenario.name,
+        scenario_version=scenario.version,
+        model="test",
+        started_at="t0",
+        finished_at="t1",
+        elapsed_seconds=1.0,
+        outcome="ok",
+        final_answer="AWX previously observed job 7301 fail reaching ferros-c01 on port 22.",
+        tool_calls=tool_calls,
+        iterations=5,
+    )
+    evaluation = evaluate_result(scenario.expectations, result)
+
+    assert evaluation.passed is False
+    assert "required_tool_call:git_recent_changes" in evaluation.hard_failures
