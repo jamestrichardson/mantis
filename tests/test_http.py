@@ -9,6 +9,7 @@ mock of ``httpx`` itself, and never live Internet access.
 from __future__ import annotations
 
 import socket
+import ssl
 import time
 
 import httpx
@@ -27,7 +28,7 @@ from mantis.integrations.http import (
 from mantis.reliability import Deadline, IntegrationErrorKind
 
 from _http_fixtures import HTTPTestServer, SilentTCPServer, send_simple
-from _tls_fixtures import make_leaf
+from _tls_fixtures import make_leaf, write_cert_key_files
 
 
 def _probe(host, port, path="/", method="GET", **kwargs):
@@ -388,18 +389,9 @@ def test_connect_failure_raises_http_probe_error():
 
 def test_tls_verify_failure_raises_http_probe_error():
     cert, key = make_leaf("selfsigned.example.com", san_dns=["selfsigned.example.com"])
-    tls_ctx = __import__("ssl").SSLContext(__import__("ssl").PROTOCOL_TLS_SERVER)
-    import tempfile
-
-    from cryptography.hazmat.primitives import serialization
-
-    certfile = tempfile.NamedTemporaryFile(delete=False, suffix=".pem")
-    certfile.write(cert.public_bytes(serialization.Encoding.PEM))
-    certfile.close()
-    keyfile = tempfile.NamedTemporaryFile(delete=False, suffix=".pem")
-    keyfile.write(key.private_bytes(serialization.Encoding.PEM, serialization.PrivateFormat.TraditionalOpenSSL, serialization.NoEncryption()))
-    keyfile.close()
-    tls_ctx.load_cert_chain(certfile.name, keyfile.name)
+    certfile_path, keyfile_path = write_cert_key_files(cert, key)
+    tls_ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+    tls_ctx.load_cert_chain(certfile_path, keyfile_path)
 
     with HTTPTestServer({"/x": lambda h: send_simple(h, 200)}, tls_context=tls_ctx) as server:
         with pytest.raises(HTTPProbeError) as exc_info:
@@ -418,19 +410,9 @@ def test_tls_verify_failure_raises_http_probe_error():
 
 def test_verify_ssl_false_allows_self_signed_target():
     cert, key = make_leaf("selfsigned.example.com", san_dns=["selfsigned.example.com"])
-    import ssl
-    import tempfile
-
-    from cryptography.hazmat.primitives import serialization
-
+    certfile_path, keyfile_path = write_cert_key_files(cert, key)
     tls_ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
-    certfile = tempfile.NamedTemporaryFile(delete=False, suffix=".pem")
-    certfile.write(cert.public_bytes(serialization.Encoding.PEM))
-    certfile.close()
-    keyfile = tempfile.NamedTemporaryFile(delete=False, suffix=".pem")
-    keyfile.write(key.private_bytes(serialization.Encoding.PEM, serialization.PrivateFormat.TraditionalOpenSSL, serialization.NoEncryption()))
-    keyfile.close()
-    tls_ctx.load_cert_chain(certfile.name, keyfile.name)
+    tls_ctx.load_cert_chain(certfile_path, keyfile_path)
 
     with HTTPTestServer({"/x": lambda h: send_simple(h, 200, body=b"ok")}, tls_context=tls_ctx) as server:
         result = _probe(

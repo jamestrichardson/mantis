@@ -1,5 +1,6 @@
-"""Shared TLS certificate/server fixture helpers for tests/test_tls.py
-and tests/test_tls_tools.py (#111).
+"""Shared TLS certificate/server fixture helpers for tests/test_tls.py,
+tests/test_tls_tools.py (#111), and tests/test_http.py's TLS-wrapped
+HTTP scenarios (#110).
 
 Generates certificates in memory with the ``cryptography`` library
 (never a wall-clock-sensitive real-world certificate) and starts a
@@ -9,12 +10,22 @@ the ``ssl`` module.
 
 Not a test file itself (no ``test_`` functions) — imported by the real
 test modules.
+
+Every temporary PEM file created here (CA files for
+``ssl.SSLContext.load_verify_locations``, cert/key files for
+``ssl.SSLContext.load_cert_chain`` — both stdlib APIs that require a
+filesystem path, not in-memory bytes) is tracked and removed by
+:func:`cleanup_temp_files`, called once at test-session end by
+``tests/conftest.py``'s autouse fixture — never left behind across
+runs (Copilot review: "Clean up temporary CA PEM files" /
+"Delete temporary certificate and key files").
 """
 
 from __future__ import annotations
 
 import datetime
 import ipaddress
+import os
 import socket
 import ssl
 import tempfile
@@ -24,6 +35,33 @@ from cryptography import x509
 from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import rsa
 from cryptography.x509.oid import NameOID
+
+_TEMP_FILE_PATHS: list[str] = []
+
+
+def _write_pem_tempfile(data: bytes) -> str:
+    """Write ``data`` to a new ``delete=False`` temporary file (the
+    stdlib ``ssl`` APIs above need a real path) and track it for
+    cleanup — see :func:`cleanup_temp_files`."""
+    handle = tempfile.NamedTemporaryFile(delete=False, suffix=".pem")
+    handle.write(data)
+    handle.close()
+    _TEMP_FILE_PATHS.append(handle.name)
+    return handle.name
+
+
+def cleanup_temp_files() -> None:
+    """Remove every temporary PEM file created by this module so far.
+    Called once, at test-session end, by ``tests/conftest.py`` — never
+    called mid-session, since a file's path may still be in active use
+    by a test (e.g. as a configured ``ca_file``) for the rest of the
+    run."""
+    for path in _TEMP_FILE_PATHS:
+        try:
+            os.unlink(path)
+        except OSError:
+            pass
+    _TEMP_FILE_PATHS.clear()
 
 
 def make_ca() -> tuple["x509.Certificate", "rsa.RSAPrivateKey"]:
@@ -45,10 +83,7 @@ def make_ca() -> tuple["x509.Certificate", "rsa.RSAPrivateKey"]:
 
 
 def write_ca_file(ca_cert: "x509.Certificate") -> str:
-    ca_file = tempfile.NamedTemporaryFile(delete=False, suffix=".pem")
-    ca_file.write(ca_cert.public_bytes(serialization.Encoding.PEM))
-    ca_file.close()
-    return ca_file.name
+    return _write_pem_tempfile(ca_cert.public_bytes(serialization.Encoding.PEM))
 
 
 def make_leaf(
@@ -94,27 +129,32 @@ def make_leaf(
     return cert, key
 
 
+def write_cert_key_files(cert, key, *, extra_certs=None) -> tuple[str, str]:
+    """Write a cert/key pair to tracked temporary PEM files, for the
+    ``ssl.SSLContext.load_cert_chain()`` stdlib API, which requires
+    file paths rather than in-memory bytes. Returns
+    ``(certfile_path, keyfile_path)``. ``extra_certs`` are appended
+    into the same cert-chain file (e.g. to build a server certificate
+    plus intermediate)."""
+    cert_pem = cert.public_bytes(serialization.Encoding.PEM)
+    for extra in extra_certs or []:
+        cert_pem += extra.public_bytes(serialization.Encoding.PEM)
+    key_pem = key.private_bytes(
+        serialization.Encoding.PEM, serialization.PrivateFormat.TraditionalOpenSSL, serialization.NoEncryption()
+    )
+    return _write_pem_tempfile(cert_pem), _write_pem_tempfile(key_pem)
+
+
 class TLSTestServer:
     """A real local TLS server on an ephemeral port, serving one
     configured certificate/key pair to every connection. Use as a
     context manager or call :meth:`close` explicitly."""
 
     def __init__(self, cert, key, *, extra_certs=None) -> None:
-        cert_pem = cert.public_bytes(serialization.Encoding.PEM)
-        for extra in extra_certs or []:
-            cert_pem += extra.public_bytes(serialization.Encoding.PEM)
-        key_pem = key.private_bytes(
-            serialization.Encoding.PEM, serialization.PrivateFormat.TraditionalOpenSSL, serialization.NoEncryption()
-        )
-        certfile = tempfile.NamedTemporaryFile(delete=False, suffix=".pem")
-        certfile.write(cert_pem)
-        certfile.close()
-        keyfile = tempfile.NamedTemporaryFile(delete=False, suffix=".pem")
-        keyfile.write(key_pem)
-        keyfile.close()
+        certfile_path, keyfile_path = write_cert_key_files(cert, key, extra_certs=extra_certs)
 
         self._ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
-        self._ctx.load_cert_chain(certfile.name, keyfile.name)
+        self._ctx.load_cert_chain(certfile_path, keyfile_path)
 
         self._sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         self._sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
