@@ -475,6 +475,12 @@ it resolves to a stale/wrong address?"). A future correlation step or
 evaluation scenario combining the two is a natural fit, but is not
 implemented as part of #109 (see "Follow-up").
 
+`dns_lookup` is also the first layer of the DNS → TCP → TLS → HTTP
+troubleshooting stack described in
+[docs/http-probe.md#the-troubleshooting-stack](http-probe.md#the-troubleshooting-stack),
+which [`tls_certificate_inspect`](tls-certificate-inspection.md) (#111)
+and [`http_probe`](http-probe.md) (#110) extend.
+
 ## Follow-up
 
 No follow-up issue is required to satisfy #109 as scoped — every

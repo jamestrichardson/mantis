@@ -292,6 +292,39 @@ multi-server failover, CNAME-chain bounding, and security rationale for
 alias-only resolver selection). Query/failover mechanics live in
 `mantis/integrations/dns.py`; semantic shaping in `mantis/tools/dns.py`.
 
+## HTTP tool behavior
+
+### `http_probe` (#110): bounded HTTP(S) evidence from a chosen origin
+
+`http_probe(target_alias: str, path: str = "/", method: str = "GET")`
+sends a single bounded GET/HEAD request against exactly one
+server-side-configured HTTP(S) target, answering "what does this
+origin's endpoint currently return?" — deliberately not a general web
+fetch. See [docs/http-probe.md](http-probe.md) for the full design
+(target-profile configuration, why proxy trust and redirect-following
+are disabled, the header/body/path bounds, why every status code
+100-599 is normal successful evidence rather than an error, and
+security rationale for alias-only target selection). Request/streaming
+mechanics live in `mantis/integrations/http.py`; semantic shaping in
+`mantis/tools/http.py`.
+
+## TLS tool behavior
+
+### `tls_certificate_inspect` (#111): certificate metadata independent of verification
+
+`tls_certificate_inspect(target_alias: str)` inspects the TLS
+certificate presented at exactly one server-side-configured direct TLS
+endpoint, deliberately independent of whether it would pass
+verification — a self-signed, expired, not-yet-valid, or
+hostname-mismatched certificate still returns full metadata, never
+collapsed into "no certificate available." See
+[docs/tls-certificate-inspection.md](tls-certificate-inspection.md) for
+the full design (the "inspect != verify" requirement, the two-handshake
+mechanism, why chain trust/hostname match/time validity stay
+independent dimensions, and the SNI/trust-store posture). Handshake/
+certificate-parsing mechanics live in `mantis/integrations/tls.py`;
+semantic shaping in `mantis/tools/tls.py`.
+
 ## Prometheus tool behavior
 
 ### `prometheus_query` / `prometheus_query_range` (#9): time-series evidence

@@ -1,0 +1,464 @@
+"""Tests for mantis.integrations.http: path/method validation and the
+bounded, streaming HTTP request mechanics (#110).
+
+Uses a real local HTTP(S) server on an ephemeral port
+(tests/_http_fixtures.py) for every network-observing test — never a
+mock of ``httpx`` itself, and never live Internet access.
+"""
+
+from __future__ import annotations
+
+import socket
+import ssl
+import time
+
+import httpx
+import pytest
+
+from mantis.integrations.http import (
+    MAX_BODY_BYTES_READ,
+    MAX_HEADER_VALUE_CHARS,
+    HTTPMethodValidationError,
+    HTTPPathValidationError,
+    HTTPProbeError,
+    probe_http,
+    validate_http_method,
+    validate_http_path,
+)
+from mantis.reliability import Deadline, IntegrationErrorKind
+
+from _http_fixtures import HTTPTestServer, SilentTCPServer, send_simple
+from _tls_fixtures import make_leaf, write_cert_key_files
+
+
+def _probe(host, port, path="/", method="GET", **kwargs):
+    kwargs.setdefault("connect_timeout_seconds", 3.0)
+    kwargs.setdefault("read_timeout_seconds", 3.0)
+    return probe_http(
+        scheme=kwargs.pop("scheme", "http"),
+        host=host,
+        port=port,
+        base_path=kwargs.pop("base_path", ""),
+        verify_ssl=kwargs.pop("verify_ssl", True),
+        path=path,
+        method=method,
+        **kwargs,
+    )
+
+
+# ---------------------------------------------------------------------------
+# validate_http_method
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("method", ["GET", "HEAD", "get", "head"])
+def test_validate_http_method_accepts_supported_methods(method):
+    assert validate_http_method(method) == method.upper()
+
+
+@pytest.mark.parametrize("method", ["POST", "PUT", "PATCH", "DELETE", "CONNECT", "OPTIONS", "TRACE", "", 123, None])
+def test_validate_http_method_rejects_unsupported_methods(method):
+    with pytest.raises(HTTPMethodValidationError):
+        validate_http_method(method)
+
+
+# ---------------------------------------------------------------------------
+# validate_http_path
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "path", ["/", "/api/health", "/a/b/c", "/x" * 100, "/foo..bar", "/foo.bar/baz", "/v1.2/status"]
+)
+def test_validate_http_path_accepts_valid_paths(path):
+    assert validate_http_path(path) == path
+
+
+@pytest.mark.parametrize(
+    "path,reason",
+    [
+        ("", "empty"),
+        ("no-leading-slash", "no leading slash"),
+        ("https://evil.example/", "absolute URL"),
+        ("http://evil.example/", "absolute URL"),
+        ("//evil.example/", "protocol-relative host escape"),
+        ("/\r\nHost: evil.example", "CRLF injection"),
+        ("/\nHost: evil.example", "LF injection"),
+        ("/path with space", "whitespace"),
+        ("/path\x00null", "control character"),
+        ("/user@host/path", "embedded credentials"),
+        ("/path?query=1", "query string"),
+        ("/path#fragment", "fragment"),
+        ("/path\\backslash", "backslash"),
+        ("/" + "x" * 600, "too long"),
+        (123, "not a string"),
+        (None, "not a string"),
+        # PR #119 review: literal dot-segment path traversal -- must
+        # never let a caller-supplied path escape the configured
+        # target's base_path once concatenated and normalized by
+        # httpx.URL.
+        ("/../admin", "parent traversal"),
+        ("/foo/../../admin", "multi-level parent traversal"),
+        ("/./admin", "current-dir segment"),
+        # PR #119 re-review: any '%' is rejected outright, which also
+        # closes the encoded-path-separator bypass of the literal-dot
+        # check above (%2f/%5c decode to a path separator, not caught
+        # by splitting on a literal '/', only by rejecting '%' itself).
+        ("/%2e%2e/admin", "percent-encoded parent traversal, lowercase dot"),
+        ("/%2E%2E/admin", "percent-encoded parent traversal, uppercase dot"),
+        ("/%2e/admin", "percent-encoded current-dir segment"),
+        ("/%2e%2e%2fadmin", "percent-encoded traversal with encoded separator, lowercase"),
+        ("/%2E%2E%2Fadmin", "percent-encoded traversal with encoded separator, uppercase"),
+        ("/foo/%2e%2e%2fadmin", "percent-encoded traversal with encoded separator, nested"),
+        ("/%2e%2e%5cadmin", "percent-encoded traversal with encoded backslash separator"),
+        ("/api/health%20now", "otherwise-benign percent-encoding is still rejected"),
+    ],
+)
+def test_validate_http_path_rejects_invalid_paths(path, reason):
+    with pytest.raises(HTTPPathValidationError):
+        validate_http_path(path)
+
+
+def test_validate_http_path_rejects_traversal_that_would_escape_a_configured_base_path():
+    # The concrete scenario from the review: without this check,
+    # concatenating a validated-looking "/../admin" onto a configured
+    # base_path of "/grafana" and handing the result to httpx.URL
+    # actually requests /admin, escaping the configured prefix even
+    # though base_path itself was never touched.
+    with pytest.raises(HTTPPathValidationError):
+        validate_http_path("/../admin")
+
+    full_path = "/grafana" + "/../admin"
+    escaped_url = httpx.URL(scheme="https", host="host.example", path=full_path)
+    assert str(escaped_url) == "https://host.example/admin"
+
+
+def test_validate_http_path_rejects_encoded_separator_traversal_that_httpx_itself_preserves():
+    # PR #119 re-review: httpx does NOT decode %2f/%5c itself (unlike
+    # the literal ".." case above, which httpx.URL normalizes away on
+    # its own) -- it preserves the encoded separator on the wire
+    # verbatim. The danger is a *downstream* component (reverse proxy,
+    # framework, origin server) decoding %2f/%5c before its own path
+    # normalization, reconstructing "/../admin" from
+    # "/grafana/%2e%2e%2fadmin" after Mantis has already sent it.
+    # Rejecting any '%' closes this before the request is ever sent,
+    # regardless of what any downstream component would do with it.
+    with pytest.raises(HTTPPathValidationError):
+        validate_http_path("/%2e%2e%2fadmin")
+
+    full_path = "/grafana" + "/%2e%2e%2fadmin"
+    preserved_url = httpx.URL(scheme="https", host="host.example", path=full_path)
+    assert str(preserved_url) == "https://host.example/grafana/%2e%2e%2fadmin"
+
+
+# ---------------------------------------------------------------------------
+# Basic status codes -- every one is normal, successful evidence
+# ---------------------------------------------------------------------------
+
+
+def test_get_200():
+    with HTTPTestServer({"/ok": lambda h: send_simple(h, 200, headers={"Content-Type": "text/plain"}, body=b"hello")}) as server:
+        result = _probe("127.0.0.1", server.port, "/ok")
+
+    assert result.status_code == 200
+    assert result.body_excerpt == "hello"
+    assert result.truncated is False
+
+
+def test_get_200_against_an_ipv6_literal_target():
+    # PR #119 review: probe_http hand-formatted the request URL as
+    # f"{scheme}://{host}:{port}...", which produces an invalid
+    # authority for an IPv6 literal host ("http://::1:8080/", missing
+    # the required "[...]" brackets) that httpx rejects outright.
+    with HTTPTestServer(
+        {"/ok": lambda h: send_simple(h, 200, headers={"Content-Type": "text/plain"}, body=b"hello")}, host="::1"
+    ) as server:
+        result = _probe("::1", server.port, "/ok")
+
+    assert result.status_code == 200
+    assert result.body_excerpt == "hello"
+
+
+def test_head_200_never_reads_a_body():
+    with HTTPTestServer({"/ok": lambda h: send_simple(h, 200, headers={"Content-Length": "5"})}) as server:
+        result = _probe("127.0.0.1", server.port, "/ok", method="HEAD")
+
+    assert result.status_code == 200
+    assert result.body_excerpt is None
+    assert result.body_bytes_observed == 0
+
+
+def test_204_no_content():
+    with HTTPTestServer({"/empty": lambda h: send_simple(h, 204)}) as server:
+        result = _probe("127.0.0.1", server.port, "/empty")
+
+    assert result.status_code == 204
+    assert result.body_excerpt == ""
+
+
+@pytest.mark.parametrize("status", [301, 302])
+def test_redirect_with_location(status):
+    with HTTPTestServer(
+        {"/redirect": lambda h: send_simple(h, status, headers={"Location": "https://elsewhere.example/target"})}
+    ) as server:
+        result = _probe("127.0.0.1", server.port, "/redirect")
+
+    assert result.status_code == status
+    assert result.redirect_location == "https://elsewhere.example/target"
+
+
+@pytest.mark.parametrize("status", [401, 403, 404])
+def test_client_error_statuses_are_normal_results(status):
+    with HTTPTestServer({"/x": lambda h: send_simple(h, status)}) as server:
+        result = _probe("127.0.0.1", server.port, "/x")
+    assert result.status_code == status
+
+
+def test_429_is_a_normal_result():
+    with HTTPTestServer({"/x": lambda h: send_simple(h, 429, headers={"Retry-After": "30"})}) as server:
+        result = _probe("127.0.0.1", server.port, "/x")
+    assert result.status_code == 429
+    assert result.headers["retry-after"] == "30"
+
+
+@pytest.mark.parametrize("status", [500, 503])
+def test_server_error_statuses_are_normal_results_not_raised(status):
+    with HTTPTestServer({"/x": lambda h: send_simple(h, status)}) as server:
+        result = _probe("127.0.0.1", server.port, "/x")
+    assert result.status_code == status
+
+
+# ---------------------------------------------------------------------------
+# Bounded, streaming body reads -- not read-then-truncate
+# ---------------------------------------------------------------------------
+
+
+def test_large_streamed_body_is_bounded_and_truncated():
+    huge = b"z" * (MAX_BODY_BYTES_READ * 3)
+
+    def handler(h):
+        h.send_response(200)
+        h.send_header("Content-Length", str(len(huge)))
+        h.end_headers()
+        h.wfile.write(huge)
+
+    with HTTPTestServer({"/big": handler}) as server:
+        result = _probe("127.0.0.1", server.port, "/big")
+
+    assert result.body_bytes_observed == MAX_BODY_BYTES_READ
+    assert result.truncated is True
+
+
+def test_slow_chunked_body_stops_early_proving_genuine_streaming():
+    # A "read everything, then truncate" implementation would take as
+    # long as the whole slow transfer; a genuinely bounded streaming
+    # read stops as soon as MAX_BODY_BYTES_READ is reached, regardless
+    # of how much more the server would still send.
+    chunk = b"y" * 8192
+    chunk_count = 40  # far more than needed to exceed the 64 KiB cap
+
+    def handler(h):
+        h.send_response(200)
+        h.send_header("Transfer-Encoding", "chunked")
+        h.end_headers()
+        for _ in range(chunk_count):
+            h.wfile.write(f"{len(chunk):x}\r\n".encode("ascii"))
+            h.wfile.write(chunk)
+            h.wfile.write(b"\r\n")
+            h.wfile.flush()
+            time.sleep(0.05)
+        h.wfile.write(b"0\r\n\r\n")
+
+    with HTTPTestServer({"/slow": handler}) as server:
+        started = time.monotonic()
+        result = _probe("127.0.0.1", server.port, "/slow")
+        elapsed = time.monotonic() - started
+
+    assert result.truncated is True
+    assert result.body_bytes_observed <= MAX_BODY_BYTES_READ
+    # 40 chunks at 0.05s apart would take ~2s if fully drained; a
+    # genuinely bounded streaming read stops after roughly 8 chunks.
+    assert elapsed < 1.5, f"did not stop early -- took {elapsed:.2f}s (looks like a full buffered read)"
+
+
+# ---------------------------------------------------------------------------
+# Header bounding: allowlist, value length, oversized/many headers
+# ---------------------------------------------------------------------------
+
+
+def test_only_allowlisted_headers_are_returned():
+    def handler(h):
+        send_simple(
+            h,
+            200,
+            headers={
+                "Content-Type": "text/plain",
+                "Set-Cookie": "session=abc123; HttpOnly",
+                "X-Custom-Nonsense": "whatever",
+                "Authorization": "Bearer should-never-appear",
+            },
+        )
+
+    with HTTPTestServer({"/x": handler}) as server:
+        result = _probe("127.0.0.1", server.port, "/x")
+
+    assert "set-cookie" not in result.headers
+    assert "authorization" not in result.headers
+    assert "x-custom-nonsense" not in result.headers
+    assert result.headers["content-type"] == "text/plain"
+
+
+def test_oversized_header_value_is_bounded_and_flagged():
+    huge_value = "z" * (MAX_HEADER_VALUE_CHARS * 3)
+
+    def handler(h):
+        send_simple(h, 200, headers={"Server": huge_value})
+
+    with HTTPTestServer({"/x": handler}) as server:
+        result = _probe("127.0.0.1", server.port, "/x")
+
+    assert len(result.headers["server"]) == MAX_HEADER_VALUE_CHARS
+    assert result.truncated is True
+
+
+def test_many_non_allowlisted_headers_have_no_effect():
+    headers = {f"X-Extra-{i}": f"value-{i}" for i in range(200)}
+    headers["Content-Type"] = "text/plain"
+
+    def handler(h):
+        send_simple(h, 200, headers=headers)
+
+    with HTTPTestServer({"/x": handler}) as server:
+        result = _probe("127.0.0.1", server.port, "/x")
+
+    # Only allowlisted names ever appear, regardless of how many
+    # non-allowlisted headers the server sent (200 "X-Extra-*" here,
+    # plus the server's own automatic Server/Date/Content-Length --
+    # all of which happen to already be in the allowlist).
+    assert set(result.headers) <= {"content-type", "content-length", "server", "date", "location", "retry-after"}
+    assert result.headers["content-type"] == "text/plain"
+    assert not any(name.startswith("x-extra-") for name in result.headers)
+
+
+# ---------------------------------------------------------------------------
+# Binary/non-UTF-8 body
+# ---------------------------------------------------------------------------
+
+
+def test_binary_non_utf8_body_does_not_crash():
+    binary_body = bytes(range(256)) * 4
+
+    def handler(h):
+        h.send_response(200)
+        h.send_header("Content-Length", str(len(binary_body)))
+        h.end_headers()
+        h.wfile.write(binary_body)
+
+    with HTTPTestServer({"/bin": handler}) as server:
+        result = _probe("127.0.0.1", server.port, "/bin")
+
+    assert result.status_code == 200
+    assert isinstance(result.body_excerpt, str)  # decoded with replacement, never raised
+
+
+# ---------------------------------------------------------------------------
+# Transport failures: timeout, connect failure, TLS verify failure --
+# all raised via the #15 error model, never a fake HTTP status.
+# ---------------------------------------------------------------------------
+
+
+def test_read_timeout_raises_http_probe_error():
+    with SilentTCPServer() as server:
+        with pytest.raises(HTTPProbeError) as exc_info:
+            _probe("127.0.0.1", server.port, "/x", connect_timeout_seconds=0.5, read_timeout_seconds=0.5)
+
+    assert exc_info.value.kind == IntegrationErrorKind.TIMEOUT
+
+
+def test_connect_failure_raises_http_probe_error():
+    probe_sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    probe_sock.bind(("127.0.0.1", 0))
+    unused_port = probe_sock.getsockname()[1]
+    probe_sock.close()
+
+    with pytest.raises(HTTPProbeError) as exc_info:
+        _probe("127.0.0.1", unused_port, "/x", connect_timeout_seconds=1.0, read_timeout_seconds=1.0)
+
+    assert exc_info.value.kind == IntegrationErrorKind.CONNECTION
+
+
+def test_tls_verify_failure_raises_http_probe_error():
+    cert, key = make_leaf("selfsigned.example.com", san_dns=["selfsigned.example.com"])
+    certfile_path, keyfile_path = write_cert_key_files(cert, key)
+    tls_ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+    tls_ctx.load_cert_chain(certfile_path, keyfile_path)
+
+    with HTTPTestServer({"/x": lambda h: send_simple(h, 200)}, tls_context=tls_ctx) as server:
+        with pytest.raises(HTTPProbeError) as exc_info:
+            _probe(
+                "127.0.0.1",
+                server.port,
+                "/x",
+                scheme="https",
+                verify_ssl=True,
+                connect_timeout_seconds=3.0,
+                read_timeout_seconds=3.0,
+            )
+
+    assert exc_info.value.kind == IntegrationErrorKind.CONNECTION
+
+
+def test_verify_ssl_false_allows_self_signed_target():
+    cert, key = make_leaf("selfsigned.example.com", san_dns=["selfsigned.example.com"])
+    certfile_path, keyfile_path = write_cert_key_files(cert, key)
+    tls_ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+    tls_ctx.load_cert_chain(certfile_path, keyfile_path)
+
+    with HTTPTestServer({"/x": lambda h: send_simple(h, 200, body=b"ok")}, tls_context=tls_ctx) as server:
+        result = _probe(
+            "127.0.0.1",
+            server.port,
+            "/x",
+            scheme="https",
+            verify_ssl=False,
+            connect_timeout_seconds=3.0,
+            read_timeout_seconds=3.0,
+        )
+
+    assert result.status_code == 200
+
+
+# ---------------------------------------------------------------------------
+# Redirects are never automatically followed
+# ---------------------------------------------------------------------------
+
+
+def test_redirect_is_never_automatically_followed():
+    called = {"target_hit": False}
+
+    def redirect_handler(h):
+        send_simple(h, 302, headers={"Location": "/target"})
+
+    def target_handler(h):
+        called["target_hit"] = True
+        send_simple(h, 200, body=b"should never be reached")
+
+    with HTTPTestServer({"/start": redirect_handler, "/target": target_handler}) as server:
+        result = _probe("127.0.0.1", server.port, "/start")
+
+    assert result.status_code == 302
+    assert called["target_hit"] is False
+
+
+# ---------------------------------------------------------------------------
+# Deadline semantics (#15)
+# ---------------------------------------------------------------------------
+
+
+def test_deadline_already_expired_raises_before_any_request():
+    with HTTPTestServer({"/x": lambda h: send_simple(h, 200)}) as server:
+        deadline = Deadline.after(-1.0)
+        with pytest.raises(HTTPProbeError) as exc_info:
+            _probe("127.0.0.1", server.port, "/x", deadline=deadline)
+
+    assert exc_info.value.kind == IntegrationErrorKind.TIMEOUT

@@ -216,6 +216,73 @@ configured profile is rejected before any query is attempted — see
 `DNSConfig.from_env()` performs no network access; it only parses and
 validates these variables.
 
+## HTTP
+
+See [docs/http-probe.md](http-probe.md) for the full contract: redirect/
+proxy/authentication posture, body/header bounds, and the any-status-is-
+evidence semantics.
+
+Like DNS, HTTP has no fixed set of named environment variables — an
+operator configures an open-ended set of named **target profiles**, one
+pair of environment variables per alias:
+
+```bash
+MANTIS_HTTP_TARGET_<ALIAS>_URL=<scheme>://<host>[:<port>][/base/path]
+MANTIS_HTTP_TARGET_<ALIAS>_VERIFY_SSL=true|false   # optional, default true
+```
+
+| Example | Meaning |
+|---|---|
+| `MANTIS_HTTP_TARGET_GRAFANA_URL=https://grafana.example.net:3000/grafana` | Defines the `grafana` target: scheme `https`, host `grafana.example.net`, port `3000`, base path `/grafana`. |
+| `MANTIS_HTTP_TARGET_INTERNAL_API_URL=http://internal-api.example.net` | Defines an `internal_api` target with the scheme's default port (80). |
+| `MANTIS_HTTP_TARGET_SELFSIGNED_VERIFY_SSL=false` | Disables certificate verification for the `selfsigned` target's own requests only — an explicit, per-target, operator-set opt-out, never a caller-facing option. |
+
+`<ALIAS>` is case-insensitive and becomes exactly the `target_alias`
+value `http_probe` accepts — the **only** target-selecting input a
+model/API caller may supply; a caller can never provide a host, port,
+scheme, or proxy directly, and an alias with no matching configured
+target is rejected before any request is attempted. The configured URL
+must use `http://` or `https://`, must not embed credentials
+(`user:pass@host`), and must not include a query string or fragment —
+only a clean origin and optional base path. See
+[docs/http-probe.md](http-probe.md#security-and-bounds).
+
+`HTTPProfilesConfig.from_env()` performs no network access; it only
+parses and validates these variables.
+
+## TLS
+
+See [docs/tls-certificate-inspection.md](tls-certificate-inspection.md)
+for the full contract: the "inspect != verify" requirement, the
+two-handshake mechanism, and the SNI/trust-store posture.
+
+Also an open-ended set of named **target profiles**:
+
+```bash
+MANTIS_TLS_TARGET_<ALIAS>_HOST=<host>
+MANTIS_TLS_TARGET_<ALIAS>_PORT=<port>          # optional, default 443
+MANTIS_TLS_TARGET_<ALIAS>_SERVER_NAME=<name>   # optional, defaults to HOST
+MANTIS_TLS_TARGET_<ALIAS>_CA_FILE=<path>       # optional, deployment-only
+```
+
+| Example | Meaning |
+|---|---|
+| `MANTIS_TLS_TARGET_GRAFANA_HOST=grafana.example.net` | Defines the `grafana` target; SNI defaults to `grafana.example.net`; port defaults to 443. |
+| `MANTIS_TLS_TARGET_RAWIP_HOST=172.30.10.20`<br>`MANTIS_TLS_TARGET_RAWIP_SERVER_NAME=grafana.internal` | An IP-literal host **requires** an explicit `SERVER_NAME` — there is no hostname to default SNI from, and SNI is never guessed. Configuring `RAWIP_HOST` alone raises a `ConfigurationError` at startup. |
+| `MANTIS_TLS_TARGET_INTERNAL_CA_FILE=/etc/mantis/internal-ca.pem` | Trusts a private CA for the `internal` target's chain-verification handshake only. The path is deployment configuration only — never exposed in any tool result. |
+
+`<ALIAS>` is case-insensitive and becomes exactly the `target_alias`
+value `tls_certificate_inspect` accepts — the **only** target-selecting
+input a model/API caller may supply; a caller can never provide a host,
+port, SNI, CA bundle, or verification mode directly, and an alias with
+no matching configured target is rejected before any handshake is
+attempted. See
+[docs/tls-certificate-inspection.md](tls-certificate-inspection.md#trust-store).
+
+`TLSProfilesConfig.from_env()` performs no network access — `ca_file`'s
+existence on disk is never checked at config-parse time either, only
+when a handshake actually runs.
+
 ## Reliability
 
 See [docs/reliability.md](reliability.md) for the full contract:

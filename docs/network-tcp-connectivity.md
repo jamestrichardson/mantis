@@ -318,6 +318,18 @@ the same name are two different kinds of evidence, gathered by two
 separate tool calls; never assume one explains the other without
 checking.
 
+## Correlating with TLS and HTTP evidence (#111, #110)
+
+`check_tcp_connectivity` proves nothing about what happens *after* a TCP
+connection is established — a successful TCP connect to port 443 says
+nothing about whether a TLS handshake against it would succeed, or what
+an HTTP endpoint behind it would return.
+[`tls_certificate_inspect`](tls-certificate-inspection.md) (#111) and
+[`http_probe`](http-probe.md) (#110) are the tools that make those next
+two layers independently inspectable. See
+[docs/http-probe.md#the-troubleshooting-stack](http-probe.md#the-troubleshooting-stack)
+for the full DNS → TCP → TLS → HTTP layering this composes into.
+
 ## Correlating with historical AWX evidence (#28)
 
 `check_tcp_connectivity` (current state) and `awx_get_job_failure`

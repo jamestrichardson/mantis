@@ -33,9 +33,11 @@ from __future__ import annotations
 
 import math
 import os
+import re
 from dataclasses import dataclass, field
 from ipaddress import ip_address
 from pathlib import Path
+from urllib.parse import urlsplit
 
 from dotenv import load_dotenv
 
@@ -454,6 +456,239 @@ class DNSConfig:
         if not isinstance(alias, str):
             return None
         return self.profiles.get(alias.lower())
+
+
+_HOSTNAME_LABEL = r"[A-Za-z0-9]([A-Za-z0-9-]{0,62})?"
+_HOSTNAME_RE = re.compile(rf"^{_HOSTNAME_LABEL}(\.{_HOSTNAME_LABEL})*\.?$")
+"""Same RFC-1123-ish allowlist shape used by
+``mantis.integrations.network``/``.dns`` — defined locally rather than
+imported, matching the established convention that config.py has no
+dependency on any integration module (integrations depend on config,
+never the reverse)."""
+
+
+def _is_ip_literal(value: str) -> bool:
+    try:
+        ip_address(value)
+        return True
+    except ValueError:
+        return False
+
+
+def _is_valid_host(value: str) -> bool:
+    """True if ``value`` is a plain IPv4/IPv6 literal or an RFC-1123-ish
+    hostname — the same allowlist every Mantis network-facing config
+    validates a host against. Never a URL, path, or anything containing
+    credentials/whitespace (those are rejected by the callers that parse
+    a full URL/host string before reaching this check)."""
+    return _is_ip_literal(value) or bool(_HOSTNAME_RE.match(value))
+
+
+# ---------------------------------------------------------------------------
+# HTTP target profiles (#110) -- see mantis.integrations.http and
+# docs/http-probe.md. Mirrors DNSConfig's shape exactly: an open-ended,
+# environment-scanned set of named profiles, since the set of aliases an
+# operator configures has no fixed field list to declare. A caller (the
+# model or an API client) may only ever select a target by its alias
+# name -- never a host/port/scheme/proxy/TLS-verification-mode directly.
+# ---------------------------------------------------------------------------
+
+_HTTP_TARGET_ENV_PREFIX = "MANTIS_HTTP_TARGET_"
+_HTTP_TARGET_URL_SUFFIX = "_URL"
+_HTTP_TARGET_VERIFY_SSL_SUFFIX = "_VERIFY_SSL"
+
+_HTTP_DEFAULT_PORTS = {"http": 80, "https": 443}
+
+
+@dataclass(frozen=True)
+class HTTPTargetConfig:
+    """One server-side-configured HTTP probe target (#110).
+
+    Establishes the *immutable* origin (``scheme``/``host``/``port``)
+    and an optional ``base_path`` prefix a caller's own ``path`` is
+    appended to (never replaces) -- see ``mantis.tools.http.http_probe``.
+    None of these fields is ever caller-overridable; only ``alias`` is
+    ever supplied by a caller (the model or an API client), and only to
+    select *which* already-configured target to use.
+    """
+
+    alias: str
+    scheme: str
+    host: str
+    port: int
+    base_path: str = ""
+    verify_ssl: bool = True
+
+
+def _parse_http_target(alias: str, url: str, *, verify_ssl: bool) -> HTTPTargetConfig:
+    try:
+        # urlsplit() itself can raise ValueError for a structurally
+        # malformed authority (e.g. an unbalanced "[" in an IPv6
+        # literal) -- caught here so every parse failure for this
+        # target becomes this module's normal ConfigurationError,
+        # never a raw ValueError escaping from_env().
+        parsed = urlsplit(url)
+    except ValueError as exc:
+        raise ConfigurationError(f"HTTP target '{alias}' has a malformed URL {url!r}: {exc}") from exc
+    if parsed.scheme not in ("http", "https"):
+        raise ConfigurationError(
+            f"HTTP target '{alias}' must use http:// or https://, got scheme {parsed.scheme!r} in {url!r}"
+        )
+    if parsed.username is not None or parsed.password is not None:
+        raise ConfigurationError(f"HTTP target '{alias}' must not embed credentials in its configured URL")
+    if not parsed.hostname:
+        raise ConfigurationError(f"HTTP target '{alias}' is missing a host in {url!r}")
+    if not _is_valid_host(parsed.hostname):
+        raise ConfigurationError(f"HTTP target '{alias}' has an invalid host: {parsed.hostname!r}")
+    if parsed.query or parsed.fragment:
+        raise ConfigurationError(
+            f"HTTP target '{alias}' URL must not include a query string or fragment -- "
+            "configure a clean origin (and optional base path) only"
+        )
+    try:
+        # SplitResult.port is a lazy property that raises ValueError
+        # (not caught anywhere above) for a malformed port -- e.g.
+        # ":99999" (out of range) or ":notaport" (not an integer at
+        # all) -- rather than returning None the way a genuinely absent
+        # port does. Converted to this module's normal
+        # ConfigurationError so a bad MANTIS_HTTP_TARGET_*_URL fails
+        # exactly like every other invalid-target case, never with a
+        # raw ValueError escaping from_env().
+        explicit_port = parsed.port
+    except ValueError as exc:
+        raise ConfigurationError(f"HTTP target '{alias}' has an invalid port in {url!r}: {exc}") from exc
+    port = explicit_port or _HTTP_DEFAULT_PORTS[parsed.scheme]
+    base_path = parsed.path.rstrip("/")
+    return HTTPTargetConfig(
+        alias=alias, scheme=parsed.scheme, host=parsed.hostname, port=port, base_path=base_path, verify_ssl=verify_ssl
+    )
+
+
+@dataclass(frozen=True)
+class HTTPProfilesConfig:
+    """Every configured HTTP probe target, keyed by lowercase alias."""
+
+    targets: dict[str, HTTPTargetConfig] = field(default_factory=dict)
+
+    @classmethod
+    def from_env(cls) -> "HTTPProfilesConfig":
+        """Scan the environment for every
+        ``MANTIS_HTTP_TARGET_<ALIAS>_URL`` variable and build the
+        corresponding target map (``..._VERIFY_SSL`` is optional,
+        default ``true``). Performs no network access."""
+        targets: dict[str, HTTPTargetConfig] = {}
+        for key, value in os.environ.items():
+            if not key.startswith(_HTTP_TARGET_ENV_PREFIX) or not key.endswith(_HTTP_TARGET_URL_SUFFIX):
+                continue
+            alias = key[len(_HTTP_TARGET_ENV_PREFIX) : -len(_HTTP_TARGET_URL_SUFFIX)].lower()
+            if not alias:
+                continue
+            verify_env = f"{_HTTP_TARGET_ENV_PREFIX}{alias.upper()}{_HTTP_TARGET_VERIFY_SSL_SUFFIX}"
+            verify_ssl = _getenv_bool(verify_env, True)
+            targets[alias] = _parse_http_target(alias, value, verify_ssl=verify_ssl)
+        return cls(targets=targets)
+
+    def resolve_target(self, alias: object) -> HTTPTargetConfig | None:
+        """Look up ``alias`` (case-insensitive), returning its
+        configured target or ``None`` if unknown. Never raises — see
+        ``DNSConfig.resolve_profile``'s identical convention."""
+        if not isinstance(alias, str):
+            return None
+        return self.targets.get(alias.lower())
+
+
+# ---------------------------------------------------------------------------
+# TLS target profiles (#111) -- see mantis.integrations.tls and
+# docs/tls-certificate-inspection.md. Deliberately a separate config
+# class/alias namespace from HTTPProfilesConfig above, not a shared
+# "endpoint" abstraction: TLS inspection is meaningful for any direct
+# TLS endpoint (not only HTTPS), and forcing it to be HTTP-specific
+# would be exactly the premature generalization #110/#111 warn against.
+# ---------------------------------------------------------------------------
+
+_TLS_TARGET_ENV_PREFIX = "MANTIS_TLS_TARGET_"
+_TLS_TARGET_HOST_SUFFIX = "_HOST"
+
+
+@dataclass(frozen=True)
+class TLSTargetConfig:
+    """One server-side-configured TLS inspection target (#111).
+
+    ``server_name`` is the SNI/hostname-verification value -- always
+    resolved deterministically at config time, never guessed at request
+    time: it defaults to ``host`` when ``host`` is itself a hostname,
+    and must be set explicitly (``..._SERVER_NAME``) when ``host`` is an
+    IP literal, since there is no hostname to default it from. See
+    :func:`_build_tls_target`. ``ca_file`` is deployment-only trust
+    configuration (never exposed in any tool result) — see
+    ``docs/tls-certificate-inspection.md``'s "Trust store" section.
+    """
+
+    alias: str
+    host: str
+    port: int
+    server_name: str
+    ca_file: str | None = None
+
+
+def _build_tls_target(
+    alias: str, *, host: str, port: int, server_name: str | None, ca_file: str | None
+) -> TLSTargetConfig:
+    if not host:
+        raise ConfigurationError(f"TLS target '{alias}' is missing a host")
+    if not _is_valid_host(host):
+        raise ConfigurationError(f"TLS target '{alias}' has an invalid host: {host!r}")
+    if not (1 <= port <= 65535):
+        raise ConfigurationError(f"TLS target '{alias}' port must be between 1 and 65535, got {port!r}")
+    if server_name is None:
+        if _is_ip_literal(host):
+            raise ConfigurationError(
+                f"TLS target '{alias}': server_name (SNI) must be set explicitly "
+                f"(MANTIS_TLS_TARGET_{alias.upper()}_SERVER_NAME) when host is an IP literal -- "
+                "there is no hostname to default it from, and SNI must never be guessed"
+            )
+        server_name = host
+    elif not _is_valid_host(server_name):
+        raise ConfigurationError(f"TLS target '{alias}' has an invalid server_name (SNI): {server_name!r}")
+    return TLSTargetConfig(alias=alias, host=host, port=port, server_name=server_name, ca_file=ca_file or None)
+
+
+@dataclass(frozen=True)
+class TLSProfilesConfig:
+    """Every configured TLS inspection target, keyed by lowercase alias."""
+
+    targets: dict[str, TLSTargetConfig] = field(default_factory=dict)
+
+    @classmethod
+    def from_env(cls) -> "TLSProfilesConfig":
+        """Scan the environment for every
+        ``MANTIS_TLS_TARGET_<ALIAS>_HOST`` variable and build the
+        corresponding target map (``..._PORT`` defaults to ``443``;
+        ``..._SERVER_NAME``/``..._CA_FILE`` are optional). Performs no
+        network access -- ``ca_file``'s existence is never checked here,
+        only when a tool actually runs (see
+        ``mantis.integrations.tls``)."""
+        targets: dict[str, TLSTargetConfig] = {}
+        for key, value in os.environ.items():
+            if not key.startswith(_TLS_TARGET_ENV_PREFIX) or not key.endswith(_TLS_TARGET_HOST_SUFFIX):
+                continue
+            alias = key[len(_TLS_TARGET_ENV_PREFIX) : -len(_TLS_TARGET_HOST_SUFFIX)].lower()
+            if not alias:
+                continue
+            upper = alias.upper()
+            port = _getenv_int(f"{_TLS_TARGET_ENV_PREFIX}{upper}_PORT", 443)
+            server_name = os.environ.get(f"{_TLS_TARGET_ENV_PREFIX}{upper}_SERVER_NAME") or None
+            ca_file = os.environ.get(f"{_TLS_TARGET_ENV_PREFIX}{upper}_CA_FILE") or None
+            targets[alias] = _build_tls_target(alias, host=value, port=port, server_name=server_name, ca_file=ca_file)
+        return cls(targets=targets)
+
+    def resolve_target(self, alias: object) -> TLSTargetConfig | None:
+        """Look up ``alias`` (case-insensitive), returning its
+        configured target or ``None`` if unknown. Never raises — see
+        ``DNSConfig.resolve_profile``'s identical convention."""
+        if not isinstance(alias, str):
+            return None
+        return self.targets.get(alias.lower())
 
 
 _API_AUTH_MODES = ("bearer_token", "disabled")
