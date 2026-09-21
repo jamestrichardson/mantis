@@ -11,6 +11,7 @@ from __future__ import annotations
 import socket
 import time
 
+import httpx
 import pytest
 
 from mantis.integrations.http import (
@@ -65,7 +66,9 @@ def test_validate_http_method_rejects_unsupported_methods(method):
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.parametrize("path", ["/", "/api/health", "/a/b/c", "/x" * 100])
+@pytest.mark.parametrize(
+    "path", ["/", "/api/health", "/a/b/c", "/x" * 100, "/foo..bar", "/foo.bar/baz", "/v1.2/status"]
+)
 def test_validate_http_path_accepts_valid_paths(path):
     assert validate_http_path(path) == path
 
@@ -89,11 +92,35 @@ def test_validate_http_path_accepts_valid_paths(path):
         ("/" + "x" * 600, "too long"),
         (123, "not a string"),
         (None, "not a string"),
+        # PR #119 review: dot-segment path traversal, literal and
+        # percent-encoded -- must never let a caller-supplied path
+        # escape the configured target's base_path once concatenated
+        # and normalized by httpx.URL.
+        ("/../admin", "parent traversal"),
+        ("/foo/../../admin", "multi-level parent traversal"),
+        ("/./admin", "current-dir segment"),
+        ("/%2e%2e/admin", "percent-encoded parent traversal, lowercase"),
+        ("/%2E%2E/admin", "percent-encoded parent traversal, uppercase"),
+        ("/%2e/admin", "percent-encoded current-dir segment"),
     ],
 )
 def test_validate_http_path_rejects_invalid_paths(path, reason):
     with pytest.raises(HTTPPathValidationError):
         validate_http_path(path)
+
+
+def test_validate_http_path_rejects_traversal_that_would_escape_a_configured_base_path():
+    # The concrete scenario from the review: without this check,
+    # concatenating a validated-looking "/../admin" onto a configured
+    # base_path of "/grafana" and handing the result to httpx.URL
+    # actually requests /admin, escaping the configured prefix even
+    # though base_path itself was never touched.
+    with pytest.raises(HTTPPathValidationError):
+        validate_http_path("/../admin")
+
+    full_path = "/grafana" + "/../admin"
+    escaped_url = httpx.URL(scheme="https", host="host.example", path=full_path)
+    assert str(escaped_url) == "https://host.example/admin"
 
 
 # ---------------------------------------------------------------------------

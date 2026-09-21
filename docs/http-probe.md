@@ -216,7 +216,17 @@ Every bound below is named, deliberate, and enforced **while reading**
 | `MAX_HEADER_VALUE_CHARS` | 500 chars | An oversized individual header value. |
 | `MAX_LOCATION_CHARS` | 2,000 chars | An oversized/attacker-controlled `Location` header. |
 | `MAX_PATH_CHARS` | 512 chars | An oversized model-supplied `path` argument. |
-| `DEFAULT_HTTP_REQUEST_TIMEOUT_SECONDS` | 10.0s | An unbounded wait on a slow/unresponsive origin (further capped by the caller's remaining `Deadline`; connect and read timeouts are actually sourced from `mantis.config.ReliabilityConfig`'s shared `http_connect_timeout_seconds`/`http_read_timeout_seconds` fields — the same ones AWX/Prometheus/Loki use). |
+
+An unbounded wait on a slow/unresponsive origin is bounded by two
+layers, not a dedicated HTTP-specific constant: `probe_http`'s
+`connect_timeout_seconds`/`read_timeout_seconds` parameters (always
+supplied by the tool layer from `mantis.config.ReliabilityConfig`'s
+shared `http_connect_timeout_seconds`/`http_read_timeout_seconds`
+fields — the same ones AWX/Prometheus/Loki use), each further capped by
+the caller's remaining `Deadline` (`mantis.reliability.Deadline`) when
+one is given — every Mantis tool call already runs under
+`AgentRuntime`'s own per-call budget, which is the overall ceiling on a
+single `http_probe` call in normal operation.
 
 `headers` in a result only ever contains the explicit allowlist
 (`mantis.integrations.http._ALLOWED_RESPONSE_HEADERS`): `content-type`,

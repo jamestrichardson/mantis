@@ -25,6 +25,7 @@ proxy trust, and cookie jar all **explicitly disabled** — see
 
 from __future__ import annotations
 
+import re
 import time
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -77,11 +78,6 @@ MAX_LOCATION_CHARS = 2_000
 header is attacker/server-controlled text and could otherwise be
 arbitrarily long."""
 
-DEFAULT_HTTP_REQUEST_TIMEOUT_SECONDS = 10.0
-"""Ceiling on the *entire* request (connect + send + read the bounded
-body), used when no :class:`~mantis.reliability.Deadline` further caps
-it — see :func:`probe_http`."""
-
 
 class HTTPProbeError(IntegrationError):
     """Raised for an HTTP transport-level failure: DNS/connect/TLS/
@@ -104,6 +100,22 @@ class HTTPPathValidationError(ValueError):
 class HTTPMethodValidationError(ValueError):
     """Raised by :func:`validate_http_method` for a method outside
     :data:`SUPPORTED_HTTP_METHODS`."""
+
+
+_PERCENT_ENCODED_DOT_RE = re.compile("%2e", re.IGNORECASE)
+
+
+def _has_dot_segment(path: str) -> bool:
+    """True if any ``/``-separated segment of ``path`` is a literal
+    ``.``/``..`` traversal segment, including one spelled with a
+    percent-encoded dot (``%2e``/``%2E``) — deliberately conservative:
+    this only normalizes the specific ``%2e`` -> ``.`` encoding for the
+    purpose of *detecting* a dot segment, never for the path actually
+    sent on the wire (see :func:`validate_http_path`, which rejects the
+    input outright rather than attempting to model every proxy/server
+    percent-decoding behavior)."""
+    normalized = _PERCENT_ENCODED_DOT_RE.sub(".", path)
+    return any(segment in (".", "..") for segment in normalized.split("/"))
 
 
 def validate_http_method(method: object) -> str:
@@ -136,9 +148,17 @@ def validate_http_path(path: object) -> str:
     (``#`` — fragments are never sent, and rejecting one outright here
     is simpler than silently stripping it), whitespace/control
     characters (including CR/LF — a path cannot be used to smuggle
-    extra header lines into the request), and a backslash (some HTTP
+    extra header lines into the request), a backslash (some HTTP
     stacks/proxies treat ``\\`` as a path separator equivalent to
-    ``/``).
+    ``/``), and a ``.``/``..`` path-traversal segment (including one
+    spelled with a percent-encoded dot, ``%2e``/``%2E`` — see
+    :func:`_has_dot_segment`). This last check is what keeps the
+    configured target's ``base_path`` genuinely immutable: without it,
+    a caller-supplied ``path`` like ``"/../admin"`` would, once
+    concatenated onto a configured ``base_path`` of ``"/grafana"`` and
+    handed to ``httpx.URL``'s own path normalization, actually request
+    ``/admin`` — escaping the origin's configured prefix even though
+    ``base_path`` itself was never touched.
     """
     if not isinstance(path, str):
         raise HTTPPathValidationError(f"path must be a string, got {type(path).__name__}")
@@ -164,6 +184,8 @@ def validate_http_path(path: object) -> str:
         raise HTTPPathValidationError("path must not contain a fragment")
     if "\\" in path:
         raise HTTPPathValidationError("path must not contain a backslash")
+    if _has_dot_segment(path):
+        raise HTTPPathValidationError("path must not contain a '.' or '..' path-traversal segment")
     return path
 
 

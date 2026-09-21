@@ -130,6 +130,8 @@ def test_invalid_path_causes_no_network_request(monkeypatch):
     http_probe("grafana", "https://evil.example/", "GET", _config=config)
     http_probe("grafana", "//evil.example/", "GET", _config=config)
     http_probe("grafana", "/\r\nHost: evil.example", "GET", _config=config)
+    http_probe("grafana", "/../admin", "GET", _config=config)
+    http_probe("grafana", "/%2e%2e/admin", "GET", _config=config)
 
     assert called["build_client"] is False
 
@@ -253,6 +255,25 @@ def test_full_stack_against_a_real_local_server():
     assert result["error"] is None
     assert result["status_code"] == 200
     assert result["body_excerpt"] == '{"ok":true}'
+
+
+def test_path_traversal_cannot_escape_a_configured_base_path_end_to_end():
+    # PR #119 review: with a configured base_path of "/grafana", a
+    # "/../admin" path must never actually reach "/admin" on the real
+    # origin -- rejected as invalid input before any request, so the
+    # server-side route for "/admin" (deliberately present here) is
+    # never hit.
+    with HTTPTestServer(
+        {
+            "/grafana/health": lambda h: send_simple(h, 200, body=b"grafana-ok"),
+            "/admin": lambda h: send_simple(h, 200, body=b"admin-secret"),
+        }
+    ) as server:
+        config = _config(realtarget=_target(alias="realtarget", scheme="http", host="127.0.0.1", port=server.port, base_path="/grafana"))
+        result = http_probe("realtarget", "/../admin", "GET", _config=config)
+
+    assert result["error"]["type"] == "invalid_input"
+    assert result["status_code"] is None
 
 
 def test_full_stack_against_a_real_local_ipv6_server():

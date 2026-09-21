@@ -784,6 +784,12 @@ def test_http_config_resolve_target_returns_none_for_a_non_string_alias(monkeypa
         "https://host.example.net?query=1",
         "https://host.example.net/#fragment",
         "https:// /path",  # empty host
+        # PR #119 review: SplitResult.port/urlsplit() itself can raise
+        # a raw ValueError for these -- must surface as this module's
+        # normal ConfigurationError instead.
+        "https://host.example.net:99999",  # port out of range
+        "https://host.example.net:notaport",  # port not an integer
+        "https://[::1:443/path",  # malformed IPv6 authority (unbalanced bracket)
     ],
 )
 def test_http_config_rejects_invalid_target_urls(monkeypatch, url):

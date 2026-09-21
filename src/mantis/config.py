@@ -521,7 +521,15 @@ class HTTPTargetConfig:
 
 
 def _parse_http_target(alias: str, url: str, *, verify_ssl: bool) -> HTTPTargetConfig:
-    parsed = urlsplit(url)
+    try:
+        # urlsplit() itself can raise ValueError for a structurally
+        # malformed authority (e.g. an unbalanced "[" in an IPv6
+        # literal) -- caught here so every parse failure for this
+        # target becomes this module's normal ConfigurationError,
+        # never a raw ValueError escaping from_env().
+        parsed = urlsplit(url)
+    except ValueError as exc:
+        raise ConfigurationError(f"HTTP target '{alias}' has a malformed URL {url!r}: {exc}") from exc
     if parsed.scheme not in ("http", "https"):
         raise ConfigurationError(
             f"HTTP target '{alias}' must use http:// or https://, got scheme {parsed.scheme!r} in {url!r}"
@@ -537,7 +545,19 @@ def _parse_http_target(alias: str, url: str, *, verify_ssl: bool) -> HTTPTargetC
             f"HTTP target '{alias}' URL must not include a query string or fragment -- "
             "configure a clean origin (and optional base path) only"
         )
-    port = parsed.port or _HTTP_DEFAULT_PORTS[parsed.scheme]
+    try:
+        # SplitResult.port is a lazy property that raises ValueError
+        # (not caught anywhere above) for a malformed port -- e.g.
+        # ":99999" (out of range) or ":notaport" (not an integer at
+        # all) -- rather than returning None the way a genuinely absent
+        # port does. Converted to this module's normal
+        # ConfigurationError so a bad MANTIS_HTTP_TARGET_*_URL fails
+        # exactly like every other invalid-target case, never with a
+        # raw ValueError escaping from_env().
+        explicit_port = parsed.port
+    except ValueError as exc:
+        raise ConfigurationError(f"HTTP target '{alias}' has an invalid port in {url!r}: {exc}") from exc
+    port = explicit_port or _HTTP_DEFAULT_PORTS[parsed.scheme]
     base_path = parsed.path.rstrip("/")
     return HTTPTargetConfig(
         alias=alias, scheme=parsed.scheme, host=parsed.hostname, port=port, base_path=base_path, verify_ssl=verify_ssl

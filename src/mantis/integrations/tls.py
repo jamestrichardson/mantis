@@ -273,11 +273,20 @@ class VerificationInfo:
     #111's explicit requirement never to collapse chain trust,
     hostname match, and time validity into one boolean.
 
-    ``chain_trusted`` is ``None`` only when the second (verification)
-    handshake could not be attempted at all because the caller's
-    remaining deadline was exhausted after the first (inspection)
-    handshake already succeeded — an honest "not determined", never
-    coerced to ``True`` or ``False``.
+    ``chain_trusted`` is ``None`` in two cases, both an honest "not
+    determined" rather than ``True``/``False`` coerced from incomplete
+    information:
+
+    - The second (verification) handshake could not be attempted at
+      all, because the caller's remaining deadline was exhausted after
+      the first (inspection) handshake already succeeded.
+    - The verification handshake *was* attempted but failed for a
+      reason OpenSSL's own verification walk cannot separate from
+      trust: a validity-period error (``X509_V_ERR_CERT_HAS_EXPIRED``/
+      ``_NOT_YET_VALID``, see :func:`_verify_one_address`). Such a
+      handshake never got far enough to say anything about the chain
+      itself, so reporting a definite ``True``/``False`` here would be
+      fabricated.
     """
 
     chain_trusted: bool | None
@@ -472,23 +481,33 @@ def inspect_tls(
        address where a certificate is actually obtained.
     2. **Verification handshake** (``verify_mode=CERT_REQUIRED``,
        ``check_hostname=False``): against the same address that
-       answered phase 1, determines chain trust *alone* — never
-       conflated with hostname matching, which is computed independently
-       (below) from the already-obtained certificate, not from this
-       handshake's own pass/fail.
+       answered phase 1, with hostname checking explicitly disabled so
+       its outcome is never conflated with a hostname-match failure
+       (that dimension is computed independently, below, from the
+       already-obtained certificate). This handshake's pass/fail is
+       *not* automatically "chain trust alone", though — see
+       :func:`_verify_one_address`: OpenSSL's own certificate
+       verification also checks the validity period in the same walk,
+       so an expired-but-otherwise-trusted certificate fails this
+       handshake for a reason unrelated to chain trust, which
+       :func:`_verify_one_address` detects (via the failure's
+       ``verify_code``) and reports as ``chain_trusted=None`` rather
+       than a fabricated ``False``.
 
     ``hostname_matches`` and ``time_valid`` are both computed directly
     from the parsed certificate (SAN entries vs. ``server_name``; not-
     before/not-after vs. the current time) — no network operation
     needed for either, and neither depends on whether phase 2 ever
-    runs. This is what keeps all three verification dimensions
-    genuinely independent rather than derived from one opaque
-    handshake's single pass/fail outcome (see
+    runs, or on how it fails. This is what keeps all three verification
+    dimensions genuinely independent rather than derived from one
+    opaque handshake's single pass/fail outcome (see
     ``VerificationInfo``).
 
-    If the deadline is exhausted after phase 1 succeeds but before
-    phase 2 can start, phase 2 is skipped and ``chain_trusted`` is
-    ``None`` (not determined) — the certificate metadata already
+    ``chain_trusted`` ends up ``None`` (not determined) in two distinct
+    cases — see ``VerificationInfo`` for both; the deadline-exhaustion
+    case is one of them: if the deadline is exhausted after phase 1
+    succeeds but before phase 2 can start, phase 2 is skipped and
+    ``chain_trusted`` is ``None`` — the certificate metadata already
     obtained is still returned, never discarded.
 
     Raises :class:`TLSError` only for a failure *before* any
