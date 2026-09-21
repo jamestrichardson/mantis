@@ -1,7 +1,8 @@
 # Security
 
 Mantis operates against real infrastructure (AWX, network/TCP, DNS,
-HTTP, TLS, Prometheus, Loki, and Kubernetes today; others planned). These
+HTTP, TLS, Git, Prometheus, Loki, and Kubernetes today; others
+planned). These
 principles govern how it's built, and are enforced architecturally, not
 just by convention.
 
@@ -17,18 +18,19 @@ just by convention.
 - The System Troubleshooter (#11) has a broader toolset —
   `awx_recent_failed_jobs`, `awx_get_job_failure`,
   `check_tcp_connectivity`, `prometheus_query`, `prometheus_query_range`,
-  `loki_query` — but the same principle holds at that larger scale:
-  every one is explicitly named, every one is read-only, and the agent
-  has no path to any tool, mutating or otherwise, that isn't in that
-  list. See [docs/system-troubleshooter.md](system-troubleshooter.md).
+  `loki_query`, `git_recent_changes` — but the same principle holds at
+  that larger scale: every one is explicitly named, every one is
+  read-only, and the agent has no path to any tool, mutating or
+  otherwise, that isn't in that list. See
+  [docs/system-troubleshooter.md](system-troubleshooter.md).
 - Credentials used by integrations (AWX token, LiteLLM key) should
   themselves be scoped as narrowly as the underlying system allows — see
   below.
 
 ## Untrusted tool-output trust boundary
 
-Mantis has expanded beyond AWX into network/TCP diagnostics, DNS, HTTP,
-TLS, Prometheus, Loki, and Kubernetes, with Git and other systems
+Mantis has expanded beyond AWX into network/TCP diagnostics, DNS,
+HTTP, TLS, Git, Prometheus, Loki, and Kubernetes, with other systems
 planned — every one of these produces output that is, by construction,
 arbitrary external text Mantis does not control. Loki log text is
 treated as the highest-risk untrusted-text source implemented so far

@@ -470,6 +470,57 @@ policy as `mantis.contracts.CONTRACT_VERSION` — see
 JSON Lines: one `EvalResult.to_dict()` per line, no wrapping array. This
 is deliberately not a database — see "Non-goals".
 
+## Git correlation scenario
+
+`system-troubleshooter-git-correlation` (#17, in
+`mantis.eval.fixtures.system_troubleshooter`) is the golden scenario
+for `git_recent_changes`'s central design requirement: source history
+is not deployment evidence, and temporal correlation is not causation
+(see [docs/git.md](git.md#the-three-separate-claims)).
+
+The fixture reuses the same historical-AWX-failure/recovered-Prometheus/
+Loki-log evidence as `system-troubleshooter-full-investigation`, and
+adds one Git commit via
+`mantis.eval.fixtures.git.build_git_recent_changes_tool` — a
+firewall-allowlist change committed shortly before the incident's
+reference time, plausible enough that a model might be tempted to
+treat it as *the* explanation. The fixture **deliberately contains no
+field or evidence stating the commit was ever deployed** — nothing in
+`GitCommit`/`GitRecentChangesResult` has a "deployed" concept at all,
+so this is structurally guaranteed, not just a choice made when
+writing the canned data.
+
+Deterministic expectations hard-fail an answer that:
+
+- Asserts the commit *caused* the incident
+  (`UnsupportedDefinitiveClaim`, reusing the same subject/definitive-
+  language mechanism every other System Troubleshooter scenario uses
+  for unsupported root-cause claims).
+- Asserts the commit *was deployed* without hedging
+  (`HypothesisLabeled` with `hard=True` — deliberately not a bare
+  `ForbiddenAnswerPattern`, since a genuinely good answer is expected
+  to *raise* deployment as an open question, e.g. "check whether this
+  was rolled out to production." A bare phrase match on "rolled out"/
+  "was deployed" can't tell that apart from actually asserting it
+  happened; `HypothesisLabeled` only fails when the deployment-related
+  phrase appears in a sentence with **no** hedge/question language at
+  all — see its custom `hedge_patterns` in `system_troubleshooter.py`,
+  extended beyond the default set to also cover "whether"/"check"/
+  "verify"/"confirm"/"no evidence"/"unknown", not just "possible"/
+  "unclear").
+
+A correct answer may (and is expected to) identify the change as
+temporally correlated/relevant and recommend deployment-state evidence
+as the next check — that's a passing, encouraged answer shape, not a
+violation. See
+`tests/eval/test_system_troubleshooter_scenarios.py`'s
+`test_git_correlation_good_answer_passes`/
+`test_git_correlation_bad_answer_fails_when_deployment_is_asserted_without_hedging`/
+`test_git_correlation_bad_answer_fails_when_causation_is_asserted` for
+the deterministic proofs — no live repository, network, or
+LLM-as-judge scoring is used; everything runs against the fixture-backed
+tool through the same deterministic scoring every other scenario uses.
+
 ## Adding a new scenario
 
 1. Add a fixture module under `mantis/eval/fixtures/` (or extend an
