@@ -64,6 +64,7 @@ class FakeChoice:
 class FakeResponse:
     choices: list[FakeChoice]
     usage: Any = None
+    model: str | None = None
 
 
 class FakeCompletions:
@@ -220,6 +221,7 @@ def test_run_scenario_against_one_model(monkeypatch):
     assert result.tool_calls == []
 
 
+
 def test_run_scenario_captures_tool_call_trace(monkeypatch):
     _patch_openai(
         monkeypatch,
@@ -271,6 +273,26 @@ def test_run_scenario_records_error_outcome_for_a_backend_failure(monkeypatch):
     assert result.outcome == "error"
     assert result.final_answer is None
     assert "APIConnectionError" in result.error
+
+
+def test_run_scenario_error_summary_is_bounded_and_never_the_raw_provider_body(monkeypatch):
+    # A real example encountered during a live qualification run: an
+    # nginx 504 Gateway Time-out HTML page as an openai.OpenAIError's
+    # own message. error_summary must stay class-name(+status)-only;
+    # error (kept for local/raw-file debugging) may still carry the
+    # full detail.
+    html_body = "<html><head><title>504 Gateway Time-out</title></head><body>nginx</body></html>"
+    response = httpx.Response(504, request=httpx.Request("POST", "http://litellm.example.test"))
+    exc = openai.InternalServerError(html_body, response=response, body=None)
+    _patch_openai(monkeypatch, {"model-a": [exc]})
+    scenario = _echo_scenario()
+
+    result = run_scenario(scenario, "model-a", base_model_config=_base_config())
+
+    assert result.outcome == "error"
+    assert result.error_summary == "InternalServerError (status=504)"
+    assert html_body not in result.error_summary
+    assert html_body in result.error  # full detail still available locally
 
 
 def test_run_scenario_records_error_outcome_for_max_iterations_exceeded(monkeypatch):
@@ -328,6 +350,29 @@ def test_run_scenario_raw_message_is_none_for_a_real_answer(monkeypatch):
     result = run_scenario(scenario, "model-a", base_model_config=_base_config())
 
     assert result.raw_message is None
+
+
+def test_run_scenario_captures_backend_model_when_reported(monkeypatch):
+    response = FakeResponse(
+        choices=[FakeChoice(message=FakeMessage(content="hi", tool_calls=None))],
+        model="ollama/qwen2.5:14b",
+    )
+    _patch_openai(monkeypatch, {"mantis-fast": [response]})
+    scenario = _echo_scenario()
+
+    result = run_scenario(scenario, "mantis-fast", base_model_config=_base_config())
+
+    assert result.model == "mantis-fast"  # the requested alias
+    assert result.backend_model == "ollama/qwen2.5:14b"  # the resolved backend identity
+
+
+def test_run_scenario_backend_model_is_none_when_backend_omits_it(monkeypatch):
+    _patch_openai(monkeypatch, {"model-a": [_final("hi")]})
+    scenario = _echo_scenario()
+
+    result = run_scenario(scenario, "model-a", base_model_config=_base_config())
+
+    assert result.backend_model is None
 
 
 def test_run_scenario_captures_usage_and_total_tokens(monkeypatch):
