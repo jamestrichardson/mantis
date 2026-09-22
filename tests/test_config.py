@@ -12,7 +12,6 @@ import pytest
 import mantis.config as config
 from mantis.config import (
     DEFAULT_LITELLM_MODEL,
-    MAX_ROUTING_ALIASES,
     ApiClientConfig,
     ApiServerConfig,
     AWXConfig,
@@ -21,13 +20,11 @@ from mantis.config import (
     GitRepositoriesConfig,
     HTTPProfilesConfig,
     LiteLLMConfig,
-    ModelRoutingPolicy,
     ReliabilityConfig,
     Secret,
     TLSProfilesConfig,
     get_metrics_enabled,
 )
-from mantis.routing import DEFAULT_ELIGIBLE_FAILURE_KINDS, ModelCallFailureKind
 
 
 def test_litellm_model_defaults_when_unset(monkeypatch):
@@ -111,165 +108,6 @@ def test_model_env_does_not_affect_url_or_api_key(monkeypatch):
 
     assert cfg.url == "http://localhost:4000"
     assert cfg.api_key.get_secret_value() == "test-key"
-
-
-# ---------------------------------------------------------------------------
-# ModelRoutingPolicy (#16): server-side model-call routing/fallback policy.
-# ---------------------------------------------------------------------------
-
-
-def test_single_builds_a_one_route_policy_matching_pre_16_behavior():
-    policy = ModelRoutingPolicy.single("some-alias")
-
-    assert policy.primary_alias == "some-alias"
-    assert policy.fallback_aliases == ()
-    assert policy.aliases == ("some-alias",)
-    assert policy.max_attempts == 1
-    assert policy.eligible_failure_kinds == DEFAULT_ELIGIBLE_FAILURE_KINDS
-
-
-def test_policy_with_fallbacks_orders_aliases_primary_first():
-    policy = ModelRoutingPolicy(primary_alias="a", fallback_aliases=("b", "c"), max_attempts=3)
-
-    assert policy.aliases == ("a", "b", "c")
-
-
-def test_empty_primary_alias_is_rejected():
-    with pytest.raises(ConfigurationError, match="primary_alias"):
-        ModelRoutingPolicy(primary_alias="")
-
-
-def test_whitespace_only_primary_alias_is_rejected():
-    with pytest.raises(ConfigurationError, match="primary_alias"):
-        ModelRoutingPolicy(primary_alias="   ")
-
-
-def test_empty_fallback_alias_is_rejected():
-    with pytest.raises(ConfigurationError, match="fallback_aliases"):
-        ModelRoutingPolicy(primary_alias="a", fallback_aliases=("b", ""))
-
-
-def test_duplicate_fallback_aliases_are_rejected():
-    with pytest.raises(ConfigurationError, match="duplicates"):
-        ModelRoutingPolicy(primary_alias="a", fallback_aliases=("b", "b"))
-
-
-def test_primary_alias_duplicated_in_fallbacks_is_rejected():
-    with pytest.raises(ConfigurationError, match="must not also appear"):
-        ModelRoutingPolicy(primary_alias="a", fallback_aliases=("a", "b"))
-
-
-def test_max_attempts_below_one_is_rejected():
-    with pytest.raises(ConfigurationError, match="max_attempts"):
-        ModelRoutingPolicy(primary_alias="a", max_attempts=0)
-
-
-def test_max_attempts_cannot_exceed_available_routes():
-    with pytest.raises(ConfigurationError, match="cannot exceed"):
-        ModelRoutingPolicy(primary_alias="a", fallback_aliases=("b",), max_attempts=3)
-
-
-def test_max_attempts_equal_to_available_routes_is_allowed():
-    policy = ModelRoutingPolicy(primary_alias="a", fallback_aliases=("b",), max_attempts=2)
-    assert policy.max_attempts == 2
-
-
-def test_total_routes_at_the_cap_is_allowed():
-    fallbacks = tuple(f"fallback-{i}" for i in range(MAX_ROUTING_ALIASES - 1))
-    policy = ModelRoutingPolicy(primary_alias="primary", fallback_aliases=fallbacks)
-    assert len(policy.aliases) == MAX_ROUTING_ALIASES
-
-
-def test_total_routes_beyond_the_cap_is_rejected():
-    fallbacks = tuple(f"fallback-{i}" for i in range(MAX_ROUTING_ALIASES))
-    with pytest.raises(ConfigurationError, match="at most"):
-        ModelRoutingPolicy(primary_alias="primary", fallback_aliases=fallbacks)
-
-
-def test_from_litellm_config_maps_the_alias_as_primary():
-    litellm_config = LiteLLMConfig(url="http://x", api_key=Secret("k"), model="agent-model")
-
-    policy = ModelRoutingPolicy.from_litellm_config(litellm_config)
-
-    assert policy.primary_alias == "agent-model"
-    assert policy.fallback_aliases == ()
-
-
-def test_from_litellm_config_accepts_additional_fallback_kwargs():
-    litellm_config = LiteLLMConfig(url="http://x", api_key=Secret("k"), model="agent-model")
-
-    policy = ModelRoutingPolicy.from_litellm_config(
-        litellm_config, fallback_aliases=("backup",), max_attempts=2
-    )
-
-    assert policy.aliases == ("agent-model", "backup")
-    assert policy.max_attempts == 2
-
-
-def test_from_env_defaults_to_a_single_route_matching_litellm_model(monkeypatch):
-    monkeypatch.delenv("LITELLM_MODEL", raising=False)
-    monkeypatch.delenv("LITELLM_MODEL_FALLBACKS", raising=False)
-    monkeypatch.delenv("LITELLM_MODEL_MAX_ATTEMPTS", raising=False)
-
-    policy = ModelRoutingPolicy.from_env()
-
-    assert policy.primary_alias == DEFAULT_LITELLM_MODEL
-    assert policy.fallback_aliases == ()
-    assert policy.max_attempts == 1
-
-
-def test_from_env_reads_fallbacks_from_the_global_variable(monkeypatch):
-    monkeypatch.setenv("LITELLM_MODEL", "primary-model")
-    monkeypatch.setenv("LITELLM_MODEL_FALLBACKS", "fb-1, fb-2")
-    monkeypatch.delenv("LITELLM_MODEL_MAX_ATTEMPTS", raising=False)
-
-    policy = ModelRoutingPolicy.from_env()
-
-    assert policy.aliases == ("primary-model", "fb-1", "fb-2")
-    assert policy.max_attempts == 3  # default: one attempt per configured route
-
-
-def test_from_env_agent_specific_fallback_env_wins_over_global(monkeypatch):
-    monkeypatch.setenv("LITELLM_MODEL_FALLBACKS", "should-be-ignored")
-    monkeypatch.setenv("MANTIS_SYSTEM_TROUBLESHOOTER_MODEL_FALLBACKS", "agent-fallback")
-    monkeypatch.setenv("LITELLM_MODEL", "primary-model")
-
-    policy = ModelRoutingPolicy.from_env(fallback_env="MANTIS_SYSTEM_TROUBLESHOOTER_MODEL_FALLBACKS")
-
-    assert policy.fallback_aliases == ("agent-fallback",)
-
-
-def test_from_env_explicit_max_attempts_overrides_the_default(monkeypatch):
-    monkeypatch.setenv("LITELLM_MODEL", "primary-model")
-    monkeypatch.setenv("LITELLM_MODEL_FALLBACKS", "fb-1,fb-2")
-    monkeypatch.setenv("LITELLM_MODEL_MAX_ATTEMPTS", "1")
-
-    policy = ModelRoutingPolicy.from_env()
-
-    assert policy.max_attempts == 1
-
-
-def test_from_env_non_integer_max_attempts_raises_configuration_error(monkeypatch):
-    monkeypatch.setenv("LITELLM_MODEL_MAX_ATTEMPTS", "not-a-number")
-
-    with pytest.raises(ConfigurationError, match="LITELLM_MODEL_MAX_ATTEMPTS"):
-        ModelRoutingPolicy.from_env()
-
-
-def test_from_env_model_env_precedence_matches_litellm_config(monkeypatch):
-    monkeypatch.setenv("LITELLM_MODEL", "global-model")
-    monkeypatch.setenv("MANTIS_SYSTEM_TROUBLESHOOTER_MODEL", "agent-specific-model")
-
-    policy = ModelRoutingPolicy.from_env(model_env="MANTIS_SYSTEM_TROUBLESHOOTER_MODEL")
-
-    assert policy.primary_alias == "agent-specific-model"
-
-
-def test_eligible_failure_kinds_can_be_overridden():
-    custom = frozenset({ModelCallFailureKind.TIMEOUT})
-    policy = ModelRoutingPolicy(primary_alias="a", eligible_failure_kinds=custom)
-
-    assert policy.eligible_failure_kinds == custom
 
 
 def test_load_env_files_most_specific_file_wins(tmp_path, monkeypatch):

@@ -23,11 +23,7 @@ from mantis.api.catalog import (
 )
 from mantis.api.invocation import ConcurrencyLimitExceededError, InvocationService, _run_in_daemon_thread
 from mantis.config import ConfigurationError
-from mantis.runtime import (
-    MaxIterationsExceededError,
-    ModelRoutingExhaustedError,
-    RunDeadlineExceededError,
-)
+from mantis.runtime import MaxIterationsExceededError, RunDeadlineExceededError
 
 
 class _FakeRuntime:
@@ -116,7 +112,6 @@ def test_agent_unavailable_when_build_runtime_raises_configuration_error():
     [
         (MaxIterationsExceededError("exceeded"), "max_iterations"),
         (RunDeadlineExceededError("exceeded"), "run_timeout"),
-        (ModelRoutingExhaustedError("every route failed", attempts=[]), "model_routing_exhausted"),
         (ConfigurationError("Missing required environment variable: AWX_TOKEN"), "server_configuration_error"),
         (APIConnectionError(request=None), "model_provider_error"),
         (ValueError("something broke"), "internal_error"),

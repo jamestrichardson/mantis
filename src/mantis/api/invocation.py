@@ -31,11 +31,7 @@ from mantis.api.catalog import (
 )
 from mantis.config import ConfigurationError
 from mantis.observability.logging import log_event, new_run_id
-from mantis.runtime import (
-    MaxIterationsExceededError,
-    ModelRoutingExhaustedError,
-    RunDeadlineExceededError,
-)
+from mantis.runtime import MaxIterationsExceededError, RunDeadlineExceededError
 from mantis.security import redact_text
 
 logger = logging.getLogger(__name__)
@@ -279,16 +275,6 @@ class InvocationService:
             )
         elif isinstance(exc, RunDeadlineExceededError):
             kind, message = "run_timeout", "The agent run exceeded its configured time budget."
-        elif isinstance(exc, ModelRoutingExhaustedError):
-            # #16: every configured route (primary + fallbacks) failed
-            # for one logical model call -- a distinct, classified
-            # routing/model failure, never the generic "internal_error"
-            # an unmatched exception falls through to below (that kind
-            # is reserved for genuinely unexpected Mantis defects).
-            kind, message = (
-                "model_routing_exhausted",
-                "The model gateway was unreachable or failing on every configured route for this agent.",
-            )
         elif isinstance(exc, ConfigurationError):
             kind, message = "server_configuration_error", "The server is misconfigured for this agent."
         elif isinstance(exc, OpenAIError):

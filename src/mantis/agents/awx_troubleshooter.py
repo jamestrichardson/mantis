@@ -16,7 +16,7 @@ import sys
 # Importing mantis.tools registers all built-in tools (including AWX) into
 # the shared default_registry as a side effect.
 import mantis.tools  # noqa: F401
-from mantis.config import ConfigurationError, LiteLLMConfig, ModelRoutingPolicy
+from mantis.config import ConfigurationError, LiteLLMConfig
 from mantis.runtime import AgentRuntime, MaxIterationsExceededError
 
 AGENT_NAME = "awx-troubleshooter"
@@ -126,15 +126,6 @@ def build_runtime() -> AgentRuntime:
     ``model_config``: resolved via ``LiteLLMConfig.from_env(model_env=MODEL_ENV)``,
     so ``MANTIS_AWX_TROUBLESHOOTER_MODEL`` overrides ``LITELLM_MODEL`` for
     this agent specifically when set — see ``LiteLLMConfig.from_env``.
-
-    ``routing_policy``: server-side model-call routing/fallback (#16,
-    see ``mantis.config.ModelRoutingPolicy`` and ``docs/model-routing.md``).
-    Resolved from the environment the same way ``model_config`` is —
-    ``MANTIS_AWX_TROUBLESHOOTER_MODEL_FALLBACKS``/``LITELLM_MODEL_FALLBACKS``
-    for ordered fallback aliases (comma-separated), unset by default,
-    which behaves exactly as before #16 (a single route, no fallback
-    attempts). No prompt change is needed to use this — the model never
-    knows which alias actually answered.
     """
     return AgentRuntime(
         name=AGENT_NAME,
@@ -143,11 +134,6 @@ def build_runtime() -> AgentRuntime:
         tool_call_budget=1,
         temperature=0.1,
         model_config=LiteLLMConfig.from_env(model_env=MODEL_ENV),
-        routing_policy=ModelRoutingPolicy.from_env(
-            model_env=MODEL_ENV,
-            fallback_env=f"{MODEL_ENV}_FALLBACKS",
-            max_attempts_env=f"{MODEL_ENV}_MAX_ATTEMPTS",
-        ),
     )
 
 

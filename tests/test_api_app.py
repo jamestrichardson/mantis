@@ -387,28 +387,6 @@ def test_unknown_fields_are_rejected():
     assert response.status_code == 422
 
 
-def test_caller_cannot_override_server_side_routing_aliases():
-    # #16: routing/fallback aliases are exclusively server-side
-    # (mantis.config.ModelRoutingPolicy, wired through each agent's
-    # build_runtime()) -- RunRequest has no model/alias/routing field at
-    # all, and extra="forbid" rejects an attempt to smuggle one in.
-    app = create_app(server_config=_server_config())
-    with TestClient(app) as client:
-        response = client.post(
-            "/api/v1/runs",
-            json={
-                "agent": "awx-troubleshooter",
-                "prompt": "x",
-                "model_alias": "attacker-chosen-alias",
-                "fallback_aliases": ["attacker-chosen-fallback"],
-                "routing_policy": {"primary_alias": "attacker-chosen-alias"},
-            },
-            headers=AUTH,
-        )
-    assert response.status_code == 422
-    assert response.json()["error"]["type"] == "validation_error"
-
-
 def test_run_without_auth_is_401():
     app = create_app(server_config=_server_config())
     with TestClient(app) as client:

@@ -26,7 +26,7 @@ import sys
 # Importing mantis.tools registers all built-in tools (AWX, network,
 # Prometheus, Loki) into the shared default_registry as a side effect.
 import mantis.tools  # noqa: F401
-from mantis.config import ConfigurationError, LiteLLMConfig, ModelRoutingPolicy
+from mantis.config import ConfigurationError, LiteLLMConfig
 from mantis.runtime import AgentRuntime, MaxIterationsExceededError
 
 AGENT_NAME = "system-troubleshooter"
@@ -236,15 +236,10 @@ def build_runtime() -> AgentRuntime:
     ``MANTIS_SYSTEM_TROUBLESHOOTER_MODEL`` overrides ``LITELLM_MODEL``
     for this agent specifically when set, falling back to
     ``LITELLM_MODEL`` (then the built-in default) otherwise — never a
-    provider-specific model ID hardcoded here.
-
-    ``routing_policy`` (#16) is resolved the same way, via
-    ``ModelRoutingPolicy.from_env`` —
-    ``MANTIS_SYSTEM_TROUBLESHOOTER_MODEL_FALLBACKS``/
-    ``LITELLM_MODEL_FALLBACKS`` for ordered fallback aliases, unset by
-    default (a single route, no fallback attempts, exactly as before
-    #16). See ``mantis.config.ModelRoutingPolicy`` and
-    ``docs/model-routing.md``.
+    provider-specific model ID hardcoded here. This is a minimal
+    precursor to #16's full routing/escalation policy, not that policy
+    itself: no fallback, retry, or escalation across models happens in
+    this agent.
     """
     return AgentRuntime(
         name=AGENT_NAME,
@@ -254,11 +249,6 @@ def build_runtime() -> AgentRuntime:
         max_iterations=MAX_ITERATIONS,
         temperature=0.1,
         model_config=LiteLLMConfig.from_env(model_env=MODEL_ENV),
-        routing_policy=ModelRoutingPolicy.from_env(
-            model_env=MODEL_ENV,
-            fallback_env=f"{MODEL_ENV}_FALLBACKS",
-            max_attempts_env=f"{MODEL_ENV}_MAX_ATTEMPTS",
-        ),
     )
 
 

@@ -17,7 +17,7 @@ background health probes, no async task-queue infrastructure. See
 
 ## Retry budget vs. tool-call budget
 
-Five mechanisms are easy to conflate. Keep them separate:
+Four mechanisms are easy to conflate. Keep them separate:
 
 | Mechanism | What it counts | Owned by |
 |---|---|---|
@@ -25,7 +25,6 @@ Five mechanisms are easy to conflate. Keep them separate:
 | retry/attempt budget | Transport attempts *inside one logical tool call* | `mantis.reliability.RetryPolicy` |
 | duplicate-call replay | Reusing a cached result for an exact-repeat model request — never triggers another integration attempt | `AgentRuntime` |
 | run-local short circuit | Fail-fast after repeated transient failures *within one run* — no request at all | `mantis.reliability.RunLocalBreaker` |
-| model-call routing/fallback (#16) | Bounded attempts against configured LiteLLM aliases *for one logical model call*, only for an explicitly eligible failure kind — never touches tool dispatch | `mantis.config.ModelRoutingPolicy` / `AgentRuntime` — see [docs/model-routing.md](model-routing.md) |
 
 A model asking for the same tool call twice is **one** entry against
 `tool_call_budget`'s cousin concept (successful calls) and **zero**

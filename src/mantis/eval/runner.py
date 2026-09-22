@@ -11,13 +11,12 @@ from datetime import datetime, timezone
 
 from openai import OpenAIError
 
-from mantis.config import LiteLLMConfig, ModelRoutingPolicy
+from mantis.config import LiteLLMConfig
 from mantis.eval.results import EvalResult, ToolCallSummary
 from mantis.eval.scenarios import Scenario
 from mantis.eval.scoring import Evaluation, evaluate_result
 from mantis.observability import metrics
 from mantis.observability.logging import log_event
-from mantis.routing import safe_model_call_detail
 from mantis.runtime import DEFAULT_MAX_ITERATIONS, AgentRuntime, RuntimeError_
 
 logger = logging.getLogger(__name__)
@@ -32,18 +31,8 @@ def run_scenario(
     model_alias: str,
     *,
     base_model_config: LiteLLMConfig | None = None,
-    routing_policy: ModelRoutingPolicy | None = None,
 ) -> EvalResult:
     """Run ``scenario`` once against ``model_alias`` and return the result.
-
-    ``routing_policy`` (#16) is optional and defaults to ``None``, which
-    ``AgentRuntime`` itself turns into a one-route policy wrapping
-    ``model_alias`` — identical to every call site that predates this
-    parameter. Pass an explicit policy (with ``model_alias`` as its
-    ``primary_alias``) to exercise a real primary+fallback routing
-    policy through the eval/qualification path, e.g. to qualify a
-    candidate alias *and* its configured fallback(s) together rather
-    than only ever the single-route default.
 
     Only two categories of failure are caught and recorded as
     ``outcome="error"`` instead of raising:
@@ -52,9 +41,8 @@ def run_scenario(
       misbehaved: unreachable, timed out, rate-limited, authentication
       failure, a malformed response, etc.
     - ``mantis.runtime.RuntimeError_`` (and subclasses, e.g.
-      ``MaxIterationsExceededError``, ``ModelRoutingExhaustedError``) —
-      the *model's own behavior* was disqualifying (never converged,
-      looped on tool calls, exhausted every configured route).
+      ``MaxIterationsExceededError``) — the *model's own behavior* was
+      disqualifying (never converged, looped on tool calls).
 
     Both are legitimate qualification signal about the model being
     evaluated, which is why one model's failure must never abort a
@@ -66,9 +54,7 @@ def run_scenario(
     a scenario), not evidence about the model, and must propagate rather
     than being recorded as if the model had failed. Silently attributing
     a Mantis defect to "model X errored" would corrupt qualification
-    data in exactly the way this harness exists to prevent — callers
-    (e.g. ``mantis.eval.qualification.qualify_models``) must preserve
-    this distinction rather than catching more broadly.
+    data in exactly the way this harness exists to prevent.
     """
     model_config = dataclasses.replace(
         base_model_config or LiteLLMConfig.from_env(), model=model_alias
@@ -87,7 +73,6 @@ def run_scenario(
             if scenario.max_iterations is not None
             else DEFAULT_MAX_ITERATIONS
         ),
-        routing_policy=routing_policy,
     )
 
     started_at = _utc_now_iso()
@@ -95,23 +80,12 @@ def run_scenario(
     final_answer: str | None = None
     outcome = "ok"
     error: str | None = None
-    error_summary: str | None = None
 
     try:
         final_answer = runtime.run(scenario.prompt)
     except (OpenAIError, RuntimeError_) as exc:
         outcome = "error"
         error = f"{type(exc).__name__}: {exc}"
-        # Bounded/safe (class name + HTTP status code only, see
-        # mantis.routing.safe_model_call_detail) -- never the raw
-        # exception message, which for an openai.OpenAIError can embed
-        # an arbitrary, potentially large upstream/provider error body
-        # (a real example: an nginx 504 Gateway Time-out HTML page).
-        # `error` above keeps the full detail for local/raw-file
-        # debugging; `error_summary` is what's safe to carry into a
-        # bounded, committed artifact (see
-        # mantis.eval.qualification.QualificationRecord).
-        error_summary = safe_model_call_detail(exc)
         logger.warning(
             "[eval] scenario=%s model=%s failed: %s", scenario.name, model_alias, error
         )
@@ -145,19 +119,6 @@ def run_scenario(
         if entry is not None and "total_tokens" in entry
     ]
     total_tokens = sum(token_totals) if token_totals else None
-    backend_model = next(
-        (m for m in reversed(runtime.backend_model_log) if m is not None), None
-    )
-    # #16: route-attempt history, always populated (even for a run that
-    # used no explicit routing policy -- see AgentRuntime.__post_init__'s
-    # default one-route wrapping), never inflating tool_calls/tool_call
-    # counts above, which come entirely from runtime.call_log.
-    requested_primary_alias = runtime.routing_policy.primary_alias
-    final_alias = next(
-        (attempt.requested_alias for attempt in reversed(runtime.model_call_log) if attempt.outcome == "ok"),
-        None,
-    )
-    route_attempts = [attempt.to_dict() for attempt in runtime.model_call_log]
 
     result = EvalResult(
         scenario=scenario.name,
@@ -174,12 +135,7 @@ def run_scenario(
         malformed_call_count=malformed_call_count,
         usage=list(runtime.usage_log),
         total_tokens=total_tokens,
-        backend_model=backend_model,
-        requested_primary_alias=requested_primary_alias,
-        final_alias=final_alias,
-        route_attempts=route_attempts,
         error=error,
-        error_summary=error_summary,
         raw_message=runtime.diagnostic_raw_message,
     )
 

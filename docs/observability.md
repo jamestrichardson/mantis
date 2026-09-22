@@ -74,8 +74,7 @@ Common fields present where applicable: `run_id`, `agent`, `model_alias`,
 | `mantis_run_started` | `AgentRuntime.run()` | `run_id`, `agent`, `model_alias` |
 | `mantis_run_completed` | `AgentRuntime.run()` | `run_id`, `agent`, `model_alias`, `duration_seconds`, `outcome="ok"` |
 | `mantis_run_failed` | `AgentRuntime.run()` | `run_id`, `agent`, `model_alias`, `duration_seconds`, `outcome` (`"error"` or `"max_iterations"`), `error_kind` |
-| `mantis_model_call` | `AgentRuntime._call_model_with_routing()`, once per model-call *attempt* (#16 — one iteration may make more than one attempt if it falls back) | `run_id`, `agent`, `model_alias` (the attempted alias), `iteration`, `attempt_number`, `routing_reason` (`primary`/`fallback`), `duration_seconds`, `tokens`, `outcome` (`ok`/`error`), `failure_kind` (on error) |
-| `mantis_model_routing_exhausted` | `AgentRuntime._call_model_with_routing()`, once per logical model call where every permitted route attempt failed (#16) | `run_id`, `agent`, `iteration`, `attempts`, `failure_kind` (the last attempt's) |
+| `mantis_model_call` | `AgentRuntime.run()`, once per model round-trip | `run_id`, `agent`, `model_alias`, `iteration`, `duration_seconds`, `tokens` |
 | `mantis_tool_call` | `AgentRuntime._dispatch_tool_call()`, once per tool-call attempt, including rejections that never reach a tool handler | `run_id`, `agent`, `iteration`, `tool`, `outcome` (`ok`/`duplicate`/`unknown_tool`/`bad_arguments`/`error`), `duration_seconds` (executed calls only), `error_kind`, `bound_arguments`, `bound_result` |
 | `mantis_eval_result` | `mantis.eval.runner.run_scenario()`, once per scenario/model run | `run_id` (shared with the underlying `AgentRuntime` run), `scenario`, `model_alias`, `outcome` (`pass`/`fail`/`error`/`unscored`), `score`, `max_score`, `duration_seconds` |
 | `mantis_eval_check` | `run_scenario()`, once per expectation checked | `run_id`, `scenario`, `model_alias`, `check_name`, `outcome` (`pass`/`fail`), `hard`, `detail` |
@@ -145,12 +144,9 @@ evaluation runs report into the exact same metric names, not a parallel
 |---|---|---|
 | `mantis_runs_total` | Counter | `agent`, `model_alias`, `result`, `environment` |
 | `mantis_run_duration_seconds` | Histogram | `agent`, `model_alias`, `result`, `environment` |
-| `mantis_model_calls_total` | Counter | `agent`, `model_alias`, `environment` — one increment per model-call *attempt* (#16), not per iteration |
+| `mantis_model_calls_total` | Counter | `agent`, `model_alias`, `environment` |
 | `mantis_model_call_duration_seconds` | Histogram | `agent`, `model_alias`, `environment` |
 | `mantis_model_tokens_total` | Counter | `agent`, `model_alias`, `environment` |
-| `mantis_model_call_failures_total` | Counter | `agent`, `model_alias`, `failure_kind`, `environment` (#16) |
-| `mantis_model_routing_fallbacks_total` | Counter | `agent`, `environment` (#16) — incremented each time an eligible failure triggers a fallback attempt |
-| `mantis_model_routing_exhausted_total` | Counter | `agent`, `environment` (#16) — incremented when every permitted route attempt for one logical call failed |
 | `mantis_tool_calls_total` | Counter | `agent`, `tool`, `result`, `environment` |
 | `mantis_tool_call_duration_seconds` | Histogram | `agent`, `tool`, `environment` |
 | `mantis_tool_errors_total` | Counter | `agent`, `tool`, `error_kind`, `environment` |

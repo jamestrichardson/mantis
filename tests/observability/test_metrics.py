@@ -14,16 +14,7 @@ from mantis.observability import metrics
 # Every label name used anywhere in metrics.py must be on this list — a
 # guard against someone casually adding a high-cardinality label (run_id,
 # a hostname, an AWX job ID, ...) to a metric later. See docs/observability.md.
-ALLOWED_LABEL_NAMES = {
-    "agent",
-    "model_alias",
-    "scenario",
-    "result",
-    "tool",
-    "error_kind",
-    "failure_kind",
-    "environment",
-}
+ALLOWED_LABEL_NAMES = {"agent", "model_alias", "scenario", "result", "tool", "error_kind", "environment"}
 
 ALL_METRICS = [
     metrics.RUNS_TOTAL,
@@ -31,9 +22,6 @@ ALL_METRICS = [
     metrics.MODEL_CALLS_TOTAL,
     metrics.MODEL_CALL_DURATION_SECONDS,
     metrics.MODEL_TOKENS_TOTAL,
-    metrics.MODEL_CALL_FAILURES_TOTAL,
-    metrics.MODEL_ROUTING_FALLBACKS_TOTAL,
-    metrics.MODEL_ROUTING_EXHAUSTED_TOTAL,
     metrics.TOOL_CALLS_TOTAL,
     metrics.TOOL_CALL_DURATION_SECONDS,
     metrics.TOOL_ERRORS_TOTAL,
