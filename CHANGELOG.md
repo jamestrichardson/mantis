@@ -1,5 +1,28 @@
 # Changelog
 
+## [1.9.0](https://github.com/jamestrichardson/mantis/compare/mantis-v1.8.0...mantis-v1.9.0) (2026-09-22)
+
+
+### Features
+
+* add git_recent_changes source-history tool ([#17](https://github.com/jamestrichardson/mantis/issues/17)) ([bd9584b](https://github.com/jamestrichardson/mantis/commit/bd9584b430f1177563ece48390f7a7ed04b91fe8))
+* add http_probe and tls_certificate_inspect tools ([#110](https://github.com/jamestrichardson/mantis/issues/110), [#111](https://github.com/jamestrichardson/mantis/issues/111)) ([23994bc](https://github.com/jamestrichardson/mantis/commit/23994bc19e1255b51a89a198ed12bcd432d490e7))
+* **agent:** wire git_recent_changes into the System Troubleshooter ([#17](https://github.com/jamestrichardson/mantis/issues/17), [#11](https://github.com/jamestrichardson/mantis/issues/11)) ([b51b1ce](https://github.com/jamestrichardson/mantis/commit/b51b1ce079b2bd68517000a1ae385262d21f0956))
+* **config:** add Git repository alias configuration ([#17](https://github.com/jamestrichardson/mantis/issues/17)) ([fce873a](https://github.com/jamestrichardson/mantis/commit/fce873a7636e24b67e4ac4180ac166bdfda9873b))
+* **config:** add HTTP and TLS target profile configuration ([#110](https://github.com/jamestrichardson/mantis/issues/110), [#111](https://github.com/jamestrichardson/mantis/issues/111)) ([5cbb7d2](https://github.com/jamestrichardson/mantis/commit/5cbb7d209e812892e4286c6b6d7a237e5696c221))
+* **dns:** add bounded, read-only dns_lookup tool ([#109](https://github.com/jamestrichardson/mantis/issues/109)) ([a2f7baf](https://github.com/jamestrichardson/mantis/commit/a2f7bafa4ca490275aa0e2dbeda018c8ddcec5c6))
+* **git:** add bounded, read-only git_recent_changes tool ([#17](https://github.com/jamestrichardson/mantis/issues/17)) ([e0c7063](https://github.com/jamestrichardson/mantis/commit/e0c7063a097da6880acc776402567e253eeb9b0c))
+* **http:** add bounded, read-only http_probe tool ([#110](https://github.com/jamestrichardson/mantis/issues/110)) ([eb7e797](https://github.com/jamestrichardson/mantis/commit/eb7e797a2b57818041b1c728d4cdfe5ac2ea27bc))
+* **tls:** add TLS certificate inspection tool with inspect-vs-verify semantics ([#111](https://github.com/jamestrichardson/mantis/issues/111)) ([56a92cc](https://github.com/jamestrichardson/mantis/commit/56a92cc11dcd884e628d8460d6440829775e89b1))
+
+
+### Bug Fixes
+
+* **dns:** stop writing raw untrusted input straight to the log ([415cdf3](https://github.com/jamestrichardson/mantis/commit/415cdf38dcf8362bac3ec7abae76476aca4cf5e7))
+* **http,tls:** address PR [#119](https://github.com/jamestrichardson/mantis/issues/119) review findings ([dc06fb4](https://github.com/jamestrichardson/mantis/commit/dc06fb48053158c9b5b798651846ae140e56a8b7))
+* **http:** close path-traversal escape and other PR [#119](https://github.com/jamestrichardson/mantis/issues/119) re-review findings ([84f6347](https://github.com/jamestrichardson/mantis/commit/84f634729df89f42f966bc5ec3d11c3e9187712b))
+* **http:** close percent-encoded path-separator bypass of traversal check ([56e6fad](https://github.com/jamestrichardson/mantis/commit/56e6fad81ab8162d1320aec507215872a190cfec))
+
 ## [1.8.0](https://github.com/jamestrichardson/mantis/compare/mantis-v1.7.0...mantis-v1.8.0) (2026-09-18)
 
 
