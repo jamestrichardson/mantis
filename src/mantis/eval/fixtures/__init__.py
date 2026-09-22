@@ -12,6 +12,7 @@ Importing this package registers every built-in scenario into
 """
 
 from mantis.eval.fixtures import awx as _awx  # noqa: F401  (registers scenarios)
+from mantis.eval.fixtures import incident_triage as _incident_triage  # noqa: F401  (registers scenarios)
 from mantis.eval.fixtures import kubernetes as _kubernetes  # noqa: F401  (registers scenarios)
 from mantis.eval.fixtures import loki as _loki  # noqa: F401  (registers scenarios)
 from mantis.eval.fixtures import network as _network  # noqa: F401  (registers scenarios)

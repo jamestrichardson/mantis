@@ -197,8 +197,9 @@ ALLOWED_TOOLS = [
 
 Each is simply named in a second agent's `ALLOWED_TOOLS` list — see
 [docs/system-troubleshooter.md](system-troubleshooter.md) for the full
-agent and [docs/agents.md](agents.md) for the envisioned agent list
-beyond it.
+agent, [docs/incident-triage.md](incident-triage.md) for a further
+agent (#18/#17's Kubernetes and Git tools reused the same way), and
+[docs/agents.md](agents.md) for the full agent list.
 
 ## Why AWX stdout and failure detection are handled the way they are
 

@@ -21,16 +21,17 @@ from mantis.config import ConfigurationError
 from mantis.runtime import AgentRuntime
 
 
-def test_default_catalog_includes_both_shipped_agents():
+def test_default_catalog_includes_all_shipped_agents():
     catalog = build_default_catalog()
 
     ids = {entry.id for entry in catalog.list()}
 
-    assert ids == {"awx-troubleshooter", "system-troubleshooter"}
+    assert ids == {"awx-troubleshooter", "system-troubleshooter", "incident-triage"}
 
 
 def test_default_catalog_entries_use_the_real_agent_modules():
     import mantis.agents.awx_troubleshooter as awx_troubleshooter
+    import mantis.agents.incident_triage as incident_triage
     import mantis.agents.system_troubleshooter as system_troubleshooter
 
     catalog = build_default_catalog()
@@ -38,6 +39,8 @@ def test_default_catalog_entries_use_the_real_agent_modules():
     assert catalog.get("awx-troubleshooter").build_runtime is awx_troubleshooter.build_runtime
     assert catalog.get("awx-troubleshooter").default_prompt == awx_troubleshooter.DEFAULT_PROMPT
     assert catalog.get("system-troubleshooter").build_runtime is system_troubleshooter.build_runtime
+    assert catalog.get("incident-triage").build_runtime is incident_triage.build_runtime
+    assert catalog.get("incident-triage").default_prompt == incident_triage.DEFAULT_PROMPT
 
 
 def test_default_catalog_entries_are_read_only():

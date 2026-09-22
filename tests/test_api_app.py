@@ -283,7 +283,7 @@ def test_agents_lists_the_real_catalog():
         response = client.get("/api/v1/agents", headers=AUTH)
 
     ids = {a["id"] for a in response.json()["agents"]}
-    assert ids == {"awx-troubleshooter", "system-troubleshooter"}
+    assert ids == {"awx-troubleshooter", "system-troubleshooter", "incident-triage"}
 
 
 def test_agents_never_exposes_system_prompt_or_internal_details():
