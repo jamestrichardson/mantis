@@ -166,6 +166,14 @@ curl -s "$MANTIS_API_URL/api/v1/agents" -H "Authorization: Bearer $MANTIS_API_TO
       "read_only": true,
       "available": true,
       "unavailable_reason": null
+    },
+    {
+      "id": "incident-triage",
+      "display_name": "Incident Triage",
+      "description": "Reviews a specific incident over an explicit time window, correlating AWX, network, Prometheus, Loki, Kubernetes, and recent Git history into a time-ordered evidence timeline with explicit evidence coverage -- distinct from System Troubleshooter's open-ended diagnosis.",
+      "read_only": true,
+      "available": true,
+      "unavailable_reason": null
     }
   ]
 }
@@ -382,6 +390,7 @@ mantis agents                                          # GET /api/v1/agents
 mantis run system-troubleshooter "Investigate ..."      # POST /api/v1/runs
 mantis system-troubleshooter "Investigate ..."          # same call, ergonomic wrapper
 mantis awx-troubleshooter "Show recent failures"        # same call, ergonomic wrapper
+mantis run incident-triage "Investigate the incident affecting ... between ... and ..."  # POST /api/v1/runs, no dedicated wrapper (yet)
 ```
 
 Configure the client with:

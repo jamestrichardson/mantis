@@ -63,6 +63,7 @@ as the basis for a differently-named environment (e.g. `cp .env.example
 | `LITELLM_MODEL`   | no       | `qwen3-opencode:latest` | Default model name/alias as registered in LiteLLM — used by any agent with no per-agent override set below. |
 | `MANTIS_AWX_TROUBLESHOOTER_MODEL` | no | — (falls back to `LITELLM_MODEL`) | Model alias for the AWX Troubleshooter agent specifically. See [Per-agent model overrides](#per-agent-model-overrides) below. |
 | `MANTIS_SYSTEM_TROUBLESHOOTER_MODEL` | no | — (falls back to `LITELLM_MODEL`) | Model alias for the System Troubleshooter agent specifically. See [Per-agent model overrides](#per-agent-model-overrides) below. |
+| `MANTIS_INCIDENT_TRIAGE_MODEL` | no | — (falls back to `LITELLM_MODEL`) | Model alias for the Incident Triage agent specifically. See [Per-agent model overrides](#per-agent-model-overrides) below. |
 
 ### Per-agent model overrides
 
@@ -83,9 +84,9 @@ server-side configuration: it is not, and must never become, a field on
 `POST /api/v1/runs` or a CLI argument — see
 [docs/api.md](api.md#invoking-an-agent).
 
-Existing deployments that only set `LITELLM_MODEL` are unaffected — both
-agents simply keep resolving that same value, exactly as before this
-existed.
+Existing deployments that only set `LITELLM_MODEL` are unaffected —
+every agent simply keeps resolving that same value, exactly as before
+this existed.
 
 ## AWX
 

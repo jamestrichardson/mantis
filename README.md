@@ -253,6 +253,7 @@ mantis run system-troubleshooter "Investigate why db-primary-02 keeps failing he
 - [docs/prometheus.md](docs/prometheus.md) — time-series evidence tool: instant/range PromQL, result bounding/truncation, query errors vs. retrieval failures, `up` semantics
 - [docs/loki.md](docs/loki.md) — log evidence tool: bounded LogQL range queries, stream/line bounding, truncation semantics, why Loki is treated as the highest-risk untrusted-text source
 - [docs/system-troubleshooter.md](docs/system-troubleshooter.md) — first multi-source investigation agent: tool allowlist, budgets, investigation/output contract, worked `ferros-c01` example
+- [docs/incident-triage.md](docs/incident-triage.md) — time-bounded incident-window investigation agent: explicit-window requirement, temporal evidence semantics, evidence-coverage contract
 - [docs/agents.md](docs/agents.md) — what an agent is, how to add one
 - [docs/configuration.md](docs/configuration.md) — the `.env.*` convention and all environment variables
 - [docs/security.md](docs/security.md) — least privilege, credentials, future mutation gates

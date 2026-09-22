@@ -69,7 +69,7 @@ def test_server_lists_real_agents(running_server):
     response = httpx.get(f"{base_url}/api/v1/agents", timeout=5.0)
 
     ids = {a["id"] for a in response.json()["agents"]}
-    assert ids == {"awx-troubleshooter", "system-troubleshooter"}
+    assert ids == {"awx-troubleshooter", "system-troubleshooter", "incident-triage"}
 
 
 def test_should_exit_triggers_graceful_shutdown_and_the_thread_exits():

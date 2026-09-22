@@ -101,8 +101,8 @@ Agents specialize primarily through:
 1. **System prompt** — domain framing, evidentiary standards, output
    shape.
 2. **Allowed tools** — what it can actually observe/do.
-3. **Model configuration** — which model/settings to use. Both current
-   agents resolve their `model_config` via
+3. **Model configuration** — which model/settings to use. Every
+   built-in agent resolves its `model_config` via
    `LiteLLMConfig.from_env(model_env="MANTIS_<AGENT>_MODEL")`, so an
    optional agent-specific environment variable (e.g.
    `MANTIS_AWX_TROUBLESHOOTER_MODEL`) can pin that agent to a different
@@ -218,15 +218,54 @@ run system-troubleshooter "..."`. The only other way to run it,
 debugging escape hatch described above — not a normal way to use this
 agent.
 
+## Incident Triage example
+
+`mantis/agents/incident_triage.py` is Mantis's first agent requiring an
+explicit incident window as input — see
+[docs/incident-triage.md](incident-triage.md) for the full design,
+its distinction from System Troubleshooter, and a worked example:
+
+- **Goal**: review a *specific* incident over an *explicit* time window
+  and report what the evidence actually shows during that window, what
+  remains unproven, and what to check next — rather than System
+  Troubleshooter's open-ended "why is X broken" diagnosis.
+- **Tools**: `["awx_recent_failed_jobs", "awx_get_job_failure",
+  "check_tcp_connectivity", "prometheus_query", "prometheus_query_range",
+  "loki_query", "git_recent_changes", "kubernetes_list_pods",
+  "kubernetes_list_deployments", "kubernetes_list_nodes",
+  "kubernetes_list_events"]` — all eleven already implemented
+  (#28/#8/#9/#10/#17/#18), all read-only. No integration or tool logic
+  lives in this agent module. `build_runtime()` additionally asserts
+  every one of these is registered read-only before constructing the
+  runtime, raising `ConfigurationError` (never silently accepting a
+  mutating tool) if that ever stops being true.
+- **Prompt discipline**: requires an explicit incident target and time
+  window before investigating anything, and asks for missing
+  information rather than guessing or exploring broadly to find it;
+  keeps current-state observations (TCP, an instant Prometheus query,
+  current Kubernetes state) explicitly separate from the incident's
+  historical timeline; keeps "a commit exists in history," "a commit
+  was deployed," and "a commit caused the incident" as three separate
+  claims; requires an explicit evidence-coverage report (queried
+  successfully / no match / unavailable / not queried) rather than
+  implying comprehensive review.
+- **Runtime tuning**: `tool_call_budget=13` and `max_iterations=17` —
+  sized for a full incident review that may touch every evidence
+  category at least once. See
+  [docs/incident-triage.md](incident-triage.md#budgets) for the full
+  rationale.
+
+Run it via the API/CLI: `mantis run incident-triage "..."`. The only
+other way to run it, `python -m mantis.agents.incident_triage`, is the
+unsupported debugging escape hatch described above — not a normal way
+to use this agent.
+
 ## Envisioned future agents
 
 These reuse the same runtime and largely the same tools — see
 [docs/architecture.md](architecture.md) for why this composition is
 cheap:
 
-- **Incident Triage Agent** — wires the existing Kubernetes (#18) tools
-  and new git/change-history (#17) tools together to correlate a live
-  incident against recent changes.
 - **Daily Operations Digest Agent** — a scheduled, read-only agent that
   summarizes the prior day's AWX activity, alerts, and log anomalies
   using the same shared tools with a digest-oriented prompt.

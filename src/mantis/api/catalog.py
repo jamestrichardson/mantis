@@ -150,6 +150,7 @@ def build_default_catalog() -> AgentCatalog:
     # catalog build order is obvious from this one function, matching
     # each agent module's own existing `import mantis.tools` convention.
     import mantis.agents.awx_troubleshooter as awx_troubleshooter
+    import mantis.agents.incident_triage as incident_triage
     import mantis.agents.system_troubleshooter as system_troubleshooter
 
     return AgentCatalog(
@@ -177,6 +178,20 @@ def build_default_catalog() -> AgentCatalog:
                 read_only=True,
                 build_runtime=system_troubleshooter.build_runtime,
                 default_prompt=system_troubleshooter.DEFAULT_PROMPT,
+            ),
+            AgentCatalogEntry(
+                id=incident_triage.AGENT_NAME,
+                display_name="Incident Triage",
+                description=(
+                    "Reviews a specific incident over an explicit time window, "
+                    "correlating AWX, network, Prometheus, Loki, Kubernetes, and "
+                    "recent Git history into a time-ordered evidence timeline with "
+                    "explicit evidence coverage -- distinct from System "
+                    "Troubleshooter's open-ended diagnosis."
+                ),
+                read_only=True,
+                build_runtime=incident_triage.build_runtime,
+                default_prompt=incident_triage.DEFAULT_PROMPT,
             ),
         ]
     )

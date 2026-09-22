@@ -47,9 +47,21 @@ from mantis.eval.fixtures.prometheus import build_prometheus_query_range_tool
 from mantis.eval.scenarios import Scenario, default_scenarios
 from mantis.integrations.prometheus import PrometheusAPIResponse
 from mantis.registry import Tool, ToolRegistry
-from mantis.tools.kubernetes import KUBERNETES_LIST_PODS_SCHEMA, kubernetes_list_pods
+from mantis.tools.kubernetes import (
+    KUBERNETES_LIST_DEPLOYMENTS_SCHEMA,
+    KUBERNETES_LIST_EVENTS_SCHEMA,
+    KUBERNETES_LIST_NODES_SCHEMA,
+    KUBERNETES_LIST_PODS_SCHEMA,
+    kubernetes_list_deployments,
+    kubernetes_list_events,
+    kubernetes_list_nodes,
+    kubernetes_list_pods,
+)
 
 KUBERNETES_PODS_TOOL_NAME = "kubernetes_list_pods"
+KUBERNETES_DEPLOYMENTS_TOOL_NAME = "kubernetes_list_deployments"
+KUBERNETES_NODES_TOOL_NAME = "kubernetes_list_nodes"
+KUBERNETES_EVENTS_TOOL_NAME = "kubernetes_list_events"
 PROMETHEUS_TOOL_NAME = "prometheus_query_range"
 
 _NAMESPACE = "payments"
@@ -131,6 +143,63 @@ def build_kubernetes_list_pods_tool(response: Any) -> Tool:
         category="kubernetes",
         mutating=False,
         description="Fixture-backed kubernetes_list_pods for evaluation scenarios.",
+    )
+
+
+def build_kubernetes_list_deployments_tool(response: Any) -> Tool:
+    """Build a ``Tool`` for ``kubernetes_list_deployments`` bound to a
+    canned ``V1DeploymentList`` via the real tool function's ``_client``
+    override -- same pattern as :func:`build_kubernetes_list_pods_tool`."""
+    client = FixtureKubernetesClient(config=_CLUSTER_CONFIG, deployments_response=response)
+
+    def _fixture_handler(namespace: str, label_selector: Any = None) -> dict[str, Any]:
+        return kubernetes_list_deployments(namespace, label_selector, _client=client)
+
+    return Tool(
+        name=KUBERNETES_DEPLOYMENTS_TOOL_NAME,
+        schema=KUBERNETES_LIST_DEPLOYMENTS_SCHEMA,
+        handler=_fixture_handler,
+        category="kubernetes",
+        mutating=False,
+        description="Fixture-backed kubernetes_list_deployments for evaluation scenarios.",
+    )
+
+
+def build_kubernetes_list_nodes_tool(response: Any) -> Tool:
+    """Build a ``Tool`` for ``kubernetes_list_nodes`` bound to a canned
+    ``V1NodeList`` via the real tool function's ``_client`` override --
+    same pattern as :func:`build_kubernetes_list_pods_tool`."""
+    client = FixtureKubernetesClient(config=_CLUSTER_CONFIG, nodes_response=response)
+
+    def _fixture_handler(label_selector: Any = None) -> dict[str, Any]:
+        return kubernetes_list_nodes(label_selector, _client=client)
+
+    return Tool(
+        name=KUBERNETES_NODES_TOOL_NAME,
+        schema=KUBERNETES_LIST_NODES_SCHEMA,
+        handler=_fixture_handler,
+        category="kubernetes",
+        mutating=False,
+        description="Fixture-backed kubernetes_list_nodes for evaluation scenarios.",
+    )
+
+
+def build_kubernetes_list_events_tool(response: Any) -> Tool:
+    """Build a ``Tool`` for ``kubernetes_list_events`` bound to a canned
+    ``CoreV1EventList`` via the real tool function's ``_client`` override
+    -- same pattern as :func:`build_kubernetes_list_pods_tool`."""
+    client = FixtureKubernetesClient(config=_CLUSTER_CONFIG, events_response=response)
+
+    def _fixture_handler(namespace: str, name: Any = None, kind: Any = None) -> dict[str, Any]:
+        return kubernetes_list_events(namespace, name, kind, _client=client)
+
+    return Tool(
+        name=KUBERNETES_EVENTS_TOOL_NAME,
+        schema=KUBERNETES_LIST_EVENTS_SCHEMA,
+        handler=_fixture_handler,
+        category="kubernetes",
+        mutating=False,
+        description="Fixture-backed kubernetes_list_events for evaluation scenarios.",
     )
 
 
