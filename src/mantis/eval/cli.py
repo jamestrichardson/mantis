@@ -214,7 +214,15 @@ def _cmd_qualify(args: argparse.Namespace) -> int:
     print(f"\nWrote {len(run.records)} qualification record(s) to {records_path}")
     print(f"Wrote {len(run.raw_results)} raw eval result(s) to {raw_path}")
 
-    return 0 if all(r.outcome == "ok" for r in run.records) else 1
+    # Nonzero for a genuine backend/runtime failure (outcome != "ok") --
+    # unchanged from before -- but also for a scenario that completed
+    # and was scored (passed is not None) yet failed a hard requirement
+    # (passed is False); a run with real, deterministic evidence of a
+    # failed baseline must not exit 0 just because nothing crashed.
+    # passed is None (unscored) does not by itself fail the exit code --
+    # that's a suite-authoring gap flagged in the printed matrix/role
+    # eligibility output, not a candidate failure.
+    return 0 if all(r.outcome == "ok" and r.passed is not False for r in run.records) else 1
 
 
 def _cmd_list_scenarios(_args: argparse.Namespace) -> int:

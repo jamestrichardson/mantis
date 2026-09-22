@@ -87,6 +87,44 @@ def test_eval_result_raw_message_serializes_when_present():
     assert payload["raw_message"]["reasoning_content"] == "..."
 
 
+def test_backend_model_and_error_summary_are_appended_after_every_pre_13_field():
+    # Regression guard: EvalResult's fields up through result_format_version
+    # must keep their pre-#13 relative order so a caller constructing one
+    # positionally with that original argument list still binds every
+    # value to the field it always did -- backend_model/error_summary
+    # must only ever be appended after result_format_version, never
+    # inserted earlier in the field list (see RESULT_FORMAT_VERSION's
+    # additive-compatibility claim).
+    result = EvalResult(
+        "awx-no-route",  # scenario
+        "1.0",  # scenario_version
+        "mantis-fast",  # model
+        "2026-09-15T00:00:00+00:00",  # started_at
+        "2026-09-15T00:00:05+00:00",  # finished_at
+        5.0,  # elapsed_seconds
+        "ok",  # outcome
+        "the answer",  # final_answer
+        [],  # tool_calls
+        2,  # iterations
+        0,  # duplicate_call_count
+        0,  # malformed_call_count
+        [],  # usage
+        42,  # total_tokens
+        "boom",  # error
+        None,  # raw_message
+        None,  # evaluation
+        "1.0",  # result_format_version
+    )
+
+    assert result.total_tokens == 42
+    assert result.error == "boom"
+    assert result.raw_message is None
+    assert result.evaluation is None
+    assert result.result_format_version == "1.0"
+    assert result.backend_model is None
+    assert result.error_summary is None
+
+
 def test_tool_call_summary_to_dict():
     summary = ToolCallSummary(
         iteration=2,

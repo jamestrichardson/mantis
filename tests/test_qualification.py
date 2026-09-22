@@ -28,6 +28,7 @@ from mantis.eval.qualification import (
     ROLE_MANTIS_REASONING,
     QualificationRecord,
     QualificationRun,
+    _safe_qualification_endpoint,
     evaluate_role_eligibility,
     format_result_matrix,
     format_role_eligibility,
@@ -35,7 +36,7 @@ from mantis.eval.qualification import (
     write_qualification_artifacts,
 )
 from mantis.eval.results import EvalResult
-from mantis.eval.scenarios import Scenario, default_scenarios
+from mantis.eval.scenarios import ScenarioNotFoundError, Scenario, default_scenarios
 
 
 def _config() -> LiteLLMConfig:
@@ -168,6 +169,48 @@ def test_qualify_models_aggregates_with_real_registered_scenarios(monkeypatch):
     assert len(run.raw_results) == 4
     assert all(r.outcome == "ok" for r in run.records)
     assert {r.resolved_backend_model for r in run.records} == {"resolved/model-a", "resolved/model-b"}
+
+
+# ---------------------------------------------------------------------------
+# LiteLLM endpoint credential redaction
+# ---------------------------------------------------------------------------
+
+
+def test_safe_qualification_endpoint_strips_basic_auth_userinfo():
+    assert _safe_qualification_endpoint("https://user:s3cr3t@litellm.example.test/v1") == (
+        "https://litellm.example.test/v1"
+    )
+
+
+def test_safe_qualification_endpoint_strips_query_and_fragment():
+    assert _safe_qualification_endpoint("https://litellm.example.test/v1?api_key=s3cr3t#frag") == (
+        "https://litellm.example.test/v1"
+    )
+
+
+def test_safe_qualification_endpoint_preserves_a_clean_url_unchanged():
+    assert _safe_qualification_endpoint("https://litellm.example.test:8443/v1") == (
+        "https://litellm.example.test:8443/v1"
+    )
+
+
+def test_qualify_models_never_persists_a_credential_bearing_endpoint(monkeypatch):
+    monkeypatch.setitem(default_scenarios._scenarios, "q-scenario-1", _fake_scenario("q-scenario-1"))
+    config = LiteLLMConfig(
+        url="https://user:s3cr3t@litellm.example.test/v1", api_key=Secret("k"), model="unused"
+    )
+
+    run = qualify_models(
+        ["model-a"],
+        scenario_names=("q-scenario-1",),
+        base_model_config=config,
+        run_scenario_fn=lambda scenario, model_alias, *, base_model_config=None: _canned_ok_result(
+            scenario, model_alias
+        ),
+    )
+
+    assert "s3cr3t" not in run.litellm_endpoint
+    assert all("s3cr3t" not in r.litellm_endpoint for r in run.records)
 
 
 def _canned_error_result(scenario: Scenario, model_alias: str, *, error_summary: str = "APIConnectionError") -> EvalResult:
@@ -338,22 +381,42 @@ def test_record_error_is_never_the_raw_provider_error_body(monkeypatch):
 # ---------------------------------------------------------------------------
 
 
+_UNSET = object()
+
+
+def _current_scenario_version_or_default(scenario: str) -> str:
+    try:
+        return default_scenarios.get(scenario).version
+    except ScenarioNotFoundError:
+        return "1.0"
+
+
 def _record(
     scenario: str,
     model_alias: str,
     *,
     outcome: str = "ok",
     hard_failures: tuple[str, ...] = (),
+    passed: bool | None = _UNSET,
+    scenario_version: str | None = None,
+    suite_id: str = QUALIFICATION_SUITE_ID,
+    suite_version: str = QUALIFICATION_SUITE_VERSION,
 ) -> QualificationRecord:
     return QualificationRecord(
-        suite_id=QUALIFICATION_SUITE_ID,
-        suite_version=QUALIFICATION_SUITE_VERSION,
+        suite_id=suite_id,
+        suite_version=suite_version,
         requested_alias=model_alias,
         resolved_backend_model=None,
         scenario=scenario,
-        scenario_version="1.0",
+        # Resolve the real, current scenario version when this is a
+        # genuine registered scenario (the eligibility tests below rely
+        # on this staying in sync with the real registry); a handful of
+        # other tests use placeholder names ("s1"/"s2") purely to
+        # exercise formatting, not eligibility, so those fall back to a
+        # fixed literal instead of raising.
+        scenario_version=scenario_version or _current_scenario_version_or_default(scenario),
         outcome=outcome,
-        passed=(outcome == "ok" and not hard_failures),
+        passed=(outcome == "ok" and not hard_failures) if passed is _UNSET else passed,
         score=3,
         max_score=3,
         hard_failures=hard_failures,
@@ -402,6 +465,52 @@ def test_mantis_reasoning_not_eligible_with_a_hard_failure():
     eligibility = evaluate_role_eligibility(ROLE_MANTIS_REASONING, "model-a", records)
     assert eligibility.eligible is False
     assert any("hard failure" in r for r in eligibility.reasons)
+
+
+def test_mantis_reasoning_not_eligible_when_a_required_scenario_is_unscored():
+    # A record can be outcome="ok" with zero hard_failures and still
+    # carry no deterministic evidence at all -- passed is None whenever
+    # the scenario declared no expectations. That must not silently
+    # count as satisfying the requirement.
+    records = _all_passing_records("model-a", QUALIFICATION_SCENARIOS)
+    records = [
+        _record(r.scenario, "model-a", passed=None) if r.scenario == QUALIFICATION_SCENARIOS[0] else r
+        for r in records
+    ]
+    eligibility = evaluate_role_eligibility(ROLE_MANTIS_REASONING, "model-a", records)
+    assert eligibility.eligible is False
+    assert any("unscored" in r for r in eligibility.reasons)
+
+
+def test_mantis_reasoning_not_eligible_with_a_stale_scenario_version():
+    # A record recorded against a scenario version that no longer
+    # matches the current registry (e.g. a historical run predating a
+    # scenario's version bump) must not count as current evidence, even
+    # though its outcome/passed/hard_failures look clean.
+    incident_triage_name = next(n for n in QUALIFICATION_SCENARIOS if n.startswith("incident-triage-"))
+    records = _all_passing_records("model-a", QUALIFICATION_SCENARIOS)
+    records = [
+        _record(r.scenario, "model-a", scenario_version="0.1-stale")
+        if r.scenario == incident_triage_name
+        else r
+        for r in records
+    ]
+    eligibility = evaluate_role_eligibility(ROLE_MANTIS_REASONING, "model-a", records)
+    assert eligibility.eligible is False
+    assert any("stale evidence" in r and incident_triage_name in r for r in eligibility.reasons)
+
+
+def test_mantis_reasoning_not_eligible_with_a_record_from_a_non_current_suite():
+    records = _all_passing_records("model-a", QUALIFICATION_SCENARIOS)
+    records = [
+        _record(r.scenario, "model-a", suite_id="mantis-core-qualification-v0", suite_version="v0")
+        if r.scenario == QUALIFICATION_SCENARIOS[0]
+        else r
+        for r in records
+    ]
+    eligibility = evaluate_role_eligibility(ROLE_MANTIS_REASONING, "model-a", records)
+    assert eligibility.eligible is False
+    assert any("stale evidence" in r for r in eligibility.reasons)
 
 
 def test_mantis_reasoning_not_eligible_when_incident_triage_scenario_errors():
@@ -496,6 +605,46 @@ def test_format_result_matrix_reports_missing_pairs():
     )
     matrix = format_result_matrix(run)
     assert "MISSING" in matrix
+
+
+def test_format_result_matrix_classifies_by_outcome_before_passed():
+    # A record that errored out early can still score passed=False from
+    # its expectations (e.g. final_answer_produced fails) -- the matrix
+    # must report ERROR for it, not FAIL, so a real backend/runtime
+    # failure is never confused with a scenario the model simply failed.
+    run = QualificationRun(
+        suite_id=QUALIFICATION_SUITE_ID,
+        suite_version=QUALIFICATION_SUITE_VERSION,
+        generated_at="t",
+        mantis_version="1.8.0",
+        mantis_commit=None,
+        litellm_endpoint="http://x",
+        model_aliases=("model-a",),
+        scenario_names=("s1",),
+        records=(_record("s1", "model-a", outcome="error", passed=False),),
+        raw_results=(),
+    )
+    matrix = format_result_matrix(run)
+    data_row = next(line for line in matrix.splitlines() if line.startswith("model-a"))
+    assert "ERROR" in data_row
+    assert "FAIL" not in data_row
+
+
+def test_format_result_matrix_reports_unscored_for_a_successful_run_with_no_expectations():
+    run = QualificationRun(
+        suite_id=QUALIFICATION_SUITE_ID,
+        suite_version=QUALIFICATION_SUITE_VERSION,
+        generated_at="t",
+        mantis_version="1.8.0",
+        mantis_commit=None,
+        litellm_endpoint="http://x",
+        model_aliases=("model-a",),
+        scenario_names=("s1",),
+        records=(_record("s1", "model-a", passed=None),),
+        raw_results=(),
+    )
+    matrix = format_result_matrix(run)
+    assert "UNSCORED" in matrix
 
 
 def test_format_role_eligibility_is_deterministic_and_reflects_records():

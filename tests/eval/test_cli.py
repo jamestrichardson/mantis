@@ -285,3 +285,79 @@ def test_main_starts_metrics_server_when_explicitly_enabled(monkeypatch):
     eval_cli.main(["list-scenarios"])
 
     assert len(calls) == 1
+
+
+# ---------------------------------------------------------------------------
+# `qualify` exit status: a scored hard-failure must exit nonzero even
+# though nothing crashed (outcome == "ok").
+# ---------------------------------------------------------------------------
+
+
+def _fake_qualification_run(*, passed: bool | None):
+    from mantis.eval.qualification import QualificationRecord, QualificationRun
+
+    record = QualificationRecord(
+        suite_id="mantis-fast-qualification-v1",
+        suite_version="v1",
+        requested_alias="model-a",
+        resolved_backend_model=None,
+        scenario="s1",
+        scenario_version="1.0",
+        outcome="ok",
+        passed=passed,
+        score=2,
+        max_score=3,
+        hard_failures=() if passed is not False else ("bad_check",),
+        iterations=1,
+        tool_call_count=1,
+        duplicate_call_count=0,
+        malformed_call_count=0,
+        elapsed_seconds=1.0,
+        total_tokens=10,
+        cost_usd=None,
+        final_answer_ref=None,
+        error=None,
+        mantis_version="1.9.0",
+        mantis_commit=None,
+        litellm_endpoint="http://litellm.example.test",
+        litellm_version=None,
+        generated_at="2026-09-22T00:00:00+00:00",
+    )
+    return QualificationRun(
+        suite_id="mantis-fast-qualification-v1",
+        suite_version="v1",
+        generated_at="2026-09-22T00:00:00+00:00",
+        mantis_version="1.9.0",
+        mantis_commit=None,
+        litellm_endpoint="http://litellm.example.test",
+        model_aliases=("model-a",),
+        scenario_names=("s1",),
+        records=(record,),
+        raw_results=(),
+    )
+
+
+def test_qualify_exits_nonzero_when_a_record_fails_scoring_despite_outcome_ok(monkeypatch, tmp_path):
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("LITELLM_URL", "http://litellm.example.test")
+    monkeypatch.setenv("LITELLM_API_KEY", "k")
+    monkeypatch.setattr(eval_cli, "qualify_models", lambda *a, **kw: _fake_qualification_run(passed=False))
+
+    exit_code = eval_cli.main(
+        ["qualify", "--models", "model-a,model-b", "--out", str(tmp_path / "q.jsonl")]
+    )
+
+    assert exit_code == 1
+
+
+def test_qualify_exits_zero_when_every_record_passes(monkeypatch, tmp_path):
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("LITELLM_URL", "http://litellm.example.test")
+    monkeypatch.setenv("LITELLM_API_KEY", "k")
+    monkeypatch.setattr(eval_cli, "qualify_models", lambda *a, **kw: _fake_qualification_run(passed=True))
+
+    exit_code = eval_cli.main(
+        ["qualify", "--models", "model-a,model-b", "--out", str(tmp_path / "q.jsonl")]
+    )
+
+    assert exit_code == 0

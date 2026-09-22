@@ -48,12 +48,13 @@ import subprocess
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any, Callable, Sequence
+from urllib.parse import urlsplit, urlunsplit
 
 from mantis import __version__ as MANTIS_VERSION
 from mantis.config import LiteLLMConfig
 from mantis.eval.results import EvalResult
 from mantis.eval.runner import run_scenario
-from mantis.eval.scenarios import default_scenarios
+from mantis.eval.scenarios import ScenarioNotFoundError, default_scenarios
 
 # ---------------------------------------------------------------------------
 # The named, versioned baseline suite (checked into repository code, never
@@ -162,6 +163,18 @@ class QualificationRecord:
     requested_alias: str
     """The LiteLLM alias qualified for this (model, scenario) pair."""
     resolved_backend_model: str | None
+    """The model identity string exposed by LiteLLM's OpenAI-compatible
+    response (``response.model``, captured as
+    ``AgentRuntime.backend_model_log`` -- see
+    ``mantis.eval.runner.run_scenario``'s ``backend_model``). This is
+    whatever LiteLLM itself returns, verbatim -- Mantis never infers or
+    guesses a deeper provider/model identity behind an alias. Some
+    LiteLLM deployments translate an alias into a distinct underlying
+    provider model string here; others (see this deployment's own
+    findings below) echo the requested alias back unchanged, in which
+    case this field simply equals ``requested_alias``. ``None`` when no
+    iteration's response carried the field at all -- never fabricated
+    either way."""
     scenario: str
     scenario_version: str
     outcome: str  # "ok" | "error" (model/backend failure -- see mantis.eval.runner.run_scenario)
@@ -207,6 +220,30 @@ def _detect_mantis_commit() -> str | None:
 
 def _utc_now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
+
+
+def _safe_qualification_endpoint(url: str) -> str:
+    """Strip any embedded credential (HTTP basic-auth userinfo) and any
+    query string/fragment from a LiteLLM endpoint URL before it's
+    persisted into a committed-safe qualification artifact.
+
+    Unlike some of Mantis's other URL-shaped configuration (see
+    ``mantis.config._parse_http_target``), ``LiteLLMConfig.url`` accepts
+    arbitrary URL text with no such validation -- an operator could set
+    ``LITELLM_URL=https://user:secret@host/v1`` (or embed a token in a
+    query parameter) and have it work perfectly well as a real HTTP
+    client target while still being exactly the kind of secret this
+    qualification report's own safety contract (see
+    ``QualificationRecord``'s docstring) promises never to commit. This
+    keeps only scheme/host/port/path -- never a guess at whether the
+    original URL actually contained a credential, just an
+    unconditional strip of the components that could carry one.
+    """
+    parsed = urlsplit(url)
+    netloc = parsed.hostname or ""
+    if parsed.port:
+        netloc = f"{netloc}:{parsed.port}"
+    return urlunsplit((parsed.scheme, netloc, parsed.path, "", ""))
 
 
 def _record_from_eval_result(
@@ -321,6 +358,7 @@ def qualify_models(
     config = base_model_config or LiteLLMConfig.from_env()
     generated_at = _utc_now_iso()
     mantis_commit = _detect_mantis_commit()
+    safe_litellm_endpoint = _safe_qualification_endpoint(config.url)
 
     records: list[QualificationRecord] = []
     raw_results: list[EvalResult] = []
@@ -338,7 +376,7 @@ def qualify_models(
                     requested_alias=alias,
                     mantis_version=MANTIS_VERSION,
                     mantis_commit=mantis_commit,
-                    litellm_endpoint=config.url,
+                    litellm_endpoint=safe_litellm_endpoint,
                     litellm_version=litellm_version,
                     generated_at=generated_at,
                     raw_result_index=len(raw_results),
@@ -352,7 +390,7 @@ def qualify_models(
         generated_at=generated_at,
         mantis_version=MANTIS_VERSION,
         mantis_commit=mantis_commit,
-        litellm_endpoint=config.url,
+        litellm_endpoint=safe_litellm_endpoint,
         model_aliases=tuple(model_aliases),
         scenario_names=tuple(scenario_names),
         records=tuple(records),
@@ -385,6 +423,38 @@ def _records_for_alias(records: Sequence[QualificationRecord], model_alias: str)
     return {r.scenario: r for r in records if r.requested_alias == model_alias}
 
 
+_PERMITTED_SUITES = frozenset(
+    {
+        (QUALIFICATION_SUITE_ID, QUALIFICATION_SUITE_VERSION),
+        (FAST_QUALIFICATION_SUITE_ID, FAST_QUALIFICATION_SUITE_VERSION),
+    }
+)
+"""Every (suite_id, suite_version) pair a record may legitimately carry
+and still count as current evidence -- both baselines' *current*
+version, never a stale one a suite-version bump left behind."""
+
+
+def _stale_record_reason(name: str, record: QualificationRecord) -> str | None:
+    """``None`` if ``record`` is current evidence for scenario ``name``;
+    otherwise a human-readable reason it must not count toward
+    eligibility. Guards against exactly the drift the requalification
+    triggers in ``docs/model-qualification.md`` describe: a record
+    captured under an older suite version, or against an
+    already-superseded ``scenario_version`` (e.g. a historical record
+    for ``incident-triage-source-unavailable`` version ``"1.0"`` after
+    the scenario itself moved to ``"2.0"``) is not current evidence,
+    even if its ``outcome``/``passed``/``hard_failures`` look clean."""
+    if (record.suite_id, record.suite_version) not in _PERMITTED_SUITES:
+        return f"suite {record.suite_id!r} v{record.suite_version} is not a current baseline"
+    try:
+        current_version = default_scenarios.get(name).version
+    except ScenarioNotFoundError:
+        return f"scenario no longer exists in the registry (recorded version {record.scenario_version!r})"
+    if record.scenario_version != current_version:
+        return f"recorded against scenario_version {record.scenario_version!r}, current is {current_version!r}"
+    return None
+
+
 def _evaluate_suite_eligibility(
     role: str,
     model_alias: str,
@@ -400,6 +470,14 @@ def _evaluate_suite_eligibility(
     if missing:
         reasons.append(f"did not complete the full suite: missing {', '.join(missing)}")
 
+    stale = sorted(
+        f"{name} ({_stale_record_reason(name, by_name[name])})"
+        for name in required_scenarios
+        if name in by_name and _stale_record_reason(name, by_name[name]) is not None
+    )
+    if stale:
+        reasons.append(f"stale evidence, not against the current suite/scenario version: {', '.join(stale)}")
+
     not_ok = sorted(name for name in required_scenarios if name in by_name and by_name[name].outcome != "ok")
     if not_ok:
         reasons.append(f"scenario(s) did not complete successfully (outcome != 'ok'): {', '.join(not_ok)}")
@@ -409,6 +487,25 @@ def _evaluate_suite_eligibility(
     )
     if hard_failing:
         reasons.append(f"hard failure(s) in required grounding/safety/evidence-discipline checks: {', '.join(hard_failing)}")
+
+    # A record can be outcome="ok" with zero hard_failures and still
+    # carry no deterministic evidence at all: passed is None whenever
+    # the scenario declared no expectations (unscored -- see
+    # QualificationRecord.passed's docstring), which is neither
+    # "completed successfully" nor "hard-failed" by the two checks
+    # above. Required here as its own explicit check rather than
+    # folded into `not_ok`/`hard_failing` above, so the two error
+    # messages stay meaningfully distinct for a report reader.
+    unscored = sorted(
+        name
+        for name in required_scenarios
+        if name in by_name and by_name[name].outcome == "ok" and by_name[name].passed is None
+    )
+    if unscored:
+        reasons.append(
+            f"scenario(s) completed but produced no deterministic score "
+            f"(unscored -- no expectations declared): {', '.join(unscored)}"
+        )
 
     if require_incident_triage:
         incident_triage_names = [s for s in required_scenarios if s.startswith("incident-triage-")]
@@ -494,7 +591,19 @@ def format_result_matrix(run: QualificationRun) -> str:
             if record is None:
                 rows.append([alias, name, "MISSING", "—", "—"])
                 continue
-            outcome_col = "PASS" if record.passed else ("FAIL" if record.passed is not None else record.outcome.upper())
+            # A non-"ok" outcome (a real backend/runtime failure) is
+            # classified from record.outcome itself, before ever
+            # consulting the scoring result -- otherwise a run that
+            # errored early but happened to score passed=False (or,
+            # less obviously, an unscored scenario with passed=None)
+            # could print as a plain FAIL/OK, hiding that the run never
+            # actually completed.
+            if record.outcome != "ok":
+                outcome_col = record.outcome.upper()
+            elif record.passed is None:
+                outcome_col = "UNSCORED"
+            else:
+                outcome_col = "PASS" if record.passed else "FAIL"
             score_col = f"{record.score}/{record.max_score}" if record.score is not None else "—"
             hard_fails_col = str(len(record.hard_failures))
             rows.append([alias, name, outcome_col, score_col, hard_fails_col])
