@@ -127,13 +127,19 @@ includes:
 ## Running it
 
 ```bash
-# Default prompt: "Why is ferros-c01 unreachable?"
-mantis system-troubleshooter
+# mantis system-troubleshooter (like mantis run) always requires an
+# explicit prompt -- there is no no-argument/default-prompt invocation
+# through the API or CLI (RunRequest.prompt is required).
+mantis system-troubleshooter "Why is ferros-c01 unreachable?"
 
-# Or with an explicit prompt:
+# Or with a different prompt:
 mantis system-troubleshooter "Investigate why db-primary-02 keeps failing health checks."
 
-# Equivalent module invocation:
+# Equivalent module invocation (unsupported debugging escape hatch).
+# This one alone falls back to DEFAULT_PROMPT ("Why is ferros-c01
+# unreachable?") when no prompt argument is given -- the commands above
+# never do:
+python -m mantis.agents.system_troubleshooter
 python -m mantis.agents.system_troubleshooter "Why is ferros-c01 unreachable?"
 ```
 

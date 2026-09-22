@@ -394,6 +394,7 @@ def test_system_prompt_mentions_every_allowed_tool(tool_name):
         "time-ordered evidence timeline",  # output contract section
         "evidence coverage by source",  # output contract section
         "explicitly unproven hypotheses",  # output contract section
+        "widen this specific query's",  # git lookback must extend before the incident window
     ],
 )
 def test_system_prompt_contains_required_constraint(phrase):

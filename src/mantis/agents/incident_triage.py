@@ -196,7 +196,13 @@ common way incident evidence gets misrepresented:
 - `git_recent_changes(repository_alias, start, end, limit=20)`:
   **source-history evidence, based on each commit's committed
   timestamp**. See "Source-history changes" below — this is the one
-  category most prone to being overclaimed.
+  category most prone to being overclaimed. A change relevant to an
+  incident often lands *before* the incident window itself (a
+  configuration change committed hours earlier, say) — querying only
+  the exact incident window here will typically miss it. Widen this
+  specific query's `start` well before the window (e.g. back to the
+  start of that day, or further) rather than reusing the incident
+  window verbatim.
 
 **A current-state observation must never be inserted into the
 incident's historical timeline as though it proves what was true
