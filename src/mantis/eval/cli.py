@@ -3,6 +3,8 @@
     mantis eval run --scenario awx-no-route --models mantis-fast,mantis-reasoning
     mantis eval list-scenarios
     mantis eval list-models
+    mantis eval qualify --models mantis-reasoning,mantis-fast --out qualification.jsonl
+    mantis eval qualify --models alias-a,alias-b --suite fast --out qualification.jsonl
 """
 
 from __future__ import annotations
@@ -16,6 +18,21 @@ from datetime import datetime, timezone
 # Importing mantis.eval registers all built-in scenarios as a side effect.
 import mantis.eval  # noqa: F401
 from mantis.config import ConfigurationError, LiteLLMConfig, get_metrics_enabled
+from mantis.eval.qualification import (
+    FAST_QUALIFICATION_SCENARIOS,
+    FAST_QUALIFICATION_SUITE_ID,
+    FAST_QUALIFICATION_SUITE_VERSION,
+    QUALIFICATION_SCENARIOS,
+    QUALIFICATION_SUITE_ID,
+    QUALIFICATION_SUITE_VERSION,
+    ROLE_MANTIS_CODER,
+    ROLE_MANTIS_FAST,
+    ROLE_MANTIS_REASONING,
+    format_result_matrix,
+    format_role_eligibility,
+    qualify_models,
+    write_qualification_artifacts,
+)
 from mantis.eval.results import EvalResult
 from mantis.eval.runner import run_comparison
 from mantis.eval.scenarios import ScenarioNotFoundError, default_scenarios
@@ -152,6 +169,55 @@ def _cmd_run(args: argparse.Namespace) -> int:
     return 0 if all(r.outcome == "ok" for r in results) else 1
 
 
+def _default_qualification_output_path(suite_id: str) -> str:
+    timestamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    return os.path.join(DEFAULT_RESULTS_DIR, f"{suite_id}-{timestamp}.jsonl")
+
+
+_QUALIFY_SUITES: dict[str, tuple[tuple[str, ...], str, str]] = {
+    # name -> (scenario_names, suite_id, suite_version)
+    "core": (QUALIFICATION_SCENARIOS, QUALIFICATION_SUITE_ID, QUALIFICATION_SUITE_VERSION),
+    "fast": (FAST_QUALIFICATION_SCENARIOS, FAST_QUALIFICATION_SUITE_ID, FAST_QUALIFICATION_SUITE_VERSION),
+}
+
+
+def _cmd_qualify(args: argparse.Namespace) -> int:
+    model_aliases = [m.strip() for m in args.models.split(",") if m.strip()]
+    if len(model_aliases) < 2:
+        print("--models must list at least two model aliases to qualify", file=sys.stderr)
+        return 1
+
+    scenario_names, suite_id, suite_version = _QUALIFY_SUITES[args.suite]
+
+    try:
+        base_config = LiteLLMConfig.from_env()
+    except ConfigurationError as exc:
+        print(f"Configuration error: {exc}", file=sys.stderr)
+        return 1
+
+    run = qualify_models(
+        model_aliases,
+        scenario_names=scenario_names,
+        suite_id=suite_id,
+        suite_version=suite_version,
+        base_model_config=base_config,
+    )
+
+    out_path = args.out or _default_qualification_output_path(run.suite_id)
+    records_path, raw_path = write_qualification_artifacts(run, out_path)
+
+    print(f"Suite: {run.suite_id} (scenarios: {len(run.scenario_names)}, models: {len(run.model_aliases)})")
+    print()
+    print(format_result_matrix(run))
+    print()
+    print(format_role_eligibility(run, roles=(ROLE_MANTIS_REASONING, ROLE_MANTIS_FAST, ROLE_MANTIS_CODER)))
+    print(f"\nWrote {len(run.records)} qualification record(s) to {records_path}")
+    print(f"Wrote {len(run.raw_results)} raw eval result(s) to {raw_path}")
+
+    any_fatal = any(r.outcome == "fatal" for r in run.records)
+    return 1 if any_fatal else 0
+
+
 def _cmd_list_scenarios(_args: argparse.Namespace) -> int:
     for scenario in default_scenarios.all():
         print(f"{scenario.name} (v{scenario.version})")
@@ -191,6 +257,24 @@ def build_parser() -> argparse.ArgumentParser:
         "--out", default=None, help=f"Output JSONL path (default: {DEFAULT_RESULTS_DIR}/...)"
     )
     run_parser.set_defaults(func=_cmd_run)
+
+    qualify_parser = subparsers.add_parser(
+        "qualify", help="Run the named model-qualification baseline suite against two or more models"
+    )
+    qualify_parser.add_argument(
+        "--models", required=True, help="Comma-separated LiteLLM model aliases (at least two)"
+    )
+    qualify_parser.add_argument(
+        "--out", default=None, help=f"Output JSONL path for qualification records (default: {DEFAULT_RESULTS_DIR}/...)"
+    )
+    qualify_parser.add_argument(
+        "--suite",
+        choices=sorted(_QUALIFY_SUITES),
+        default="core",
+        help="Which checked-in baseline to run: 'core' (mantis-core-qualification-v1, all ten scenarios, "
+        "default) or 'fast' (mantis-fast-qualification-v1, the smaller checked-in subset)",
+    )
+    qualify_parser.set_defaults(func=_cmd_qualify)
 
     list_scenarios_parser = subparsers.add_parser(
         "list-scenarios", help="List available scenarios"

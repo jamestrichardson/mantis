@@ -119,6 +119,19 @@ def run_scenario(
         if entry is not None and "total_tokens" in entry
     ]
     total_tokens = sum(token_totals) if token_totals else None
+    backend_model = next(
+        (m for m in reversed(runtime.backend_model_log) if m is not None), None
+    )
+    # #16: route-attempt history, always populated (even for a run that
+    # used no explicit routing policy -- see AgentRuntime.__post_init__'s
+    # default one-route wrapping), never inflating tool_calls/tool_call
+    # counts above, which come entirely from runtime.call_log.
+    requested_primary_alias = runtime.routing_policy.primary_alias
+    final_alias = next(
+        (attempt.requested_alias for attempt in reversed(runtime.model_call_log) if attempt.outcome == "ok"),
+        None,
+    )
+    route_attempts = [attempt.to_dict() for attempt in runtime.model_call_log]
 
     result = EvalResult(
         scenario=scenario.name,
@@ -135,6 +148,10 @@ def run_scenario(
         malformed_call_count=malformed_call_count,
         usage=list(runtime.usage_log),
         total_tokens=total_tokens,
+        backend_model=backend_model,
+        requested_primary_alias=requested_primary_alias,
+        final_alias=final_alias,
+        route_attempts=route_attempts,
         error=error,
         raw_message=runtime.diagnostic_raw_message,
     )

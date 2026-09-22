@@ -398,9 +398,12 @@ All deliberate, not gaps to be filled by this issue:
 - **No incident automation, alerting, or escalation** — it produces an
   assessment for a human to read, it does not page anyone, open a
   ticket, or schedule anything.
-- **No dynamic model routing** (tracked separately, #16) — model
-  selection today is a single configured `LITELLM_MODEL` alias,
-  optionally overridden per-agent via `MANTIS_INCIDENT_TRIAGE_MODEL`.
+- **No adaptive/learned model routing.** Deterministic, server-side
+  fallback across a small set of configured aliases is available (#16,
+  see [docs/model-routing.md](model-routing.md)), configured via
+  `MANTIS_INCIDENT_TRIAGE_MODEL`/`MANTIS_INCIDENT_TRIAGE_MODEL_FALLBACKS`
+  — but there is no model self-selection, confidence-based escalation,
+  or routing decided from generated prose.
 - **No arbitrary Kubernetes browsing or automatic root-cause
   declaration** — it lists pods/deployments/nodes/events within a
   namespace/selector the model chooses, it doesn't traverse the cluster

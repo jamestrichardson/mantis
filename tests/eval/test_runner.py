@@ -64,6 +64,7 @@ class FakeChoice:
 class FakeResponse:
     choices: list[FakeChoice]
     usage: Any = None
+    model: str | None = None
 
 
 class FakeCompletions:
@@ -328,6 +329,61 @@ def test_run_scenario_raw_message_is_none_for_a_real_answer(monkeypatch):
     result = run_scenario(scenario, "model-a", base_model_config=_base_config())
 
     assert result.raw_message is None
+
+
+def test_run_scenario_captures_backend_model_when_reported(monkeypatch):
+    response = FakeResponse(
+        choices=[FakeChoice(message=FakeMessage(content="hi", tool_calls=None))],
+        model="ollama/qwen2.5:14b",
+    )
+    _patch_openai(monkeypatch, {"mantis-fast": [response]})
+    scenario = _echo_scenario()
+
+    result = run_scenario(scenario, "mantis-fast", base_model_config=_base_config())
+
+    assert result.model == "mantis-fast"  # the requested alias
+    assert result.backend_model == "ollama/qwen2.5:14b"  # the resolved backend identity
+
+
+def test_run_scenario_backend_model_is_none_when_backend_omits_it(monkeypatch):
+    _patch_openai(monkeypatch, {"model-a": [_final("hi")]})
+    scenario = _echo_scenario()
+
+    result = run_scenario(scenario, "model-a", base_model_config=_base_config())
+
+    assert result.backend_model is None
+
+
+def test_run_scenario_records_requested_primary_and_final_alias_for_a_default_single_route_run(monkeypatch):
+    # No explicit routing policy is passed anywhere in this eval path --
+    # AgentRuntime.__post_init__ wraps model_alias in a default
+    # one-route policy, and the eval result must still reflect it
+    # (#16's "eval result records primary/final aliases" AC).
+    _patch_openai(monkeypatch, {"model-a": [_final("hi")]})
+    scenario = _echo_scenario()
+
+    result = run_scenario(scenario, "model-a", base_model_config=_base_config())
+
+    assert result.requested_primary_alias == "model-a"
+    assert result.final_alias == "model-a"
+    assert len(result.route_attempts) == 1
+    assert result.route_attempts[0]["outcome"] == "ok"
+    assert result.route_attempts[0]["requested_alias"] == "model-a"
+
+
+def test_run_scenario_route_attempts_do_not_inflate_tool_call_counts(monkeypatch):
+    _patch_openai(
+        monkeypatch,
+        {"model-a": [_tool_call_response("echo", {"x": 1}), _final("done")]},
+    )
+    scenario = _echo_scenario()
+
+    result = run_scenario(scenario, "model-a", base_model_config=_base_config())
+
+    # Two model-call attempts (two iterations), but exactly one real
+    # tool execution -- the two counts must never be conflated.
+    assert len(result.route_attempts) == 2
+    assert len(result.tool_calls) == 1
 
 
 def test_run_scenario_captures_usage_and_total_tokens(monkeypatch):

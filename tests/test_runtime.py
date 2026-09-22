@@ -11,13 +11,21 @@ import logging
 from dataclasses import dataclass
 from typing import Any
 
+import httpx
+import openai
 import pytest
 
-from mantis.config import LiteLLMConfig, ReliabilityConfig, Secret
+from mantis.config import LiteLLMConfig, ModelRoutingPolicy, ReliabilityConfig, Secret
 from mantis.observability import metrics
 from mantis.registry import Tool, ToolRegistry
 from mantis.reliability import DeadlineExceededError, IntegrationError, IntegrationErrorKind
-from mantis.runtime import AgentRuntime, MaxIterationsExceededError, RunDeadlineExceededError
+from mantis.routing import ModelCallFailureKind
+from mantis.runtime import (
+    AgentRuntime,
+    MaxIterationsExceededError,
+    ModelRoutingExhaustedError,
+    RunDeadlineExceededError,
+)
 
 
 @dataclass
@@ -58,6 +66,7 @@ class FakeChoice:
 class FakeResponse:
     choices: list[FakeChoice]
     usage: Any = None
+    model: str | None = None
 
 
 @dataclass
@@ -78,7 +87,7 @@ class FakeUsage:
 
 
 class FakeCompletions:
-    def __init__(self, responses: list[FakeResponse]):
+    def __init__(self, responses: "list[FakeResponse | BaseException]"):
         self._responses = list(responses)
         self.calls: list[dict[str, Any]] = []
 
@@ -86,7 +95,10 @@ class FakeCompletions:
         self.calls.append(kwargs)
         if not self._responses:
             raise AssertionError("FakeCompletions ran out of scripted responses")
-        return self._responses.pop(0)
+        item = self._responses.pop(0)
+        if isinstance(item, BaseException):
+            raise item
+        return item
 
 
 class FakeChat:
@@ -112,7 +124,7 @@ def _tool_call_response(*calls: FakeToolCall) -> FakeResponse:
 
 
 def _build_runtime(
-    responses: list[FakeResponse],
+    responses: "list[FakeResponse | BaseException]",
     *,
     tools: list[str] | None = None,
     registry: ToolRegistry | None = None,
@@ -121,6 +133,7 @@ def _build_runtime(
     temperature: float | None = None,
     reliability: Any = None,
     clock: Any = None,
+    routing_policy: Any = None,
 ) -> AgentRuntime:
     kwargs: dict[str, Any] = dict(
         name="test-agent",
@@ -136,6 +149,8 @@ def _build_runtime(
         kwargs["reliability"] = reliability
     if clock is not None:
         kwargs["clock"] = clock
+    if routing_policy is not None:
+        kwargs["routing_policy"] = routing_policy
     runtime = AgentRuntime(**kwargs)
     runtime._client = FakeOpenAIClient(responses)
     return runtime
@@ -447,6 +462,29 @@ def test_usage_log_has_one_entry_per_iteration():
     runtime.run("do the thing")
 
     assert [entry["total_tokens"] for entry in runtime.usage_log] == [22, 38]
+
+
+def test_backend_model_log_captures_resolved_model_when_backend_reports_it():
+    # response.model is the backend-resolved identity LiteLLM's
+    # OpenAI-compatible response reports -- distinct from the requested
+    # model_config.model alias. See #13's model-qualification harness.
+    response = FakeResponse(
+        choices=[FakeChoice(message=FakeMessage(content="hi", tool_calls=None))],
+        model="ollama/qwen2.5:14b",
+    )
+    runtime = _build_runtime([response])
+
+    runtime.run("hello")
+
+    assert runtime.backend_model_log == ["ollama/qwen2.5:14b"]
+
+
+def test_backend_model_log_entry_is_none_when_backend_omits_it():
+    runtime = _build_runtime([_final_message_response("hi")])
+
+    runtime.run("hello")
+
+    assert runtime.backend_model_log == [None]
 
 
 def test_diagnostic_raw_message_captured_when_answer_is_empty_and_no_tool_calls():
@@ -1172,3 +1210,324 @@ def test_integration_error_note_distinguishes_retrieval_failure_from_evidence():
     sent = _tool_message_sent_after(runtime, call_index=0)
     assert "could not retrieve evidence" in sent["note"].lower()
     assert "does not establish" in sent["note"].lower()
+
+
+# ---------------------------------------------------------------------------
+# Model-call routing/fallback (#16)
+# ---------------------------------------------------------------------------
+
+
+def _status_error(cls, status_code: int, message: str = "boom"):
+    response = httpx.Response(status_code, request=httpx.Request("POST", "http://litellm.example.test"))
+    return cls(message, response=response, body=None)
+
+
+def _connection_error():
+    return openai.APIConnectionError(request=httpx.Request("POST", "http://litellm.example.test"))
+
+
+def _timeout_error():
+    return openai.APITimeoutError(request=httpx.Request("POST", "http://litellm.example.test"))
+
+
+def test_primary_success_makes_exactly_one_route_attempt():
+    runtime = _build_runtime([_final_message_response("hi")])
+
+    runtime.run("hello")
+
+    assert len(runtime._client.chat.completions.calls) == 1
+    assert runtime._client.chat.completions.calls[0]["model"] == "m"
+    assert len(runtime.model_call_log) == 1
+    attempt = runtime.model_call_log[0]
+    assert attempt.attempt_number == 1
+    assert attempt.routing_reason == "primary"
+    assert attempt.outcome == "ok"
+
+
+@pytest.mark.parametrize(
+    "make_exc,expected_kind",
+    [
+        (_timeout_error, ModelCallFailureKind.TIMEOUT),
+        (_connection_error, ModelCallFailureKind.CONNECTION),
+        (lambda: _status_error(openai.RateLimitError, 429), ModelCallFailureKind.RATE_LIMIT),
+        (lambda: _status_error(openai.InternalServerError, 500), ModelCallFailureKind.SERVER_ERROR),
+    ],
+)
+def test_eligible_failures_fall_back_to_the_next_configured_alias(make_exc, expected_kind):
+    policy = ModelRoutingPolicy(primary_alias="primary", fallback_aliases=("fallback",), max_attempts=2)
+    runtime = _build_runtime(
+        [make_exc(), _final_message_response("recovered via fallback")], routing_policy=policy
+    )
+
+    answer = runtime.run("hello")
+
+    assert answer == "recovered via fallback"
+    calls = runtime._client.chat.completions.calls
+    assert [c["model"] for c in calls] == ["primary", "fallback"]
+    assert len(runtime.model_call_log) == 2
+    first, second = runtime.model_call_log
+    assert first.outcome == "error"
+    assert first.failure_kind == expected_kind
+    assert first.routing_reason == "primary"
+    assert second.outcome == "ok"
+    assert second.routing_reason == "fallback"
+    assert second.requested_alias == "fallback"
+
+
+@pytest.mark.parametrize(
+    "make_exc,exc_type",
+    [
+        (lambda: _status_error(openai.AuthenticationError, 401), openai.AuthenticationError),
+        (lambda: _status_error(openai.PermissionDeniedError, 403), openai.PermissionDeniedError),
+        (lambda: _status_error(openai.BadRequestError, 400), openai.BadRequestError),
+    ],
+)
+def test_ineligible_failures_never_fall_back(make_exc, exc_type):
+    policy = ModelRoutingPolicy(primary_alias="primary", fallback_aliases=("fallback",), max_attempts=2)
+    runtime = _build_runtime([make_exc(), _final_message_response("should never be reached")], routing_policy=policy)
+
+    with pytest.raises(exc_type):
+        runtime.run("hello")
+
+    # Only the primary was ever attempted -- the fallback response in
+    # the scripted list was never consumed.
+    calls = runtime._client.chat.completions.calls
+    assert [c["model"] for c in calls] == ["primary"]
+    assert len(runtime.model_call_log) == 1
+    assert runtime.model_call_log[0].outcome == "error"
+
+
+def test_unknown_failure_fails_closed_with_no_fallback():
+    policy = ModelRoutingPolicy(primary_alias="primary", fallback_aliases=("fallback",), max_attempts=2)
+    unknown_exc = openai.OpenAIError("some completely unrecognized failure")
+    runtime = _build_runtime([unknown_exc, _final_message_response("should never be reached")], routing_policy=policy)
+
+    with pytest.raises(openai.OpenAIError):
+        runtime.run("hello")
+
+    calls = runtime._client.chat.completions.calls
+    assert [c["model"] for c in calls] == ["primary"]
+    assert runtime.model_call_log[0].failure_kind == ModelCallFailureKind.UNKNOWN
+
+
+def test_single_route_policy_never_wraps_an_eligible_failure_in_routing_exhausted():
+    # Backward compatibility: the default one-route policy has nowhere
+    # to fall back to, so an eligible failure must propagate exactly as
+    # it did before #16 -- never wrapped in ModelRoutingExhaustedError,
+    # which would only be meaningful once real fallback was possible.
+    runtime = _build_runtime([_connection_error()])
+
+    with pytest.raises(openai.APIConnectionError):
+        runtime.run("hello")
+
+    assert len(runtime._client.chat.completions.calls) == 1
+
+
+def test_primary_and_fallback_failure_preserves_both_attempts_and_raises_routing_exhausted():
+    policy = ModelRoutingPolicy(primary_alias="primary", fallback_aliases=("fallback",), max_attempts=2)
+    runtime = _build_runtime([_timeout_error(), _connection_error()], routing_policy=policy)
+
+    with pytest.raises(ModelRoutingExhaustedError) as exc_info:
+        runtime.run("hello")
+
+    assert len(runtime.model_call_log) == 2
+    first, second = runtime.model_call_log
+    assert first.requested_alias == "primary"
+    assert first.failure_kind == ModelCallFailureKind.TIMEOUT
+    assert second.requested_alias == "fallback"
+    assert second.failure_kind == ModelCallFailureKind.CONNECTION
+    # Both attempts are preserved on the exception too, not just on the
+    # runtime instance.
+    assert len(exc_info.value.attempts) == 2
+
+
+def test_max_attempts_bound_prevents_additional_model_calls():
+    # Three routes configured, but max_attempts=2 -- the third alias
+    # must never be attempted, even though it's configured and even
+    # though the first two both failed eligibly.
+    policy = ModelRoutingPolicy(
+        primary_alias="primary", fallback_aliases=("fallback-1", "fallback-2"), max_attempts=2
+    )
+    runtime = _build_runtime(
+        [_timeout_error(), _connection_error(), _final_message_response("should never be reached")],
+        routing_policy=policy,
+    )
+
+    with pytest.raises(ModelRoutingExhaustedError):
+        runtime.run("hello")
+
+    calls = runtime._client.chat.completions.calls
+    assert [c["model"] for c in calls] == ["primary", "fallback-1"]
+    assert len(runtime.model_call_log) == 2
+
+
+def test_deadline_expiry_prevents_starting_a_fallback_attempt():
+    clock = FakeClock(start=0.0)
+    reliability = ReliabilityConfig(run_timeout_seconds=10.0, tool_timeout_seconds=5.0)
+    policy = ModelRoutingPolicy(primary_alias="primary", fallback_aliases=("fallback",), max_attempts=2)
+    runtime = _build_runtime([], reliability=reliability, clock=clock, routing_policy=policy)
+
+    calls: list[dict[str, Any]] = []
+
+    def create(**kwargs):
+        calls.append(kwargs)
+        clock.advance(20.0)  # blows past the 10s run deadline during this "attempt"
+        raise _timeout_error()
+
+    runtime._client.chat.completions.create = create
+
+    with pytest.raises(RunDeadlineExceededError):
+        runtime.run("hello")
+
+    # The primary was attempted once; the deadline check before the
+    # fallback attempt caught the now-expired budget and never started
+    # a second HTTP call.
+    assert len(calls) == 1
+
+
+def test_fallback_reuses_the_exact_same_messages_and_tool_schemas():
+    registry = ToolRegistry()
+    registry.register(_echo_tool())
+    policy = ModelRoutingPolicy(primary_alias="primary", fallback_aliases=("fallback",), max_attempts=2)
+    runtime = _build_runtime(
+        [_timeout_error(), _final_message_response("done")],
+        tools=["echo"],
+        registry=registry,
+        routing_policy=policy,
+    )
+
+    runtime.run("investigate something")
+
+    calls = runtime._client.chat.completions.calls
+    assert len(calls) == 2
+    # Same messages and same tool schemas on both attempts -- the only
+    # thing that differs between them is "model".
+    assert calls[0]["messages"] == calls[1]["messages"]
+    assert calls[0]["tools"] == calls[1]["tools"]
+    assert calls[0]["model"] == "primary"
+    assert calls[1]["model"] == "fallback"
+
+
+def test_fallback_after_prior_successful_tool_calls_does_not_re_execute_them():
+    executed: list[dict[str, Any]] = []
+
+    def handler(**kw):
+        executed.append(kw)
+        return {"result": "real evidence"}
+
+    registry = ToolRegistry()
+    registry.register(_echo_tool(handler=handler))
+    policy = ModelRoutingPolicy(primary_alias="primary", fallback_aliases=("fallback",), max_attempts=2)
+
+    responses = [
+        # Iteration 1: primary succeeds and calls the tool once.
+        _tool_call_response(_tool_call("call_1", "echo", {"x": 1})),
+        # Iteration 2: primary fails (eligible), fallback recovers with
+        # the final answer -- the tool must never be called again.
+        _timeout_error(),
+        _final_message_response("done, using the evidence already gathered"),
+    ]
+    runtime = _build_runtime(responses, tools=["echo"], registry=registry, routing_policy=policy)
+
+    answer = runtime.run("investigate something")
+
+    assert answer == "done, using the evidence already gathered"
+    assert len(executed) == 1  # the tool handler ran exactly once
+    calls = runtime._client.chat.completions.calls
+    assert [c["model"] for c in calls] == ["primary", "primary", "fallback"]
+
+
+def test_routing_does_not_reset_the_tool_call_budget():
+    # A fallback within one iteration must not give the model a "fresh"
+    # tool_call_budget -- it's still the same run.
+    executed: list[dict[str, Any]] = []
+
+    def handler(**kw):
+        executed.append(kw)
+        return {"result": "evidence"}
+
+    registry = ToolRegistry()
+    registry.register(_echo_tool(handler=handler))
+    policy = ModelRoutingPolicy(primary_alias="primary", fallback_aliases=("fallback",), max_attempts=2)
+
+    responses = [
+        _tool_call_response(_tool_call("call_1", "echo", {"x": 1})),  # uses up the one-call budget
+        _timeout_error(),  # primary fails on the next iteration's model call
+        _final_message_response("done"),  # fallback recovers
+    ]
+    runtime = _build_runtime(
+        responses, tools=["echo"], registry=registry, tool_call_budget=1, routing_policy=policy
+    )
+
+    runtime.run("investigate something")
+
+    # tools must have been withheld on the final (post-fallback) call,
+    # exactly as tool_call_budget=1 requires -- proving budget state
+    # survived the fallback.
+    assert "tools" not in runtime._client.chat.completions.calls[-1]
+    assert len(executed) == 1
+
+
+def test_logs_contain_safe_reason_codes_not_provider_error_text(caplog):
+    caplog.set_level(logging.WARNING, logger="mantis.runtime")
+    secret_body = "Incorrect API key provided: sk-should-never-appear-in-logs"
+    exc = _status_error(openai.AuthenticationError, 401, message=secret_body)
+    runtime = _build_runtime([exc])
+
+    with pytest.raises(openai.AuthenticationError):
+        runtime.run("hello")
+
+    logged_text = "\n".join(str(r.getMessage()) for r in caplog.records) + "\n".join(
+        str(getattr(r, "detail", "")) for r in caplog.records
+    )
+    assert secret_body not in logged_text
+    assert "sk-should-never-appear" not in logged_text
+    assert "AuthenticationError" in logged_text
+
+
+def test_routing_policy_defaults_to_a_single_route_wrapping_model_config():
+    runtime = _build_runtime([_final_message_response("hi")])
+
+    assert runtime.routing_policy.primary_alias == "m"
+    assert runtime.routing_policy.fallback_aliases == ()
+    assert runtime.routing_policy.max_attempts == 1
+
+
+def test_explicit_routing_policy_is_used_as_is():
+    policy = ModelRoutingPolicy(primary_alias="explicit-primary", fallback_aliases=("explicit-fallback",))
+    runtime = _build_runtime([_final_message_response("hi")], routing_policy=policy)
+
+    assert runtime.routing_policy is policy
+
+
+def test_routing_metrics_increment_on_fallback_and_exhaustion():
+    env = metrics.environment()
+    fallback_before = metrics.MODEL_ROUTING_FALLBACKS_TOTAL.labels(agent="test-agent", environment=env)._value.get()
+    failure_labels = dict(agent="test-agent", model_alias="primary", failure_kind="timeout", environment=env)
+    failure_before = metrics.MODEL_CALL_FAILURES_TOTAL.labels(**failure_labels)._value.get()
+
+    policy = ModelRoutingPolicy(primary_alias="primary", fallback_aliases=("fallback",), max_attempts=2)
+    runtime = _build_runtime([_timeout_error(), _final_message_response("recovered")], routing_policy=policy)
+    runtime.run("hello")
+
+    assert (
+        metrics.MODEL_ROUTING_FALLBACKS_TOTAL.labels(agent="test-agent", environment=env)._value.get()
+        == fallback_before + 1
+    )
+    assert metrics.MODEL_CALL_FAILURES_TOTAL.labels(**failure_labels)._value.get() == failure_before + 1
+
+
+def test_routing_exhausted_metric_increments_when_every_route_fails():
+    env = metrics.environment()
+    exhausted_before = metrics.MODEL_ROUTING_EXHAUSTED_TOTAL.labels(agent="test-agent", environment=env)._value.get()
+
+    policy = ModelRoutingPolicy(primary_alias="primary", fallback_aliases=("fallback",), max_attempts=2)
+    runtime = _build_runtime([_timeout_error(), _connection_error()], routing_policy=policy)
+
+    with pytest.raises(ModelRoutingExhaustedError):
+        runtime.run("hello")
+
+    assert (
+        metrics.MODEL_ROUTING_EXHAUSTED_TOTAL.labels(agent="test-agent", environment=env)._value.get()
+        == exhausted_before + 1
+    )

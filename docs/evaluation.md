@@ -521,6 +521,150 @@ the deterministic proofs — no live repository, network, or
 LLM-as-judge scoring is used; everything runs against the fixture-backed
 tool through the same deterministic scoring every other scenario uses.
 
+## Model qualification suite (#13)
+
+Everything above this section is the general-purpose harness: scenarios,
+fixtures, deterministic scoring, `mantis eval run` for one scenario at a
+time. **Model qualification** is a thin orchestration layer on top of
+that same harness — a fixed, versioned baseline of *existing* scenarios,
+one command to run all of them against two or more LiteLLM aliases, and
+deterministic, documented role-eligibility rules. It introduces no
+second evaluator: every (model, scenario) pair still runs through the
+real `mantis.eval.runner.run_scenario` → the real `AgentRuntime` → the
+real LiteLLM gateway, and is still scored by the same
+`mantis.eval.scoring.evaluate_result`. See `mantis/eval/qualification.py`
+for the implementation and `docs/model-qualification.md` for the
+checked-in qualification report itself (results, role assignments,
+limitations, requalification triggers) — this section only documents
+the *mechanism*.
+
+### The baseline suite is checked-in code, not a doc list
+
+`mantis.eval.qualification.QUALIFICATION_SCENARIOS` is a fixed, ordered
+tuple of scenario names — `mantis-core-qualification-v1`
+(`QUALIFICATION_SUITE_ID`). Adding or removing a scenario from it is a
+deliberate code change that also bumps
+`QUALIFICATION_SUITE_VERSION` and updates the regression-locking test in
+`tests/test_qualification.py::test_baseline_suite_membership_and_order_is_stable`
+— never a silent drift between what the docs say and what actually
+runs. Current membership and why each scenario is in it (mapping to the
+issue's required coverage categories) is documented directly on
+`QUALIFICATION_SCENARIOS`'s docstring.
+
+`mantis.eval.qualification.FAST_QUALIFICATION_SCENARIOS`
+(`mantis-fast-qualification-v1`) is a smaller, similarly checked-in
+subset for a candidate too slow/expensive to justify the full baseline —
+deliberately kept as a strict subset of the full suite, so a single
+qualification run always carries enough evidence to evaluate both roles.
+
+### Running it
+
+```bash
+mantis eval qualify --models qwen3-opencode:latest,qwen3-coder:30b-a3b-q8_0 \
+    --out eval-results/mantis-core-qualification-v1.jsonl
+
+# The smaller, checked-in mantis-fast-qualification-v1 subset instead of
+# the full ten-scenario baseline:
+mantis eval qualify --models alias-a,alias-b --suite fast \
+    --out eval-results/mantis-fast-qualification-v1.jsonl
+```
+
+`--suite` selects which checked-in baseline runs: `core` (the default,
+`mantis-core-qualification-v1`, all ten scenarios) or `fast`
+(`mantis-fast-qualification-v1`, the smaller subset) — either way, the
+operator never invokes each scenario one at a time. Requires at least
+two model aliases (`--models`); traverses LiteLLM and the real
+`AgentRuntime` exactly like `mantis eval run` — no direct provider or
+Ollama shortcut exists anywhere in this path. Prints a
+MODEL/SCENARIO/OUTCOME/SCORE/HARD
+FAILS matrix and a per-alias role-eligibility breakdown, then writes two
+files:
+
+- `<out>`: bounded `QualificationRecord` evidence, one JSON object per
+  (model, scenario) pair — safe to commit (see "Captured evidence"
+  below).
+- `<out base>.raw.jsonl`: the full raw `EvalResult` data (complete
+  tool-call traces, final-answer text) — **not** required to be
+  committed if it's large or contains verbose/adversarial model text
+  (several baseline scenarios deliberately embed prompt-injection
+  attempts). Each `QualificationRecord.final_answer_ref` points at its
+  exact line here (`"<raw path>#L<line>"`), so the bounded, committed
+  file stays traceable to the full evidence without inlining it.
+
+**One model failing never aborts qualification of the others.**
+`run_scenario` itself already isolates a model/backend failure
+(`outcome="error"`, never raising); `qualify_models` additionally
+catches any other exception a given (model, scenario) pair raises and
+records it as `outcome="fatal"`, then continues — broader than
+`run_scenario`'s own philosophy, because a multi-model qualification
+sweep must not sacrifice the rest of a potentially long matrix over one
+unexpected failure. Resolving a scenario name from the checked-in
+baseline against the real registry happens *outside* that broader
+catch, so a baseline/registry drift bug (the checked-in list naming a
+scenario that no longer exists) still propagates loudly instead of
+being misattributed as model evidence.
+
+### Captured evidence
+
+Each `QualificationRecord` (`mantis.eval.qualification`) holds, per
+(model, scenario) pair: the requested alias and (when the backend
+reports it — see `AgentRuntime.backend_model_log`, `response.model`)
+the resolved backend model identity; the scenario name/version and
+suite id/version; outcome (`ok`/`error`/`fatal`); `passed`/`score`/
+`max_score`/`hard_failures` from the same deterministic scoring every
+other eval path uses; iteration/tool-call/duplicate/malformed counts;
+elapsed time; total tokens when the backend reported usage; cost in USD
+(**always `None` today** — LiteLLM's per-request cost is reported via
+HTTP response headers its proxy adds, which the plain OpenAI-SDK client
+`AgentRuntime` uses does not currently capture; this is reported as
+unavailable, never fabricated as `0.0`); a pointer to the raw
+final-answer/result location; the Mantis version/commit and configured
+LiteLLM endpoint (never a credential); and a generation timestamp.
+Anything the backend/provider genuinely didn't report stays `None` —
+never guessed, never fabricated as zero.
+
+### Role-eligibility rules (`mantis.eval.qualification.evaluate_role_eligibility`)
+
+Deterministic, documented, machine-tested — never a subjective "this
+one felt better" call:
+
+- **`mantis-reasoning`**: eligible only if the candidate completes the
+  *entire* `mantis-core-qualification-v1` baseline with zero hard
+  failures in any required check, including every `incident-triage-*`
+  scenario specifically (checked as its own rule, not merely implied by
+  "zero hard failures" — Incident Triage is Mantis's most demanding
+  current multi-source reasoning workload).
+- **`mantis-fast`**: the same rule, against the smaller
+  `mantis-fast-qualification-v1` subset, which still includes a
+  trust/injection-discipline check (`awx-prompt-injection`), a
+  retrieval/error-discipline check
+  (`incident-triage-source-unavailable`), and a stopping-behavior check
+  (`awx-duplicate-call-temptation`).
+- **`mantis-coder`**: never automatically assigned by this suite — no
+  representative coding/code-review qualification suite exists yet
+  (blocked on #94/#91), so `evaluate_role_eligibility("mantis-coder",
+  ...)` always returns `eligible=False` with that reason, regardless of
+  how well a candidate does on this suite. This suite must never be used
+  to claim coding competence.
+
+When multiple candidates are eligible for the same role, latency/cost
+(`elapsed_seconds`/`total_tokens` in each `QualificationRecord`) may be
+reported as a secondary decision factor — quality (eligibility) always
+remains primary, and no report may claim one model is universally
+"best."
+
+### Reproducing and requalifying
+
+See `docs/model-qualification.md` for the exact command used for the
+checked-in report and its "Requalification triggers" section — the
+short version: re-run `mantis eval qualify` with the same suite version
+after any material change to a candidate's backend model/version,
+LiteLLM/provider tool-calling behavior, the `AgentRuntime` model/tool
+loop, a core agent's system prompt, a tool schema the suite materially
+exercises, deterministic-expectation semantics, or the baseline
+scenario set itself — or when a new major agent class with materially
+different reasoning requirements ships.
+
 ## Adding a new scenario
 
 1. Add a fixture module under `mantis/eval/fixtures/` (or extend an
