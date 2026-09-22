@@ -221,6 +221,27 @@ def test_run_scenario_against_one_model(monkeypatch):
     assert result.tool_calls == []
 
 
+def test_run_scenario_accepts_an_explicit_routing_policy(monkeypatch):
+    # #16 AC: the eval/qualification path must be able to exercise a
+    # real primary+fallback routing policy, not only ever the
+    # single-route default AgentRuntime otherwise constructs.
+    from mantis.config import ModelRoutingPolicy
+
+    _patch_openai(
+        monkeypatch,
+        {"model-a": [_backend_error()], "model-a-backup": [_final("recovered via fallback")]},
+    )
+    scenario = _echo_scenario()
+    policy = ModelRoutingPolicy(primary_alias="model-a", fallback_aliases=("model-a-backup",), max_attempts=2)
+
+    result = run_scenario(scenario, "model-a", base_model_config=_base_config(), routing_policy=policy)
+
+    assert result.outcome == "ok"
+    assert result.final_answer == "recovered via fallback"
+    assert result.requested_primary_alias == "model-a"
+    assert result.final_alias == "model-a-backup"
+
+
 def test_run_scenario_captures_tool_call_trace(monkeypatch):
     _patch_openai(
         monkeypatch,
@@ -272,6 +293,26 @@ def test_run_scenario_records_error_outcome_for_a_backend_failure(monkeypatch):
     assert result.outcome == "error"
     assert result.final_answer is None
     assert "APIConnectionError" in result.error
+
+
+def test_run_scenario_error_summary_is_bounded_and_never_the_raw_provider_body(monkeypatch):
+    # A real example encountered during a live qualification run: an
+    # nginx 504 Gateway Time-out HTML page as an openai.OpenAIError's
+    # own message. error_summary must stay class-name(+status)-only;
+    # error (kept for local/raw-file debugging) may still carry the
+    # full detail.
+    html_body = "<html><head><title>504 Gateway Time-out</title></head><body>nginx</body></html>"
+    response = httpx.Response(504, request=httpx.Request("POST", "http://litellm.example.test"))
+    exc = openai.InternalServerError(html_body, response=response, body=None)
+    _patch_openai(monkeypatch, {"model-a": [exc]})
+    scenario = _echo_scenario()
+
+    result = run_scenario(scenario, "model-a", base_model_config=_base_config())
+
+    assert result.outcome == "error"
+    assert result.error_summary == "InternalServerError (status=504)"
+    assert html_body not in result.error_summary
+    assert html_body in result.error  # full detail still available locally
 
 
 def test_run_scenario_records_error_outcome_for_max_iterations_exceeded(monkeypatch):

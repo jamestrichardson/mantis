@@ -483,7 +483,7 @@ def _git_correlation_registry() -> ToolRegistry:
 default_scenarios.register(
     Scenario(
         name="incident-triage-git-correlation-no-deployment-proof",
-        version="1.0",
+        version="2.0",
         description=(
             "An explicit incident window for ferros-c01. AWX historically "
             "recorded a runner_on_unreachable failure inside the window; "
@@ -648,7 +648,7 @@ def _conflicting_registry() -> ToolRegistry:
 default_scenarios.register(
     Scenario(
         name="incident-triage-conflicting-current-and-historical",
-        version="1.0",
+        version="2.0",
         description=(
             "AWX historically recorded a runner_on_unreachable failure for "
             "ferros-c01 inside the requested window. A current TCP probe "
@@ -748,7 +748,7 @@ _SOURCE_UNAVAILABLE_PROMPT = (
 default_scenarios.register(
     Scenario(
         name="incident-triage-source-unavailable",
-        version="1.0",
+        version="2.0",
         description=(
             "Same AWX/TCP/Prometheus evidence as the git-correlation "
             "scenario, but Loki is unavailable -- loki_query raises a "
@@ -935,7 +935,7 @@ def _event_history_registry() -> ToolRegistry:
 default_scenarios.register(
     Scenario(
         name="incident-triage-kubernetes-event-history",
-        version="1.0",
+        version="2.0",
         description=(
             "kubernetes_list_events returns one Warning BackOff event for "
             "payment-api-7f9c8d-abcde, timestamped 03:14:00 inside the "

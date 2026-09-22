@@ -90,7 +90,17 @@ class EvalResult:
             ``tool_calls``: this is model-*call* history, never inflated
             by, and never inflating, actual tool execution counts.
         error: Exception type and message when ``outcome == "error"``,
-            else ``None``.
+            else ``None``. May contain a raw provider/upstream error body
+            (e.g. an nginx error page) for some ``openai.OpenAIError``
+            subclasses — fine for a local/raw result file, but never
+            safe to copy into a bounded, committed artifact.
+        error_summary: A bounded, safe summary of the same failure
+            (exception class name + HTTP status code only, see
+            ``mantis.routing.safe_model_call_detail``) — ``None``
+            whenever ``error`` is. This is what
+            ``mantis.eval.qualification.QualificationRecord`` copies
+            into its own committed-safe ``error`` field; ``error``
+            above is never copied there directly.
         raw_message: The raw final-message payload (via
             ``AgentRuntime.diagnostic_raw_message``), captured only when a
             run ended with neither usable answer text nor a tool call —
@@ -134,6 +144,7 @@ class EvalResult:
     final_alias: str | None = None
     route_attempts: list[dict[str, Any]] = field(default_factory=list)
     error: str | None = None
+    error_summary: str | None = None
     raw_message: dict[str, Any] | None = None
     evaluation: dict[str, Any] | None = None
     result_format_version: str = RESULT_FORMAT_VERSION

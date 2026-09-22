@@ -22,9 +22,14 @@ What this module *adds* on top of that:
   record per (model, scenario) pair (see its docstring for the full
   field list, matching the issue's "Captured evidence" contract).
 - :func:`qualify_models` — the multi-model/multi-scenario orchestration
-  loop, isolating one model/scenario's unexpected failure from the rest
-  of the matrix (see its docstring for why this is a *broader* catch
-  than ``run_scenario``'s own).
+  loop. Deliberately preserves ``run_scenario``'s own isolation
+  boundary rather than widening it: a known model/backend failure never
+  aborts the rest of the matrix (because ``run_scenario`` itself never
+  raises for one), but an unexpected Mantis bug still propagates and
+  aborts the whole run, exactly as ``run_scenario``/``run_comparison``
+  already document. "One model failing must not abort the others" is
+  not the same claim as "swallow every programming error" — this
+  module never conflates the two.
 - Deterministic role-eligibility rules (:func:`evaluate_role_eligibility`)
   — documented, machine-testable pass/fail logic, never a subjective
   "this one felt better" judgment call.
@@ -45,10 +50,10 @@ from datetime import datetime, timezone
 from typing import Any, Callable, Sequence
 
 from mantis import __version__ as MANTIS_VERSION
-from mantis.config import LiteLLMConfig
+from mantis.config import LiteLLMConfig, ModelRoutingPolicy
 from mantis.eval.results import EvalResult
 from mantis.eval.runner import run_scenario
-from mantis.eval.scenarios import Scenario, default_scenarios
+from mantis.eval.scenarios import default_scenarios
 
 # ---------------------------------------------------------------------------
 # The named, versioned baseline suite (checked into repository code, never
@@ -147,8 +152,9 @@ class QualificationRecord:
 
     Fields absent from the underlying backend/provider response are
     ``None`` — never fabricated as ``0``/``"unknown"``/a guess. See
-    :func:`_record_from_eval_result` and :func:`_fatal_record` for the
-    two ways this gets built.
+    :func:`_record_from_eval_result`, the only way this gets built —
+    ``qualify_models`` never constructs one from an unexpected
+    exception; see its own docstring.
     """
 
     suite_id: str
@@ -169,7 +175,7 @@ class QualificationRecord:
     resolved_backend_model: str | None
     scenario: str
     scenario_version: str
-    outcome: str  # "ok" | "error" (model/backend failure) | "fatal" (qualification-layer isolation, see qualify_models)
+    outcome: str  # "ok" | "error" (model/backend failure -- see mantis.eval.runner.run_scenario)
     passed: bool | None
     score: int | None
     max_score: int | None
@@ -259,56 +265,10 @@ def _record_from_eval_result(
         # uses does not currently capture -- never fabricated as 0.0.
         cost_usd=None,
         final_answer_ref=f"raw_result_index={raw_result_index}",
-        error=result.error,
-        mantis_version=mantis_version,
-        mantis_commit=mantis_commit,
-        litellm_endpoint=litellm_endpoint,
-        litellm_version=litellm_version,
-        generated_at=generated_at,
-    )
-
-
-def _fatal_record(
-    *,
-    suite_id: str,
-    suite_version: str,
-    requested_alias: str,
-    scenario: Scenario,
-    exc: Exception,
-    mantis_version: str,
-    mantis_commit: str | None,
-    litellm_endpoint: str,
-    litellm_version: str | None,
-    generated_at: str,
-) -> QualificationRecord:
-    """A record for a (model, scenario) pair that raised something
-    ``run_scenario`` itself doesn't already isolate (see
-    :func:`qualify_models`) -- ``outcome="fatal"`` distinguishes this
-    qualification-layer catch from ``run_scenario``'s own narrower
-    ``outcome="error"``, so a report reader can tell the two apart."""
-    return QualificationRecord(
-        suite_id=suite_id,
-        suite_version=suite_version,
-        requested_alias=requested_alias,
-        final_alias=None,
-        failed_route_attempts=(),
-        resolved_backend_model=None,
-        scenario=scenario.name,
-        scenario_version=scenario.version,
-        outcome="fatal",
-        passed=False,
-        score=None,
-        max_score=None,
-        hard_failures=(),
-        iterations=0,
-        tool_call_count=0,
-        duplicate_call_count=0,
-        malformed_call_count=0,
-        elapsed_seconds=0.0,
-        total_tokens=None,
-        cost_usd=None,
-        final_answer_ref=None,
-        error=f"{type(exc).__name__}: {exc}",
+        # Bounded/safe (see EvalResult.error_summary's docstring) --
+        # result.error itself may embed a raw provider/upstream error
+        # body and must never be copied into this committed-safe record.
+        error=result.error_summary,
         mantis_version=mantis_version,
         mantis_commit=mantis_commit,
         litellm_endpoint=litellm_endpoint,
@@ -349,6 +309,7 @@ def qualify_models(
     suite_version: str = QUALIFICATION_SUITE_VERSION,
     base_model_config: LiteLLMConfig | None = None,
     litellm_version: str | None = None,
+    routing_policies: dict[str, ModelRoutingPolicy] | None = None,
     run_scenario_fn: RunScenarioFn = run_scenario,
 ) -> QualificationRun:
     """Run ``scenario_names`` (default: the full checked-in
@@ -358,52 +319,45 @@ def qualify_models(
     ``run_scenario_fn`` purely for deterministic tests with a
     fake/fixture runner — production code never overrides it).
 
-    Isolation, at two levels:
+    ``routing_policies`` (#16), when given, maps a model alias to a
+    ``mantis.config.ModelRoutingPolicy`` to qualify *that* alias's
+    primary+fallback routing behavior together, rather than only ever
+    the single-route default ``run_scenario`` otherwise constructs.
+    Aliases not present in the mapping keep the single-route default.
 
-    - ``run_scenario`` itself already isolates a model/backend failure
-      (``openai.OpenAIError``, ``mantis.runtime.RuntimeError_``) as a
-      per-scenario ``outcome="error"`` result, never raising.
-    - This function additionally catches *any* other exception a given
-      (model, scenario) pair might raise and records it as a
-      ``outcome="fatal"`` :class:`QualificationRecord`, then continues —
-      broader than ``run_scenario``'s own philosophy (which lets a
-      genuine Mantis bug propagate and abort a single-scenario
-      comparison), because a multi-model qualification *sweep* must not
-      sacrifice the rest of a potentially long matrix over one
-      unexpected failure. Resolving each scenario name via
-      ``default_scenarios.get`` happens *outside* this broader catch, so
-      a baseline/registry drift bug (the checked-in list naming a
-      scenario that no longer exists) still propagates loudly rather
-      than being misattributed as model evidence.
+    Isolation boundary — deliberately **not** widened from
+    ``run_scenario``'s own: a known model/backend failure
+    (``openai.OpenAIError``, ``mantis.runtime.RuntimeError_``, which
+    includes ``ModelRoutingExhaustedError``) never aborts the rest of
+    the matrix, because ``run_scenario`` itself already isolates those
+    as a per-scenario ``outcome="error"`` result and never raises for
+    them. Anything else — an unexpected ``KeyError``, a bug in a
+    scenario's fixture, a scoring bug — is a genuine Mantis defect, not
+    model evidence, and propagates out of this function exactly as it
+    would out of ``run_scenario``/``run_comparison``, invalidating the
+    whole qualification run rather than being silently attributed to
+    whichever model happened to be running. "One model/backend failure
+    must not abort qualification of the remaining models" describes
+    ``run_scenario``'s own existing isolation, never a license to
+    swallow arbitrary programming errors at this layer too. Resolving
+    each scenario name via ``default_scenarios.get`` follows the same
+    rule: a baseline/registry drift bug (the checked-in list naming a
+    scenario that no longer exists) propagates loudly.
     """
     config = base_model_config or LiteLLMConfig.from_env()
     generated_at = _utc_now_iso()
     mantis_commit = _detect_mantis_commit()
+    policies = routing_policies or {}
 
     records: list[QualificationRecord] = []
     raw_results: list[EvalResult] = []
 
     for alias in model_aliases:
         for name in scenario_names:
-            scenario = default_scenarios.get(name)  # baseline/registry drift: let this raise
-            try:
-                result = run_scenario_fn(scenario, alias, base_model_config=config)
-            except Exception as exc:  # noqa: BLE001 -- qualification-batch isolation, see docstring above
-                records.append(
-                    _fatal_record(
-                        suite_id=suite_id,
-                        suite_version=suite_version,
-                        requested_alias=alias,
-                        scenario=scenario,
-                        exc=exc,
-                        mantis_version=MANTIS_VERSION,
-                        mantis_commit=mantis_commit,
-                        litellm_endpoint=config.url,
-                        litellm_version=litellm_version,
-                        generated_at=generated_at,
-                    )
-                )
-                continue
+            scenario = default_scenarios.get(name)
+            result = run_scenario_fn(
+                scenario, alias, base_model_config=config, routing_policy=policies.get(alias)
+            )
 
             records.append(
                 _record_from_eval_result(
