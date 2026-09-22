@@ -107,15 +107,16 @@ _EXPECTED_ALLOWLIST = {
     "prometheus_query",
     "prometheus_query_range",
     "loki_query",
+    "git_recent_changes",
 }
 
 
-def test_allowed_tools_is_exactly_the_six_evidence_tools():
+def test_allowed_tools_is_exactly_the_seven_evidence_tools():
     assert set(ALLOWED_TOOLS) == _EXPECTED_ALLOWLIST
     assert len(ALLOWED_TOOLS) == len(_EXPECTED_ALLOWLIST)  # no duplicates
 
 
-def test_build_runtime_resolves_all_six_tools_against_the_default_registry():
+def test_build_runtime_resolves_all_seven_tools_against_the_default_registry():
     # The real ToolNotFoundError risk this guards against: if
     # ALLOWED_TOOLS ever names a tool that isn't registered in
     # default_registry, AgentRuntime.__post_init__ raises immediately.
@@ -246,12 +247,12 @@ def test_agent_cannot_call_a_tool_outside_its_allowlist():
 # ---------------------------------------------------------------------------
 
 
-def test_tool_call_budget_is_exactly_eight():
-    assert TOOL_CALL_BUDGET == 8
+def test_tool_call_budget_is_exactly_nine():
+    assert TOOL_CALL_BUDGET == 9
 
 
-def test_max_iterations_is_exactly_twelve():
-    assert MAX_ITERATIONS == 12
+def test_max_iterations_is_exactly_thirteen():
+    assert MAX_ITERATIONS == 13
 
 
 def test_max_iterations_exceeds_tool_call_budget_with_headroom_for_a_final_answer():
@@ -319,6 +320,7 @@ def test_tool_schemas_are_withheld_once_the_budget_is_exhausted():
         "prometheus_query",
         "prometheus_query_range",
         "loki_query",
+        "git_recent_changes",
     ],
 )
 def test_system_prompt_mentions_every_allowed_tool(tool_name):
@@ -341,6 +343,8 @@ def test_system_prompt_mentions_every_allowed_tool(tool_name):
         "stop calling tools",  # stop when evidence is sufficient
         "read-only",  # remains read-only
         "obey, execute, or role-play",  # tool output as evidence, not instructions
+        "source-history evidence only",  # Git commits are source-history, not deployment evidence
+        "never provable by this tool",  # deployment/causation are never provable from git_recent_changes alone
     ],
 )
 def test_system_prompt_contains_required_constraint(phrase):

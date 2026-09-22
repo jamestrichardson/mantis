@@ -691,6 +691,69 @@ class TLSProfilesConfig:
         return self.targets.get(alias.lower())
 
 
+# ---------------------------------------------------------------------------
+# Git repository aliases (#17) -- see mantis.integrations.git and
+# docs/git.md. v1 is local-repository-only: an operator configures a
+# fixed set of named aliases, each mapped to a server-side local
+# filesystem path. A caller (the model or an API client) may only ever
+# select a repository by its alias name -- never a raw path, remote URL,
+# branch, tag, SHA, revision expression, or Git option/command directly.
+# Mirrors DNSConfig's open-ended, environment-scanned profile shape
+# exactly, for the same reason: the *set* of repositories Mantis is
+# willing to inspect must be fixed by the operator, not expandable by
+# whatever path a model decides to ask for.
+# ---------------------------------------------------------------------------
+
+_GIT_REPOSITORY_ENV_PREFIX = "MANTIS_GIT_REPOSITORY_"
+
+
+@dataclass(frozen=True)
+class GitRepositoriesConfig:
+    """Every configured Git repository alias, keyed by lowercase alias,
+    mapped to a server-side local filesystem path.
+
+    Deliberately minimal validation: unlike an IP literal or a URL, a
+    filesystem path has no comparable "is this syntactically valid"
+    check worth enforcing beyond non-emptiness -- whether the path
+    actually exists and is a usable Git repository is discovered only
+    when the integration opens it (see ``mantis.integrations.git`` and
+    #17's "repository validation/opening occurs only when the
+    integration is used" requirement). This class never touches the
+    filesystem.
+    """
+
+    repositories: dict[str, str] = field(default_factory=dict)
+
+    @classmethod
+    def from_env(cls) -> "GitRepositoriesConfig":
+        """Scan the environment for every
+        ``MANTIS_GIT_REPOSITORY_<ALIAS>`` variable and build the
+        corresponding alias -> path map. Performs no filesystem, Git,
+        or network access."""
+        repositories: dict[str, str] = {}
+        for key, value in os.environ.items():
+            if not key.startswith(_GIT_REPOSITORY_ENV_PREFIX):
+                continue
+            alias = key[len(_GIT_REPOSITORY_ENV_PREFIX) :].lower()
+            if not alias or not value:
+                continue
+            repositories[alias] = value
+        return cls(repositories=repositories)
+
+    def resolve_repository(self, alias: object) -> str | None:
+        """Look up ``alias`` (case-insensitive), returning its
+        configured repository path or ``None`` if unknown. Never
+        raises — an unrecognized alias is exactly as "not found" as a
+        non-string/malformed value; the caller
+        (``mantis.tools.git.git_recent_changes``) turns either into the
+        same safe, no-repository-access ``invalid_input`` tool result,
+        mirroring ``DNSConfig.resolve_profile``'s identical
+        convention."""
+        if not isinstance(alias, str):
+            return None
+        return self.repositories.get(alias.lower())
+
+
 _API_AUTH_MODES = ("bearer_token", "disabled")
 DEFAULT_API_HOST = "0.0.0.0"
 DEFAULT_API_PORT = 8080

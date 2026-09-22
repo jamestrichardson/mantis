@@ -325,6 +325,26 @@ independent dimensions, and the SNI/trust-store posture). Handshake/
 certificate-parsing mechanics live in `mantis/integrations/tls.py`;
 semantic shaping in `mantis/tools/tls.py`.
 
+## Git tool behavior
+
+### `git_recent_changes` (#17): bounded source-history evidence
+
+`git_recent_changes(repository_alias: str, start: str, end: str, limit: int = 20)`
+is Mantis's first Git evidence tool — commits reachable from a
+server-side-configured local repository's `HEAD`, committed within a
+bounded time window (max 30 days), with bounded first-parent
+changed-file evidence. This is **source-history evidence only**: it
+never proves a commit was deployed, and a commit near an incident's
+timeline is only a temporal correlation, never a proven cause — every
+result carries an explicit `limitations` field stating this. See
+[docs/git.md](git.md) for the full design (alias-only repository
+selection, the committed-vs-authored timestamp distinction,
+deterministic ordering, first-parent diff semantics, named bounds and
+truncation reasons, and why this tool never needs an OS `git`
+executable). Repository-open/traversal/diff mechanics (via the
+pure-Python `dulwich` library — never a shell) live in
+`mantis/integrations/git.py`; semantic shaping in `mantis/tools/git.py`.
+
 ## Prometheus tool behavior
 
 ### `prometheus_query` / `prometheus_query_range` (#9): time-series evidence

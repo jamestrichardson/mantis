@@ -1,7 +1,8 @@
 # Reliability
 
-Mantis has moved from one remote integration (AWX) to several (network,
-Prometheus, Loki, Kubernetes today; Git planned). This page is the shared
+Mantis has moved from one remote integration (AWX) to several
+(network, DNS, HTTP, TLS, Git, Prometheus, Loki, Kubernetes today;
+others planned). This page is the shared
 reliability contract every integration adopts — explicit timeouts, one
 failure taxonomy, safe bounded retries, run/tool deadlines, and a
 run-local failure guard — implemented once in `mantis.reliability` and
@@ -174,6 +175,31 @@ Backoff is exponential with full jitter (`random.uniform(0, min(base *
 (capped at `backoff_cap_seconds`) when the response is a 429 that
 provided one. `sleep` is injectable (defaults to real `time.sleep`) so
 tests never really wait.
+
+### Git: a local, synchronous read, not an HTTP call
+
+`mantis.integrations.git.collect_recent_commits` (#17) is never
+wrapped in `retry_call()`, and this is a deliberately different
+reason than "current-state observations like `check_tcp_connectivity`/
+`dns_lookup`/`http_probe`/`tls_certificate_inspect` are never retried
+either" (those are network reads where a transient failure is at
+least *plausible*). Git repository access is **local, synchronous
+filesystem I/O** — there is no connect/read timeout to configure in
+the first place, and no transient failure a retry would plausibly fix:
+a path that isn't a Git repository, or that's unreadable, fails
+identically on every attempt. HTTP-shaped retry semantics
+(`IntegrationErrorKind.RATE_LIMIT`/`SERVER_ERROR`/`Retry-After`)
+simply don't apply to this integration — see
+`mantis.integrations.git.GitError`'s classification table in
+[docs/git.md](git.md#failure-semantics), which only ever uses
+`NOT_FOUND` (repository missing/invalid/unreadable, or empty) and
+`SERVER_ERROR` (a genuinely unexpected object-read failure), never
+`TIMEOUT`/`CONNECTION`/`RATE_LIMIT`.
+
+The caller's remaining `Deadline` is still respected — the `HEAD` walk
+checks it between commits and stops early rather than running
+unbounded — but this bounds *inspection scope* (how much history gets
+walked), not a network round-trip.
 
 ## Run/tool deadlines
 

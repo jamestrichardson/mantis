@@ -283,6 +283,50 @@ attempted. See
 existence on disk is never checked at config-parse time either, only
 when a handshake actually runs.
 
+## Git
+
+See [docs/git.md](git.md) for the full contract: alias-only repository
+selection, the committed-vs-authored timestamp distinction,
+first-parent changed-file semantics, and the "source history is not
+deployment evidence, and correlation is not causation" requirement.
+
+Also an open-ended set of named **repository aliases**, this time
+mapping to a server-side **local filesystem path** rather than a
+network endpoint:
+
+```bash
+MANTIS_GIT_REPOSITORY_<ALIAS>=<local filesystem path>
+```
+
+| Example | Meaning |
+|---|---|
+| `MANTIS_GIT_REPOSITORY_INFRA_CORE=/repos/infra-core` | Defines the `infra_core` repository alias, pointed at that local path. |
+| `MANTIS_GIT_REPOSITORY_APP=/repos/app` | Defines a second, independent `app` repository alias. |
+
+`<ALIAS>` is case-insensitive and becomes exactly the
+`repository_alias` value `git_recent_changes` accepts — the **only**
+repository-selecting input a model/API caller may supply; a caller can
+never provide a filesystem path, remote URL, branch, tag, SHA,
+revision expression, or Git option/command directly, and an alias
+with no matching configured repository is rejected before any
+repository access is attempted.
+
+`GitRepositoriesConfig.from_env()` performs no filesystem, Git, or
+network access — a configured path's existence, and whether it's
+actually a usable Git repository, is never checked at config-parse
+time, only when `git_recent_changes` actually runs (see
+[docs/git.md](git.md#repository-validation-opening-occurs-only-when-the-integration-is-used)).
+
+**For a containerized deployment**, mount each configured repository
+into the container **read-only** at the same path named by its
+`MANTIS_GIT_REPOSITORY_<ALIAS>` value — see
+`deploy/standalone/runtime.env.example` and
+`deploy/standalone/compose.yaml`'s commented-out `volumes:` example.
+Mantis's Git integration never writes to a repository (see
+[docs/git.md](git.md#security-and-bounds)), but mounting read-only is
+a further, deployment-level defense-in-depth measure worth applying
+regardless.
+
 ## Reliability
 
 See [docs/reliability.md](reliability.md) for the full contract:

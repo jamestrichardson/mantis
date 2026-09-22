@@ -7,6 +7,15 @@ services:
     env_file:
       - runtime.env
 
+    # Git repository aliases (#17): if MANTIS_GIT_REPOSITORY_<ALIAS>
+    # variables are set in runtime.env, mount each host repository at
+    # that same in-container path, **read-only** (`:ro`) -- Mantis's
+    # Git integration only ever reads already-committed history and
+    # never needs (or should have) write access. Uncomment and adjust
+    # per configured alias; there is no default mount.
+    # volumes:
+    #   - /path/on/host/to/infra-core:/repos/infra-core:ro
+
     environment:
       MANTIS_DEPLOYED_TAG: ${MANTIS_DEPLOYED_TAG:-unknown}
       MANTIS_HEALTH_URL: ${MANTIS_HEALTH_URL:-http://127.0.0.1:8080/readyz}
