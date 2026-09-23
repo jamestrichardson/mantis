@@ -1,5 +1,29 @@
 # Changelog
 
+## [1.10.0](https://github.com/jamestrichardson/mantis/compare/mantis-v1.9.0...mantis-v1.10.0) (2026-09-23)
+
+
+### Features
+
+* **agent:** add read-only Incident Triage agent ([8583951](https://github.com/jamestrichardson/mantis/commit/85839512aa00cdc96778865bb32a08123e3a4dc7))
+* **agent:** add read-only Incident Triage agent ([fae2d77](https://github.com/jamestrichardson/mantis/commit/fae2d77ab36907cb91072d05bdba500fa7a0a9c6))
+* **eval:** add model qualification baseline ([#13](https://github.com/jamestrichardson/mantis/issues/13)) on top of [#12](https://github.com/jamestrichardson/mantis/issues/12) ([a434639](https://github.com/jamestrichardson/mantis/commit/a4346393b6ef12077d47e6f63bded31d8280da80))
+* **eval:** close [#13](https://github.com/jamestrichardson/mantis/issues/13) with real qualification evidence ([9471ed1](https://github.com/jamestrichardson/mantis/commit/9471ed11ca9383364d4e72bd7d493f850f377d6c))
+* **eval:** model qualification baseline ([#13](https://github.com/jamestrichardson/mantis/issues/13)) ([f2c2bae](https://github.com/jamestrichardson/mantis/commit/f2c2bae6226e1dc0ab2539f345ee15b8c5c28d44))
+
+
+### Bug Fixes
+
+* **agent:** address Incident Triage code review findings ([1f22d4e](https://github.com/jamestrichardson/mantis/commit/1f22d4efdf4b5319833adcb8852068617d450d6c))
+* **eval,api:** address second-round review findings (qualification/routing hygiene) ([22a3d11](https://github.com/jamestrichardson/mantis/commit/22a3d119a0668aadd618f271af5853a2b4c19227))
+* **eval:** address Copilot review findings on [#124](https://github.com/jamestrichardson/mantis/issues/124) ([a27e7dc](https://github.com/jamestrichardson/mantis/commit/a27e7dc6a914287c624f7dbd652a1ce0dee585a9))
+* **eval:** use the core suite as [#13](https://github.com/jamestrichardson/mantis/issues/13)'s authoritative baseline ([fb06751](https://github.com/jamestrichardson/mantis/commit/fb0675135697d3ffe38e660078ab06b61267ac7f))
+
+
+### Reverts
+
+* drop the release-please version bump from this PR ([4a57b9d](https://github.com/jamestrichardson/mantis/commit/4a57b9dd56bcaa4fa6eca3370303529e0f461089))
+
 ## [1.9.0](https://github.com/jamestrichardson/mantis/compare/mantis-v1.8.0...mantis-v1.9.0) (2026-09-22)
 
 
