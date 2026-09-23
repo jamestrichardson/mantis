@@ -148,7 +148,7 @@ def test_qualify_models_aggregates_with_real_registered_scenarios(monkeypatch):
 
     calls: list[tuple[str, str]] = []
 
-    def fake_run_scenario(scenario, model_alias, *, base_model_config=None):
+    def fake_run_scenario(scenario, model_alias, *, base_model_config=None, routing_policy=None):
         calls.append((model_alias, scenario.name))
         return _canned_ok_result(scenario, model_alias, backend_model=f"resolved/{model_alias}")
 
@@ -204,7 +204,7 @@ def test_qualify_models_never_persists_a_credential_bearing_endpoint(monkeypatch
         ["model-a"],
         scenario_names=("q-scenario-1",),
         base_model_config=config,
-        run_scenario_fn=lambda scenario, model_alias, *, base_model_config=None: _canned_ok_result(
+        run_scenario_fn=lambda scenario, model_alias, *, base_model_config=None, routing_policy=None: _canned_ok_result(
             scenario, model_alias
         ),
     )
@@ -242,7 +242,7 @@ def test_qualify_models_one_models_legitimate_backend_failure_does_not_abort_the
     for name in ("q-scenario-1", "q-scenario-2"):
         monkeypatch.setitem(default_scenarios._scenarios, name, _fake_scenario(name))
 
-    def fake_run_scenario(scenario, model_alias, *, base_model_config=None):
+    def fake_run_scenario(scenario, model_alias, *, base_model_config=None, routing_policy=None):
         if model_alias == "flaky-model" and scenario.name == "q-scenario-1":
             return _canned_error_result(scenario, model_alias)
         return _canned_ok_result(scenario, model_alias)
@@ -274,7 +274,7 @@ def test_qualify_models_an_unexpected_mantis_bug_propagates_and_aborts():
     # finding: "one backend/model failure must not abort the rest" is
     # not the same claim as "swallow every programming error."
 
-    def buggy_run_scenario(scenario, model_alias, *, base_model_config=None):
+    def buggy_run_scenario(scenario, model_alias, *, base_model_config=None, routing_policy=None):
         raise KeyError("some unrelated Mantis bug, e.g. a bad fixture")
 
     with pytest.raises(KeyError):
@@ -310,7 +310,7 @@ def test_qualify_models_baseline_drift_still_raises(monkeypatch):
 def test_unavailable_backend_model_and_cost_and_tokens_remain_none(monkeypatch):
     monkeypatch.setitem(default_scenarios._scenarios, "q-scenario-1", _fake_scenario("q-scenario-1"))
 
-    def fake_run_scenario(scenario, model_alias, *, base_model_config=None):
+    def fake_run_scenario(scenario, model_alias, *, base_model_config=None, routing_policy=None):
         return EvalResult(
             scenario=scenario.name,
             scenario_version=scenario.version,
@@ -337,6 +337,64 @@ def test_unavailable_backend_model_and_cost_and_tokens_remain_none(monkeypatch):
     assert record.litellm_version is None  # never guessed
 
 
+def test_record_captures_final_alias_and_failed_route_attempts_from_a_fallback_run(monkeypatch):
+    # #16 integration: a run whose route_attempts show a failed primary
+    # attempt followed by a successful fallback must surface both facts
+    # on the bounded QualificationRecord.
+    monkeypatch.setitem(default_scenarios._scenarios, "q-scenario-1", _fake_scenario("q-scenario-1"))
+
+    def fake_run_scenario(scenario, model_alias, *, base_model_config=None, routing_policy=None):
+        return EvalResult(
+            scenario=scenario.name,
+            scenario_version=scenario.version,
+            model=model_alias,
+            started_at="t0",
+            finished_at="t1",
+            elapsed_seconds=1.0,
+            outcome="ok",
+            final_answer="answer",
+            tool_calls=[],
+            iterations=2,
+            requested_primary_alias=model_alias,
+            final_alias="fallback-alias",
+            route_attempts=[
+                {
+                    "iteration": 1,
+                    "attempt_number": 1,
+                    "requested_alias": model_alias,
+                    "routing_reason": "primary",
+                    "outcome": "error",
+                    "failure_kind": "timeout",
+                    "detail": "APITimeoutError",
+                    "latency_seconds": 1.0,
+                    "total_tokens": None,
+                    "backend_model": None,
+                },
+                {
+                    "iteration": 1,
+                    "attempt_number": 2,
+                    "requested_alias": "fallback-alias",
+                    "routing_reason": "fallback",
+                    "outcome": "ok",
+                    "failure_kind": None,
+                    "detail": None,
+                    "latency_seconds": 1.0,
+                    "total_tokens": 10,
+                    "backend_model": "fallback-alias",
+                },
+            ],
+        )
+
+    run = qualify_models(
+        ["model-a"], scenario_names=("q-scenario-1",), base_model_config=_config(), run_scenario_fn=fake_run_scenario
+    )
+
+    record = run.records[0]
+    assert record.requested_alias == "model-a"
+    assert record.final_alias == "fallback-alias"
+    assert record.failed_route_attempts == ("model-a:timeout",)
+
+
 def test_record_error_is_never_the_raw_provider_error_body(monkeypatch):
     # A real example encountered during a live qualification run: an
     # nginx 504 Gateway Time-out HTML page as an openai.OpenAIError's
@@ -347,7 +405,7 @@ def test_record_error_is_never_the_raw_provider_error_body(monkeypatch):
     monkeypatch.setitem(default_scenarios._scenarios, "q-scenario-1", _fake_scenario("q-scenario-1"))
     html_body = "<html><head><title>504 Gateway Time-out</title></head><body>nginx</body></html>"
 
-    def fake_run_scenario(scenario, model_alias, *, base_model_config=None):
+    def fake_run_scenario(scenario, model_alias, *, base_model_config=None, routing_policy=None):
         return EvalResult(
             scenario=scenario.name,
             scenario_version=scenario.version,
@@ -374,6 +432,32 @@ def test_record_error_is_never_the_raw_provider_error_body(monkeypatch):
     # Confirms this test would actually catch the regression: the raw
     # detail really is on the raw EvalResult, just never on the record.
     assert html_body in run.raw_results[0].error
+
+
+def test_qualify_models_threads_a_routing_policy_through_to_run_scenario_fn(monkeypatch):
+    # #16 AC: the qualification path must be able to exercise a real
+    # primary+fallback routing policy, not only ever the single-route
+    # default.
+    monkeypatch.setitem(default_scenarios._scenarios, "q-scenario-1", _fake_scenario("q-scenario-1"))
+    from mantis.config import ModelRoutingPolicy
+
+    received: dict[str, ModelRoutingPolicy | None] = {}
+
+    def fake_run_scenario(scenario, model_alias, *, base_model_config=None, routing_policy=None):
+        received[model_alias] = routing_policy
+        return _canned_ok_result(scenario, model_alias)
+
+    policy = ModelRoutingPolicy(primary_alias="model-a", fallback_aliases=("model-a-backup",), max_attempts=2)
+    qualify_models(
+        ["model-a", "model-b"],
+        scenario_names=("q-scenario-1",),
+        base_model_config=_config(),
+        routing_policies={"model-a": policy},
+        run_scenario_fn=fake_run_scenario,
+    )
+
+    assert received["model-a"] is policy
+    assert received["model-b"] is None  # no policy configured -> single-route default
 
 
 # ---------------------------------------------------------------------------
@@ -406,6 +490,8 @@ def _record(
         suite_id=suite_id,
         suite_version=suite_version,
         requested_alias=model_alias,
+        final_alias=model_alias if outcome == "ok" else None,
+        failed_route_attempts=(),
         resolved_backend_model=None,
         scenario=scenario,
         # Resolve the real, current scenario version when this is a
@@ -664,7 +750,7 @@ def test_format_role_eligibility_is_deterministic_and_reflects_records():
 def test_write_qualification_artifacts_writes_bounded_records_and_a_raw_sibling(tmp_path, monkeypatch):
     monkeypatch.setitem(default_scenarios._scenarios, "q-scenario-1", _fake_scenario("q-scenario-1"))
 
-    def fake_run_scenario(scenario, model_alias, *, base_model_config=None):
+    def fake_run_scenario(scenario, model_alias, *, base_model_config=None, routing_policy=None):
         return _canned_ok_result(scenario, model_alias, backend_model="resolved/model-a")
 
     run = qualify_models(

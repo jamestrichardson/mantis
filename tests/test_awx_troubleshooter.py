@@ -132,6 +132,33 @@ def test_build_runtime_falls_back_to_litellm_model_when_override_unset(monkeypat
     assert runtime.model_config == LiteLLMConfig.from_env()
 
 
+# ---------------------------------------------------------------------------
+# routing_policy (#16) -- server-side model-call routing/fallback.
+# ---------------------------------------------------------------------------
+
+
+def test_build_runtime_routing_policy_defaults_to_a_single_route(monkeypatch):
+    monkeypatch.delenv("LITELLM_MODEL_FALLBACKS", raising=False)
+    monkeypatch.delenv("MANTIS_AWX_TROUBLESHOOTER_MODEL_FALLBACKS", raising=False)
+
+    runtime = build_runtime()
+
+    assert runtime.routing_policy.primary_alias == runtime.model_config.model
+    assert runtime.routing_policy.fallback_aliases == ()
+    assert runtime.routing_policy.max_attempts == 1
+
+
+def test_build_runtime_routing_policy_reads_agent_specific_fallbacks(monkeypatch):
+    monkeypatch.setenv("MANTIS_AWX_TROUBLESHOOTER_MODEL", "primary-model")
+    monkeypatch.setenv("MANTIS_AWX_TROUBLESHOOTER_MODEL_FALLBACKS", "fallback-model")
+
+    runtime = build_runtime()
+
+    assert runtime.routing_policy.primary_alias == "primary-model"
+    assert runtime.routing_policy.fallback_aliases == ("fallback-model",)
+    assert runtime.routing_policy.primary_alias == runtime.model_config.model
+
+
 @respx.mock
 def test_model_can_successfully_call_awx_get_job_failure_through_the_real_wiring():
     # End-to-end wiring regression test: a model choosing to call the

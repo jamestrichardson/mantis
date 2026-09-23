@@ -64,10 +64,13 @@ as the basis for a differently-named environment (e.g. `cp .env.example
 | `MANTIS_AWX_TROUBLESHOOTER_MODEL` | no | — (falls back to `LITELLM_MODEL`) | Model alias for the AWX Troubleshooter agent specifically. See [Per-agent model overrides](#per-agent-model-overrides) below. |
 | `MANTIS_SYSTEM_TROUBLESHOOTER_MODEL` | no | — (falls back to `LITELLM_MODEL`) | Model alias for the System Troubleshooter agent specifically. See [Per-agent model overrides](#per-agent-model-overrides) below. |
 | `MANTIS_INCIDENT_TRIAGE_MODEL` | no | — (falls back to `LITELLM_MODEL`) | Model alias for the Incident Triage agent specifically. See [Per-agent model overrides](#per-agent-model-overrides) below. |
+| `LITELLM_MODEL_FALLBACKS` | no | — (no fallback) | Comma-separated, ordered fallback aliases tried when an *eligible* model-call failure occurs — see [Model-call routing and fallback (#16)](model-routing.md). Applies to any agent with no per-agent fallback override set below. |
+| `MANTIS_AWX_TROUBLESHOOTER_MODEL_FALLBACKS` / `MANTIS_SYSTEM_TROUBLESHOOTER_MODEL_FALLBACKS` / `MANTIS_INCIDENT_TRIAGE_MODEL_FALLBACKS` | no | — (falls back to `LITELLM_MODEL_FALLBACKS`) | Per-agent fallback aliases, same precedence pattern as the per-agent model override above. |
+| `LITELLM_MODEL_MAX_ATTEMPTS` / `MANTIS_<AGENT>_MODEL_MAX_ATTEMPTS` | no | one attempt per configured route | Caps how many routes (primary + fallbacks) one logical model call may actually try — see [docs/model-routing.md](model-routing.md#budgets). |
 
 ### Per-agent model overrides
 
-Each agent resolves its model independently, via
+Each agent resolves its *primary* model independently, via
 `LiteLLMConfig.from_env(model_env=...)`: the agent's own env var (if set
 to a non-empty value) wins, otherwise `LITELLM_MODEL` is used, otherwise
 the built-in default (`qwen3-opencode:latest`). `LITELLM_URL`/
@@ -75,18 +78,23 @@ the built-in default (`qwen3-opencode:latest`). `LITELLM_URL`/
 LiteLLM gateway with the same credential, only the model *alias* sent in
 each request can differ.
 
-This is a minimal precursor to **#16**'s full model routing/escalation
-policy, not that policy itself: there is no fallback, retry, or
-escalation across models, no per-model budget, and no adaptive
-selection — each agent simply resolves one fixed model alias at
-`build_runtime()` time. Model selection also remains entirely
-server-side configuration: it is not, and must never become, a field on
-`POST /api/v1/runs` or a CLI argument — see
-[docs/api.md](api.md#invoking-an-agent).
+Each agent also resolves a full **routing policy** the same way, via
+`ModelRoutingPolicy.from_env(model_env=..., fallback_env=...,
+max_attempts_env=...)` — see
+[docs/model-routing.md](model-routing.md) (#16) for the full design:
+ordered fallback aliases, a bounded attempt count, and which model-call
+failures are eligible to trigger a fallback. Leaving the `*_FALLBACKS`
+variables above unset means exactly one route (the primary alias, no
+fallback) — behaviorally identical to Mantis before #16. Routing is
+**model-call** fallback within one logical model step, never a
+whole-run/whole-investigation restart, and it never becomes a field a
+caller can set: model/alias selection remains entirely server-side
+configuration, never a field on `POST /api/v1/runs` or a CLI argument —
+see [docs/api.md](api.md#invoking-an-agent).
 
 Existing deployments that only set `LITELLM_MODEL` are unaffected —
-every agent simply keeps resolving that same value, exactly as before
-this existed.
+every agent simply keeps resolving that same value as its one and only
+route, exactly as before any of this existed.
 
 ## AWX
 

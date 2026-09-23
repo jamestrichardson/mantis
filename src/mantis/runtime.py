@@ -50,6 +50,14 @@ keep them named separately in code and docs (full detail in
    *within a single run*, later calls to it in that same run fail fast
    without a request. Fresh state every ``run()`` call — never a
    persistent/global circuit breaker.
+5. model-call *routing/fallback* (``mantis.config.ModelRoutingPolicy``,
+   #16, see ``docs/model-routing.md``) — a bounded number of attempts
+   against configured LiteLLM aliases for one logical model call (one
+   iteration of this loop), only for an explicitly eligible failure
+   kind (``mantis.routing.ModelCallFailureKind``). Distinct from every
+   mechanism above: it never touches tool dispatch, and it is never a
+   whole-run replay — it reuses the exact same conversation/tool-schema
+   state and never resets any of #1-4's own state.
 
 Plus two deadlines (``ReliabilityConfig.tool_timeout_seconds`` /
 ``.run_timeout_seconds``, also ``mantis.reliability.Deadline``): a
@@ -70,7 +78,7 @@ from typing import Any, Callable
 
 from openai import OpenAI
 
-from mantis.config import LiteLLMConfig, ReliabilityConfig
+from mantis.config import LiteLLMConfig, ModelRoutingPolicy, ReliabilityConfig
 from mantis.contracts import ToolError
 from mantis.observability import metrics
 from mantis.observability.logging import bound_for_log, log_event, new_run_id
@@ -82,6 +90,7 @@ from mantis.reliability import (
     IntegrationErrorKind,
     RunLocalBreaker,
 )
+from mantis.routing import ModelCallAttempt, classify_model_call_exception, safe_model_call_detail
 from mantis.security import UNTRUSTED_TOOL_OUTPUT_POLICY, make_model_safe, redact_text
 
 logger = logging.getLogger(__name__)
@@ -113,7 +122,41 @@ class RunDeadlineExceededError(RuntimeError_):
     doesn't *start* new work past the deadline, not that any single
     already-in-flight call gets forcibly interrupted. See
     ``docs/reliability.md``.
+
+    Also raised (#16) when the run deadline expires *between* two
+    model-call routing attempts within the same logical model call —
+    "no new model attempt may start after the run deadline expires"
+    applies identically whether that next attempt would have been the
+    first of a fresh iteration or a fallback attempt within one.
     """
+
+
+class ModelRoutingExhaustedError(RuntimeError_):
+    """Raised (#16) when every attempt permitted by a
+    :class:`~mantis.config.ModelRoutingPolicy` for one logical model
+    call failed with an eligible failure kind, and no attempts remain
+    (``max_attempts`` reached, or every configured route was tried) —
+    "route-attempt exhaustion produces a classified routing/model
+    failure," distinct from simply re-raising the last underlying
+    ``openai`` exception, because the richer fact here is that routing
+    itself was attempted and none of the configured routes succeeded.
+
+    Never raised for an *ineligible* failure (e.g. authentication) —
+    those re-raise the original ``openai`` exception unchanged after
+    being recorded, exactly as before #16, so existing
+    ``except openai.OpenAIError`` call sites (e.g.
+    ``mantis.eval.runner.run_scenario``) keep working unchanged.
+
+    ``attempts`` is the full, bounded attempt history for this one
+    logical model call (see :class:`~mantis.routing.ModelCallAttempt`) —
+    also available, for the whole run, via
+    ``AgentRuntime.model_call_log`` regardless of whether the run
+    ultimately raised.
+    """
+
+    def __init__(self, message: str, *, attempts: list["ModelCallAttempt"]) -> None:
+        super().__init__(message)
+        self.attempts = attempts
 
 
 def build_openai_client(model_config: LiteLLMConfig) -> OpenAI:
@@ -224,6 +267,14 @@ class AgentRuntime:
             ``docs/reliability.md``'s "Retry budget vs. tool-call
             budget" section; conflating them is exactly the mistake this
             issue exists to prevent.
+        routing_policy: The server-side model-call routing/fallback
+            policy (#16, see ``mantis.config.ModelRoutingPolicy`` and
+            ``docs/model-routing.md``). ``None`` (default) means a
+            one-route policy wrapping ``model_config.model`` — every
+            agent that doesn't pass this explicitly behaves exactly as
+            it did before #16, with zero fallback attempts. Never a
+            field an API/CLI caller can set — see
+            ``mantis.api.schemas.RunRequest``.
 
     After a call to :meth:`run`, two attributes hold a record of what
     happened, in order: ``call_log`` (tool-call attempts and their
@@ -244,6 +295,7 @@ class AgentRuntime:
     tool_call_budget: int | None = None
     temperature: float | None = None
     reliability: ReliabilityConfig = field(default_factory=ReliabilityConfig.from_env)
+    routing_policy: ModelRoutingPolicy | None = None
     clock: Callable[[], float] = time.monotonic
     """Monotonic clock used for :class:`~mantis.reliability.Deadline`
     (run/tool budgets). Injectable purely for deterministic tests — real
@@ -253,6 +305,15 @@ class AgentRuntime:
     def __post_init__(self) -> None:
         if self.model_config is None:
             self.model_config = LiteLLMConfig.from_env()
+        if self.routing_policy is None:
+            # Every agent that doesn't pass routing_policy explicitly
+            # gets a one-route policy wrapping model_config.model --
+            # behaviorally identical to Mantis before #16 (one attempt,
+            # no fallback). The same LiteLLM client/connection (url +
+            # api_key) is reused for every configured alias -- only the
+            # `model` field in each request kwargs changes, since
+            # LiteLLM itself is the one gateway serving every alias.
+            self.routing_policy = ModelRoutingPolicy.single(self.model_config.model)
 
         self._client = build_openai_client(self.model_config)
         self._resolved_tools: dict[str, Tool] = {
@@ -274,6 +335,14 @@ class AgentRuntime:
         # which must record the resolved backend identity "when reliably
         # available" and never guess it otherwise.
         self.backend_model_log: list[str | None] = []
+        # Every model-call attempt this run made, across every
+        # iteration -- including failed attempts that triggered a
+        # fallback and the eventual successful (or exhausted) one. See
+        # mantis.routing.ModelCallAttempt and #16's attempt-history
+        # observability/eval-integration requirements. Populated even
+        # when run() ultimately raises, since it's read directly off
+        # this instance, not off a return value.
+        self.model_call_log: list[ModelCallAttempt] = []
         # Diagnostic only: the raw final message, captured only when a run
         # ends with neither tool calls nor usable answer text — a model
         # producing no content and no tool_calls despite spending
@@ -312,7 +381,12 @@ class AgentRuntime:
         """
         run_id = run_id or new_run_id()
         self.last_run_id = run_id
-        model_alias = self.model_config.model
+        # The requested *primary* alias for this run -- used only for
+        # run-level summary logs/metrics below. Per-iteration/per-attempt
+        # logs and metrics (see _call_model_with_routing) use whichever
+        # alias that specific attempt actually targeted, which may be a
+        # configured fallback.
+        model_alias = self.routing_policy.primary_alias
         env = metrics.environment()
 
         log_event(logger, "mantis_run_started", run_id=run_id, agent=self.name, model_alias=model_alias)
@@ -429,46 +503,21 @@ class AgentRuntime:
                 offer_tools,
             )
 
-            kwargs: dict[str, Any] = {
-                "model": self.model_config.model,
-                "messages": messages,
-            }
+            base_kwargs: dict[str, Any] = {"messages": messages}
             if offer_tools:
-                kwargs["tools"] = tool_schemas
+                base_kwargs["tools"] = tool_schemas
             if self.temperature is not None:
-                kwargs["temperature"] = self.temperature
+                base_kwargs["temperature"] = self.temperature
 
-            model_alias = self.model_config.model
-            env = metrics.environment()
-            model_call_start = time.perf_counter()
-            response = self._client.chat.completions.create(**kwargs)
-            model_call_duration = time.perf_counter() - model_call_start
-
-            usage = _usage_to_dict(getattr(response, "usage", None))
-            self.usage_log.append(usage)
-            self.backend_model_log.append(getattr(response, "model", None))
-            total_tokens = usage.get("total_tokens") if usage else None
-
-            log_event(
-                logger,
-                "mantis_model_call",
-                run_id=run_id,
-                agent=self.name,
-                model_alias=model_alias,
-                iteration=iteration,
-                duration_seconds=model_call_duration,
-                tokens=total_tokens,
+            # One logical model call (#16): may make more than one HTTP
+            # attempt, against more than one configured alias, but never
+            # replays a tool call, never resets iteration/tool-call/
+            # deadline/breaker state, and always uses this exact same
+            # `messages`/`tools` snapshot for every attempt. See
+            # _call_model_with_routing and mantis.config.ModelRoutingPolicy.
+            response = self._call_model_with_routing(
+                base_kwargs, iteration=iteration, run_id=run_id, run_deadline=run_deadline
             )
-            metrics.MODEL_CALLS_TOTAL.labels(
-                agent=self.name, model_alias=model_alias, environment=env
-            ).inc()
-            metrics.MODEL_CALL_DURATION_SECONDS.labels(
-                agent=self.name, model_alias=model_alias, environment=env
-            ).observe(model_call_duration)
-            if total_tokens is not None:
-                metrics.MODEL_TOKENS_TOTAL.labels(
-                    agent=self.name, model_alias=model_alias, environment=env
-                ).inc(total_tokens)
 
             choice = response.choices[0]
             message = choice.message
@@ -534,6 +583,213 @@ class AgentRuntime:
         raise MaxIterationsExceededError(
             f"Agent '{self.name}' exceeded max_iterations={self.max_iterations} "
             "without producing a final answer"
+        )
+
+    def _call_model_with_routing(
+        self,
+        base_kwargs: dict[str, Any],
+        *,
+        iteration: int,
+        run_id: str,
+        run_deadline: Deadline,
+    ) -> Any:
+        """Perform one logical model call (#16) — one iteration's model
+        step — attempting each configured route in
+        ``self.routing_policy`` in order until one succeeds, an
+        ineligible failure occurs, or attempts/deadline are exhausted.
+
+        ``base_kwargs`` is ``{"messages": ..., "tools": ..., "temperature":
+        ...}`` (everything except ``"model"``, which this method sets
+        per attempt) — the exact same snapshot is reused for every
+        attempt within this call; nothing about the conversation, tool
+        schemas, iteration number, tool-call budget, run deadline, or
+        run-local breaker state is ever touched here. No tool call is
+        ever made or replayed by this method — it only talks to the
+        model gateway.
+
+        Returns the raw OpenAI-SDK response object from whichever
+        attempt succeeded. Raises:
+
+        - The original ``openai`` exception, unchanged, for a failure
+          classified outside ``self.routing_policy.eligible_failure_kinds``
+          (never silently rerouted) — existing
+          ``except openai.OpenAIError`` call sites see exactly what they
+          always have.
+        - :class:`RunDeadlineExceededError` if the run deadline expires
+          before an eligible next attempt could start.
+        - :class:`ModelRoutingExhaustedError` if every permitted attempt
+          (bounded by ``max_attempts`` and the number of configured
+          routes) failed with an eligible kind.
+
+        Every attempt — successful or not — is appended to
+        ``self.model_call_log`` before this method returns or raises.
+        """
+        policy = self.routing_policy
+        env = metrics.environment()
+        attempt_aliases = policy.aliases[: policy.max_attempts]
+        total_attempts_possible = len(attempt_aliases)
+
+        for attempt_number, alias in enumerate(attempt_aliases, start=1):
+            routing_reason = "primary" if attempt_number == 1 else "fallback"
+
+            if run_deadline.expired():
+                log_event(
+                    logger,
+                    "mantis_run_deadline_exceeded",
+                    level=logging.WARNING,
+                    run_id=run_id,
+                    agent=self.name,
+                    iteration=iteration,
+                    attempt_number=attempt_number,
+                )
+                raise RunDeadlineExceededError(
+                    f"Agent '{self.name}' exceeded run_timeout_seconds="
+                    f"{self.reliability.run_timeout_seconds} before attempt {attempt_number} "
+                    f"of iteration {iteration}"
+                )
+
+            kwargs = dict(base_kwargs)
+            kwargs["model"] = alias
+
+            call_start = time.perf_counter()
+            try:
+                response = self._client.chat.completions.create(**kwargs)
+            except Exception as exc:
+                duration = time.perf_counter() - call_start
+                kind = classify_model_call_exception(exc)
+                detail = safe_model_call_detail(exc)
+                self.model_call_log.append(
+                    ModelCallAttempt(
+                        iteration=iteration,
+                        attempt_number=attempt_number,
+                        requested_alias=alias,
+                        routing_reason=routing_reason,
+                        outcome="error",
+                        failure_kind=kind,
+                        detail=detail,
+                        latency_seconds=duration,
+                    )
+                )
+                log_event(
+                    logger,
+                    "mantis_model_call",
+                    level=logging.WARNING,
+                    run_id=run_id,
+                    agent=self.name,
+                    model_alias=alias,
+                    iteration=iteration,
+                    attempt_number=attempt_number,
+                    routing_reason=routing_reason,
+                    duration_seconds=duration,
+                    outcome="error",
+                    failure_kind=kind.value,
+                    detail=detail,
+                )
+                metrics.MODEL_CALLS_TOTAL.labels(
+                    agent=self.name, model_alias=alias, environment=env
+                ).inc()
+                metrics.MODEL_CALL_DURATION_SECONDS.labels(
+                    agent=self.name, model_alias=alias, environment=env
+                ).observe(duration)
+                metrics.MODEL_CALL_FAILURES_TOTAL.labels(
+                    agent=self.name, model_alias=alias, failure_kind=kind.value, environment=env
+                ).inc()
+
+                if kind not in policy.eligible_failure_kinds:
+                    # Never silently reroute a non-eligible failure --
+                    # re-raise the ORIGINAL exception unchanged.
+                    raise
+
+                if total_attempts_possible == 1:
+                    # Single-route policy (the default every existing
+                    # agent gets, see ModelRoutingPolicy.single): there
+                    # was never a fallback to attempt, so an eligible
+                    # failure here behaves exactly as it did before #16
+                    # -- propagate the original exception unchanged,
+                    # rather than wrapping a failure that never actually
+                    # involved any routing decision.
+                    raise
+
+                has_more_attempts = attempt_number < total_attempts_possible
+                if has_more_attempts:
+                    metrics.MODEL_ROUTING_FALLBACKS_TOTAL.labels(
+                        agent=self.name, environment=env
+                    ).inc()
+                    logger.warning(
+                        "[%s] model call attempt %d/%d (alias=%s) failed (%s); "
+                        "falling back to the next configured route",
+                        self.name,
+                        attempt_number,
+                        total_attempts_possible,
+                        alias,
+                        kind.value,
+                    )
+                    continue
+
+                metrics.MODEL_ROUTING_EXHAUSTED_TOTAL.labels(agent=self.name, environment=env).inc()
+                this_iteration_attempts = [a for a in self.model_call_log if a.iteration == iteration]
+                log_event(
+                    logger,
+                    "mantis_model_routing_exhausted",
+                    level=logging.WARNING,
+                    run_id=run_id,
+                    agent=self.name,
+                    iteration=iteration,
+                    attempts=attempt_number,
+                    failure_kind=kind.value,
+                )
+                raise ModelRoutingExhaustedError(
+                    f"Agent '{self.name}' exhausted {attempt_number} routing attempt(s) for "
+                    f"iteration {iteration}; last failure kind: {kind.value}",
+                    attempts=this_iteration_attempts,
+                )
+
+            duration = time.perf_counter() - call_start
+            usage = _usage_to_dict(getattr(response, "usage", None))
+            backend_model = getattr(response, "model", None)
+            total_tokens = usage.get("total_tokens") if usage else None
+            self.usage_log.append(usage)
+            self.backend_model_log.append(backend_model)
+            self.model_call_log.append(
+                ModelCallAttempt(
+                    iteration=iteration,
+                    attempt_number=attempt_number,
+                    requested_alias=alias,
+                    routing_reason=routing_reason,
+                    outcome="ok",
+                    latency_seconds=duration,
+                    total_tokens=total_tokens,
+                    backend_model=backend_model,
+                )
+            )
+            log_event(
+                logger,
+                "mantis_model_call",
+                run_id=run_id,
+                agent=self.name,
+                model_alias=alias,
+                iteration=iteration,
+                attempt_number=attempt_number,
+                routing_reason=routing_reason,
+                duration_seconds=duration,
+                tokens=total_tokens,
+                outcome="ok",
+            )
+            metrics.MODEL_CALLS_TOTAL.labels(agent=self.name, model_alias=alias, environment=env).inc()
+            metrics.MODEL_CALL_DURATION_SECONDS.labels(
+                agent=self.name, model_alias=alias, environment=env
+            ).observe(duration)
+            if total_tokens is not None:
+                metrics.MODEL_TOKENS_TOTAL.labels(
+                    agent=self.name, model_alias=alias, environment=env
+                ).inc(total_tokens)
+            return response
+
+        # Unreachable: attempt_aliases is never empty (ModelRoutingPolicy
+        # requires at least a primary alias and max_attempts >= 1), so
+        # the loop above always either returns or raises.
+        raise AssertionError(
+            "_call_model_with_routing fell through its attempt loop without returning or raising"
         )
 
     def _dispatch_tool_call(

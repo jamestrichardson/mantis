@@ -300,6 +300,8 @@ def _fake_qualification_run(*, passed: bool | None):
         suite_id="mantis-fast-qualification-v1",
         suite_version="v1",
         requested_alias="model-a",
+        final_alias="model-a",
+        failed_route_attempts=(),
         resolved_backend_model=None,
         scenario="s1",
         scenario_version="1.0",

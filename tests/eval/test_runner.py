@@ -221,6 +221,26 @@ def test_run_scenario_against_one_model(monkeypatch):
     assert result.tool_calls == []
 
 
+def test_run_scenario_accepts_an_explicit_routing_policy(monkeypatch):
+    # #16 AC: the eval/qualification path must be able to exercise a
+    # real primary+fallback routing policy, not only ever the
+    # single-route default AgentRuntime otherwise constructs.
+    from mantis.config import ModelRoutingPolicy
+
+    _patch_openai(
+        monkeypatch,
+        {"model-a": [_backend_error()], "model-a-backup": [_final("recovered via fallback")]},
+    )
+    scenario = _echo_scenario()
+    policy = ModelRoutingPolicy(primary_alias="model-a", fallback_aliases=("model-a-backup",), max_attempts=2)
+
+    result = run_scenario(scenario, "model-a", base_model_config=_base_config(), routing_policy=policy)
+
+    assert result.outcome == "ok"
+    assert result.final_answer == "recovered via fallback"
+    assert result.requested_primary_alias == "model-a"
+    assert result.final_alias == "model-a-backup"
+
 
 def test_run_scenario_captures_tool_call_trace(monkeypatch):
     _patch_openai(
@@ -373,6 +393,38 @@ def test_run_scenario_backend_model_is_none_when_backend_omits_it(monkeypatch):
     result = run_scenario(scenario, "model-a", base_model_config=_base_config())
 
     assert result.backend_model is None
+
+
+def test_run_scenario_records_requested_primary_and_final_alias_for_a_default_single_route_run(monkeypatch):
+    # No explicit routing policy is passed anywhere in this eval path --
+    # AgentRuntime.__post_init__ wraps model_alias in a default
+    # one-route policy, and the eval result must still reflect it
+    # (#16's "eval result records primary/final aliases" AC).
+    _patch_openai(monkeypatch, {"model-a": [_final("hi")]})
+    scenario = _echo_scenario()
+
+    result = run_scenario(scenario, "model-a", base_model_config=_base_config())
+
+    assert result.requested_primary_alias == "model-a"
+    assert result.final_alias == "model-a"
+    assert len(result.route_attempts) == 1
+    assert result.route_attempts[0]["outcome"] == "ok"
+    assert result.route_attempts[0]["requested_alias"] == "model-a"
+
+
+def test_run_scenario_route_attempts_do_not_inflate_tool_call_counts(monkeypatch):
+    _patch_openai(
+        monkeypatch,
+        {"model-a": [_tool_call_response("echo", {"x": 1}), _final("done")]},
+    )
+    scenario = _echo_scenario()
+
+    result = run_scenario(scenario, "model-a", base_model_config=_base_config())
+
+    # Two model-call attempts (two iterations), but exactly one real
+    # tool execution -- the two counts must never be conflated.
+    assert len(result.route_attempts) == 2
+    assert len(result.tool_calls) == 1
 
 
 def test_run_scenario_captures_usage_and_total_tokens(monkeypatch):

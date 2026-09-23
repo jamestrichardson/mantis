@@ -224,7 +224,6 @@ def _cmd_qualify(args: argparse.Namespace) -> int:
     # eligibility output, not a candidate failure.
     return 0 if all(r.outcome == "ok" and r.passed is not False for r in run.records) else 1
 
-
 def _cmd_list_scenarios(_args: argparse.Namespace) -> int:
     for scenario in default_scenarios.all():
         print(f"{scenario.name} (v{scenario.version})")
