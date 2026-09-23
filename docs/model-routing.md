@@ -244,38 +244,42 @@ token/request/cost budgets and rate limits are a LiteLLM
 virtual-key/service-key responsibility — configure them there. Mantis's
 own `cost_usd` field (see `mantis.eval.qualification.QualificationRecord`)
 is honestly reported as unavailable rather than approximated, precisely
-because Mantis has no independent view into that accounting. If you
-route across aliases that draw from *different* virtual keys or
-upstream providers with different cost/rate-limit characteristics,
-account for that in how you order `fallback_aliases` — routing itself
-has no cost-awareness.
+because Mantis has no independent view into that accounting.
 
-**Recommended boundary**: start with **one scoped Mantis virtual key**
-shared by every agent (`LITELLM_API_KEY`) — it's the simplest setup and
-matches how every shipped agent resolves its LiteLLM credentials today
-(`LiteLLMConfig.from_env`, one URL/key pair, only the model *alias*
-varies per agent). Move to **separate virtual keys per agent class**
-only once you actually need independent budgets or rate limits between
-them — e.g. Incident Triage's longer, more tool-heavy investigations
-shouldn't be able to exhaust a budget that starves AWX Troubleshooter's
-much shorter runs, or you want per-agent-class cost attribution LiteLLM
-itself can report on. Splitting keys is a LiteLLM-side configuration
-change only — it never requires touching `ModelRoutingPolicy` or any
-agent code, since credentials and routing policy are already
-independent axes.
+**Mantis currently uses one scoped LiteLLM virtual key per
+service/process.** `LiteLLMConfig` resolves exactly one
+`LITELLM_URL`/`LITELLM_API_KEY` pair (`LiteLLMConfig.from_env`), and
+`AgentRuntime` builds exactly one `OpenAI` client from it in
+`__post_init__` — every alias in a `ModelRoutingPolicy`, primary and
+every fallback alike, is requested through that same client with that
+same key; only the `model` field in the request body changes. This
+holds across agents within one running process too: `model_env` only
+selects an agent-specific model *alias*, never a separate credential.
+**Per-route credentials are not supported** — there is no way to give
+one alias in a routing policy a different virtual key than another
+today. For independent per-agent-class budgets, run separate Mantis
+service instances/configurations, each with its own
+`LITELLM_API_KEY` — that's a deployment/process-topology decision, not
+something `ModelRoutingPolicy` or any agent code can express.
 
-**A LiteLLM rate/budget denial is not a special case — it's already
-routing-eligible.** LiteLLM enforces a virtual key's rate/budget limit
-by returning an HTTP 429, which the OpenAI SDK raises as
-`openai.RateLimitError`; `classify_model_call_exception` maps that to
-`ModelCallFailureKind.RATE_LIMIT`, which is in
-`DEFAULT_ELIGIBLE_FAILURE_KINDS` (see `mantis.routing`). So a primary
-alias hitting its virtual key's budget/rate ceiling triggers exactly
-the same fallback-attempt path as a timeout or connection failure,
-attempting the next configured alias — including one bound to a
-*different* virtual key, if you've split keys per agent class as
-above. No additional code or configuration ties these together; it
-falls out of the existing failure taxonomy.
+**A LiteLLM rate/budget denial is already routing-eligible, but don't
+expect a fallback to escape a key-level budget.** LiteLLM enforces a
+rate/budget limit by returning an HTTP 429, which the OpenAI SDK raises
+as `openai.RateLimitError`; `classify_model_call_exception` maps that
+to `ModelCallFailureKind.RATE_LIMIT`, which is in
+`DEFAULT_ELIGIBLE_FAILURE_KINDS` (see `mantis.routing`) — so a primary
+alias hitting a rate/budget ceiling does trigger a fallback attempt at
+the next configured alias, the same as a timeout or connection failure.
+But since every alias shares the one virtual key above, a **key-level**
+budget/rate exhaustion generally blocks the fallback attempt too — it's
+the same key being denied again. A fallback alias only has a realistic
+chance of succeeding where LiteLLM enforces the limit **per model or
+per upstream provider** rather than only per key (e.g. a
+model-specific rate ceiling on the primary's backend that the
+fallback's different backend isn't subject to); it never escapes a
+global per-key budget. Account for this in how you order
+`fallback_aliases` — routing itself has no cost- or
+budget-scope-awareness.
 
 ## Privacy / local-vs-cloud routing considerations
 
