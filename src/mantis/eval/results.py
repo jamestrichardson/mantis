@@ -69,7 +69,10 @@ class EvalResult:
         total_tokens: Convenience sum of ``total_tokens`` across every
             ``usage`` entry that has one; ``None`` if none do.
         error: Exception type and message when ``outcome == "error"``,
-            else ``None``.
+            else ``None``. May contain a raw provider/upstream error body
+            (e.g. an nginx error page) for some ``openai.OpenAIError``
+            subclasses — fine for a local/raw result file, but never
+            safe to copy into a bounded, committed artifact.
         raw_message: The raw final-message payload (via
             ``AgentRuntime.diagnostic_raw_message``), captured only when a
             run ended with neither usable answer text nor a tool call —
@@ -92,6 +95,18 @@ class EvalResult:
             found failures — an unscored run and an all-failing scored
             run are different things and must stay distinguishable.
         result_format_version: See :data:`RESULT_FORMAT_VERSION`.
+        backend_model: The backend-resolved model identity
+            (``response.model``, see ``AgentRuntime.backend_model_log``)
+            from the last iteration that reported one — distinct from
+            ``model`` (the requested LiteLLM *alias*). ``None`` when no
+            iteration's response carried this field; never guessed.
+        error_summary: A bounded, safe summary of an ``outcome=="error"``
+            failure (exception class name + HTTP status code only, see
+            ``mantis.eval.runner._safe_model_call_detail``) — ``None``
+            whenever ``error`` is. This is what
+            ``mantis.eval.qualification.QualificationRecord`` copies
+            into its own committed-safe ``error`` field; ``error``
+            above is never copied there directly.
     """
 
     scenario: str
@@ -112,6 +127,14 @@ class EvalResult:
     raw_message: dict[str, Any] | None = None
     evaluation: dict[str, Any] | None = None
     result_format_version: str = RESULT_FORMAT_VERSION
+    # Appended after every pre-#13 field (never inserted earlier in this
+    # list) -- RESULT_FORMAT_VERSION's additive-compatibility claim means
+    # a caller constructing EvalResult positionally with the pre-#13
+    # field order must keep binding the same values to the same fields;
+    # inserting a new field earlier in this list would silently shift
+    # every positional argument after it. See tests/eval/test_runner.py.
+    backend_model: str | None = None
+    error_summary: str | None = None
 
     def to_dict(self) -> dict[str, Any]:
         # dataclasses.asdict recurses into the nested ToolCallSummary

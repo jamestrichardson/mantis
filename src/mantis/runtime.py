@@ -264,6 +264,16 @@ class AgentRuntime:
         # return usage data. Consumers (e.g. the eval harness) that want a
         # total can sum the "total_tokens" key across entries.
         self.usage_log: list[dict[str, Any] | None] = []
+        # The backend-resolved model identity ("response.model") for each
+        # iteration, in order -- distinct from model_config.model (the
+        # requested LiteLLM *alias*): LiteLLM's OpenAI-compatible response
+        # reports which underlying provider model actually served the
+        # request, when the backend includes it. None for an iteration
+        # where the response didn't carry this field. Exists primarily for
+        # #13's model-qualification harness (mantis.eval.qualification),
+        # which must record the resolved backend identity "when reliably
+        # available" and never guess it otherwise.
+        self.backend_model_log: list[str | None] = []
         # Diagnostic only: the raw final message, captured only when a run
         # ends with neither tool calls nor usable answer text — a model
         # producing no content and no tool_calls despite spending
@@ -436,6 +446,7 @@ class AgentRuntime:
 
             usage = _usage_to_dict(getattr(response, "usage", None))
             self.usage_log.append(usage)
+            self.backend_model_log.append(getattr(response, "model", None))
             total_tokens = usage.get("total_tokens") if usage else None
 
             log_event(

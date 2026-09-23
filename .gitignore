@@ -1,5 +1,11 @@
-# Mantis eval harness output (mantis eval run's default --out location)
-eval-results/
+# Mantis eval harness output (mantis eval run's default --out location) --
+# excluded by default. The bounded #13 qualification-record artifact
+# (mantis.eval.qualification.QualificationRecord JSONL, never the full
+# tool-call/answer text) is safe to commit as tracked evidence; its
+# larger raw EvalResult sibling (*.raw.jsonl) stays excluded.
+eval-results/*
+!eval-results/*-qualification-v*.jsonl
+eval-results/*.raw.jsonl
 
 # Byte-compiled / optimized / DLL files
 __pycache__/
