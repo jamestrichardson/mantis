@@ -46,13 +46,19 @@ open — see "Requalification triggers."
 ## Qualification run
 
 - **Date**: 2026-09-22
-- **Mantis version/commit**: `1.8.0` / `a27e7dc6a914287c624f7dbd652a1ce0dee585a9`
-  (this commit's own history also contains a release-please version
-  bump to `1.9.0`, later reverted out of this branch as unrelated
-  scope-creep — see the PR discussion. `1.8.0` is what the checked-out
-  code actually reported, via `mantis.__version__`, at the moment this
-  live run executed, and is the only version string that appears
-  anywhere in this report or its committed artifact.)
+- **Mantis version/commit**: `1.8.0` / `a27e7dc6a914287c624f7dbd652a1ce0dee585a9`.
+  The run recorded `mantis_version=1.8.0` and repository commit
+  `a27e7dc6`. The checked-in repository at that SHA carries release
+  version `1.9.0`, so the version string observed by the running
+  qualification process did not match the checkout metadata (a
+  release-please version bump had been applied to this branch, then
+  reverted, between when the process was started and when it recorded
+  its own `mantis.__version__`). This report does not paper over that
+  by rewriting the recorded field to `1.9.0` — `1.8.0` is exactly what
+  the process emitted and exactly what the committed artifact says.
+  **The commit SHA and each record's `scenario_version` are the
+  authoritative provenance for this run**, not the human-readable
+  version string.
 - **LiteLLM endpoint**: `https://llm.cosprings.teknofile.net/v1` (LiteLLM server version not exposed through this API — see "Backend/provider identities")
 - **Suite**: `mantis-core-qualification-v1` (all ten scenarios: `awx-structured-unreachable`, `system-troubleshooter-full-investigation`, `incident-triage-git-correlation-no-deployment-proof`, `incident-triage-conflicting-current-and-historical`, `incident-triage-source-unavailable`, `incident-triage-kubernetes-event-history`, `incident-triage-untrusted-kubernetes-event`, `awx-truncated-results`, `awx-duplicate-call-temptation`, `awx-prompt-injection`)
 - **Candidates**: `qwen3-coder:30b-a3b-q8_0`, `devstral-small-2:latest`
