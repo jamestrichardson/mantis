@@ -239,6 +239,25 @@ def test_from_env_agent_specific_fallback_env_wins_over_global(monkeypatch):
     assert policy.fallback_aliases == ("agent-fallback",)
 
 
+def test_from_env_rejects_a_malformed_fallback_list_with_an_empty_entry(monkeypatch):
+    # "a,,b" or a trailing comma must fail loudly via
+    # ModelRoutingPolicy's own empty-alias validation, never be
+    # silently normalized into a shorter, seemingly-valid list.
+    monkeypatch.setenv("LITELLM_MODEL", "primary-model")
+    monkeypatch.setenv("LITELLM_MODEL_FALLBACKS", "fb-1,,fb-2")
+
+    with pytest.raises(ConfigurationError, match="empty alias"):
+        ModelRoutingPolicy.from_env()
+
+
+def test_from_env_rejects_a_fallback_list_with_a_trailing_comma(monkeypatch):
+    monkeypatch.setenv("LITELLM_MODEL", "primary-model")
+    monkeypatch.setenv("LITELLM_MODEL_FALLBACKS", "fb-1,fb-2,")
+
+    with pytest.raises(ConfigurationError, match="empty alias"):
+        ModelRoutingPolicy.from_env()
+
+
 def test_from_env_explicit_max_attempts_overrides_the_default(monkeypatch):
     monkeypatch.setenv("LITELLM_MODEL", "primary-model")
     monkeypatch.setenv("LITELLM_MODEL_FALLBACKS", "fb-1,fb-2")

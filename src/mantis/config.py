@@ -339,8 +339,13 @@ class ModelRoutingPolicy:
             fallback_raw = os.environ.get(fallback_env) or None
         if fallback_raw is None:
             fallback_raw = os.environ.get("LITELLM_MODEL_FALLBACKS") or None
+        # Every comma-separated segment is preserved (stripped, but never
+        # dropped for being empty) -- a malformed value like "a,,b" or a
+        # trailing comma must fail loudly via ModelRoutingPolicy's own
+        # empty-alias validation below, not be silently normalized into
+        # a shorter, seemingly-valid list.
         fallback_aliases = (
-            tuple(a.strip() for a in fallback_raw.split(",") if a.strip()) if fallback_raw else ()
+            tuple(a.strip() for a in fallback_raw.split(",")) if fallback_raw else ()
         )
 
         max_attempts_raw = None

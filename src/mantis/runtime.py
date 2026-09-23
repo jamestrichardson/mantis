@@ -628,6 +628,13 @@ class AgentRuntime:
         env = metrics.environment()
         attempt_aliases = policy.aliases[: policy.max_attempts]
         total_attempts_possible = len(attempt_aliases)
+        # Scoped to exactly this logical model call, never the cumulative
+        # self.model_call_log -- a reused AgentRuntime's iteration
+        # numbers reset every run(), so filtering the cumulative log by
+        # iteration alone (as an earlier version of this method did)
+        # could pull in attempts from an unrelated, earlier run() that
+        # happened to reach the same iteration number.
+        this_call_attempts: list[ModelCallAttempt] = []
 
         for attempt_number, alias in enumerate(attempt_aliases, start=1):
             routing_reason = "primary" if attempt_number == 1 else "fallback"
@@ -648,6 +655,24 @@ class AgentRuntime:
                     f"of iteration {iteration}"
                 )
 
+            if attempt_number > 1:
+                # Announced only here, after the deadline check above
+                # has already passed for *this* attempt -- counting or
+                # warning about a fallback any earlier (e.g. right after
+                # the previous attempt's failure) would let telemetry
+                # claim a fallback occurred even when the run deadline
+                # then blocks it from ever actually starting.
+                metrics.MODEL_ROUTING_FALLBACKS_TOTAL.labels(
+                    agent=self.name, environment=env
+                ).inc()
+                logger.warning(
+                    "[%s] attempt %d/%d (alias=%s): falling back after the previous route's failure",
+                    self.name,
+                    attempt_number,
+                    total_attempts_possible,
+                    alias,
+                )
+
             kwargs = dict(base_kwargs)
             kwargs["model"] = alias
 
@@ -658,18 +683,18 @@ class AgentRuntime:
                 duration = time.perf_counter() - call_start
                 kind = classify_model_call_exception(exc)
                 detail = safe_model_call_detail(exc)
-                self.model_call_log.append(
-                    ModelCallAttempt(
-                        iteration=iteration,
-                        attempt_number=attempt_number,
-                        requested_alias=alias,
-                        routing_reason=routing_reason,
-                        outcome="error",
-                        failure_kind=kind,
-                        detail=detail,
-                        latency_seconds=duration,
-                    )
+                attempt = ModelCallAttempt(
+                    iteration=iteration,
+                    attempt_number=attempt_number,
+                    requested_alias=alias,
+                    routing_reason=routing_reason,
+                    outcome="error",
+                    failure_kind=kind,
+                    detail=detail,
+                    latency_seconds=duration,
                 )
+                self.model_call_log.append(attempt)
+                this_call_attempts.append(attempt)
                 log_event(
                     logger,
                     "mantis_model_call",
@@ -712,12 +737,13 @@ class AgentRuntime:
 
                 has_more_attempts = attempt_number < total_attempts_possible
                 if has_more_attempts:
-                    metrics.MODEL_ROUTING_FALLBACKS_TOTAL.labels(
-                        agent=self.name, environment=env
-                    ).inc()
+                    # Do NOT announce the fallback here -- the next
+                    # iteration's deadline check decides whether it
+                    # actually starts, and only that branch (above)
+                    # counts/logs it.
                     logger.warning(
                         "[%s] model call attempt %d/%d (alias=%s) failed (%s); "
-                        "falling back to the next configured route",
+                        "will try the next configured route if the run deadline allows",
                         self.name,
                         attempt_number,
                         total_attempts_possible,
@@ -727,7 +753,6 @@ class AgentRuntime:
                     continue
 
                 metrics.MODEL_ROUTING_EXHAUSTED_TOTAL.labels(agent=self.name, environment=env).inc()
-                this_iteration_attempts = [a for a in self.model_call_log if a.iteration == iteration]
                 log_event(
                     logger,
                     "mantis_model_routing_exhausted",
@@ -741,7 +766,7 @@ class AgentRuntime:
                 raise ModelRoutingExhaustedError(
                     f"Agent '{self.name}' exhausted {attempt_number} routing attempt(s) for "
                     f"iteration {iteration}; last failure kind: {kind.value}",
-                    attempts=this_iteration_attempts,
+                    attempts=this_call_attempts,
                 )
 
             duration = time.perf_counter() - call_start
@@ -750,18 +775,18 @@ class AgentRuntime:
             total_tokens = usage.get("total_tokens") if usage else None
             self.usage_log.append(usage)
             self.backend_model_log.append(backend_model)
-            self.model_call_log.append(
-                ModelCallAttempt(
-                    iteration=iteration,
-                    attempt_number=attempt_number,
-                    requested_alias=alias,
-                    routing_reason=routing_reason,
-                    outcome="ok",
-                    latency_seconds=duration,
-                    total_tokens=total_tokens,
-                    backend_model=backend_model,
-                )
+            attempt = ModelCallAttempt(
+                iteration=iteration,
+                attempt_number=attempt_number,
+                requested_alias=alias,
+                routing_reason=routing_reason,
+                outcome="ok",
+                latency_seconds=duration,
+                total_tokens=total_tokens,
+                backend_model=backend_model,
             )
+            self.model_call_log.append(attempt)
+            this_call_attempts.append(attempt)
             log_event(
                 logger,
                 "mantis_model_call",

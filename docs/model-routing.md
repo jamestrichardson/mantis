@@ -250,6 +250,33 @@ upstream providers with different cost/rate-limit characteristics,
 account for that in how you order `fallback_aliases` — routing itself
 has no cost-awareness.
 
+**Recommended boundary**: start with **one scoped Mantis virtual key**
+shared by every agent (`LITELLM_API_KEY`) — it's the simplest setup and
+matches how every shipped agent resolves its LiteLLM credentials today
+(`LiteLLMConfig.from_env`, one URL/key pair, only the model *alias*
+varies per agent). Move to **separate virtual keys per agent class**
+only once you actually need independent budgets or rate limits between
+them — e.g. Incident Triage's longer, more tool-heavy investigations
+shouldn't be able to exhaust a budget that starves AWX Troubleshooter's
+much shorter runs, or you want per-agent-class cost attribution LiteLLM
+itself can report on. Splitting keys is a LiteLLM-side configuration
+change only — it never requires touching `ModelRoutingPolicy` or any
+agent code, since credentials and routing policy are already
+independent axes.
+
+**A LiteLLM rate/budget denial is not a special case — it's already
+routing-eligible.** LiteLLM enforces a virtual key's rate/budget limit
+by returning an HTTP 429, which the OpenAI SDK raises as
+`openai.RateLimitError`; `classify_model_call_exception` maps that to
+`ModelCallFailureKind.RATE_LIMIT`, which is in
+`DEFAULT_ELIGIBLE_FAILURE_KINDS` (see `mantis.routing`). So a primary
+alias hitting its virtual key's budget/rate ceiling triggers exactly
+the same fallback-attempt path as a timeout or connection failure,
+attempting the next configured alias — including one bound to a
+*different* virtual key, if you've split keys per agent class as
+above. No additional code or configuration ties these together; it
+falls out of the existing failure taxonomy.
+
 ## Privacy / local-vs-cloud routing considerations
 
 `fallback_aliases` is an ordered list — if a deployment mixes a

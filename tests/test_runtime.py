@@ -1341,6 +1341,34 @@ def test_primary_and_fallback_failure_preserves_both_attempts_and_raises_routing
     assert len(exc_info.value.attempts) == 2
 
 
+def test_routing_exhausted_attempts_on_a_reused_runtime_excludes_earlier_runs():
+    # A reused AgentRuntime's model_call_log accumulates across every
+    # run() call, but iteration numbers restart at 1 each time -- so a
+    # second run() that also exhausts routing at iteration 1 must not
+    # have its ModelRoutingExhaustedError.attempts pull in the FIRST
+    # run's iteration-1 attempts too, just because they share the same
+    # iteration number.
+    policy = ModelRoutingPolicy(primary_alias="primary", fallback_aliases=("fallback",), max_attempts=2)
+    runtime = _build_runtime(
+        [_timeout_error(), _connection_error()],
+        routing_policy=policy,
+    )
+    with pytest.raises(ModelRoutingExhaustedError):
+        runtime.run("first run")
+    assert len(runtime.model_call_log) == 2
+
+    runtime._client.chat.completions._responses = [_timeout_error(), _connection_error()]
+    with pytest.raises(ModelRoutingExhaustedError) as exc_info:
+        runtime.run("second run")
+
+    # The cumulative log now has all four attempts (two runs' worth)...
+    assert len(runtime.model_call_log) == 4
+    # ...but the exception raised by the SECOND run must only carry
+    # that run's own two attempts, not all four.
+    assert len(exc_info.value.attempts) == 2
+    assert all(a in runtime.model_call_log[2:] for a in exc_info.value.attempts)
+
+
 def test_max_attempts_bound_prevents_additional_model_calls():
     # Three routes configured, but max_attempts=2 -- the third alias
     # must never be attempted, even though it's configured and even
@@ -1362,6 +1390,8 @@ def test_max_attempts_bound_prevents_additional_model_calls():
 
 
 def test_deadline_expiry_prevents_starting_a_fallback_attempt():
+    env = metrics.environment()
+    fallback_before = metrics.MODEL_ROUTING_FALLBACKS_TOTAL.labels(agent="test-agent", environment=env)._value.get()
     clock = FakeClock(start=0.0)
     reliability = ReliabilityConfig(run_timeout_seconds=10.0, tool_timeout_seconds=5.0)
     policy = ModelRoutingPolicy(primary_alias="primary", fallback_aliases=("fallback",), max_attempts=2)
@@ -1383,6 +1413,12 @@ def test_deadline_expiry_prevents_starting_a_fallback_attempt():
     # fallback attempt caught the now-expired budget and never started
     # a second HTTP call.
     assert len(calls) == 1
+    # Telemetry must not claim a fallback occurred when the deadline
+    # blocked it from ever actually starting.
+    assert (
+        metrics.MODEL_ROUTING_FALLBACKS_TOTAL.labels(agent="test-agent", environment=env)._value.get()
+        == fallback_before
+    )
 
 
 def test_fallback_reuses_the_exact_same_messages_and_tool_schemas():

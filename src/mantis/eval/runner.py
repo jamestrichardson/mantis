@@ -112,8 +112,12 @@ def run_scenario(
         # bounded, committed artifact (see
         # mantis.eval.qualification.QualificationRecord).
         error_summary = safe_model_call_detail(exc)
+        # Logged bounded/safe (error_summary), never the raw error string
+        # above -- a log line is exactly as exposed as a committed
+        # artifact (aggregated, retained, often shipped off-box), so it
+        # gets the same treatment.
         logger.warning(
-            "[eval] scenario=%s model=%s failed: %s", scenario.name, model_alias, error
+            "[eval] scenario=%s model=%s failed: %s", scenario.name, model_alias, error_summary
         )
 
     elapsed_seconds = time.perf_counter() - start_perf

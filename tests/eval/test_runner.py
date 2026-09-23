@@ -295,7 +295,7 @@ def test_run_scenario_records_error_outcome_for_a_backend_failure(monkeypatch):
     assert "APIConnectionError" in result.error
 
 
-def test_run_scenario_error_summary_is_bounded_and_never_the_raw_provider_body(monkeypatch):
+def test_run_scenario_error_summary_is_bounded_and_never_the_raw_provider_body(monkeypatch, caplog):
     # A real example encountered during a live qualification run: an
     # nginx 504 Gateway Time-out HTML page as an openai.OpenAIError's
     # own message. error_summary must stay class-name(+status)-only;
@@ -307,12 +307,19 @@ def test_run_scenario_error_summary_is_bounded_and_never_the_raw_provider_body(m
     _patch_openai(monkeypatch, {"model-a": [exc]})
     scenario = _echo_scenario()
 
-    result = run_scenario(scenario, "model-a", base_model_config=_base_config())
+    with caplog.at_level(logging.WARNING):
+        result = run_scenario(scenario, "model-a", base_model_config=_base_config())
 
     assert result.outcome == "error"
     assert result.error_summary == "InternalServerError (status=504)"
     assert html_body not in result.error_summary
     assert html_body in result.error  # full detail still available locally
+    # The log line itself must be bounded too -- a log is exactly as
+    # exposed as a committed artifact, so it gets the same treatment as
+    # error_summary above, never the raw error/exception text.
+    logged_text = "\n".join(r.getMessage() for r in caplog.records)
+    assert html_body not in logged_text
+    assert "InternalServerError (status=504)" in logged_text
 
 
 def test_run_scenario_records_error_outcome_for_max_iterations_exceeded(monkeypatch):
