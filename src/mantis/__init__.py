@@ -3,4 +3,4 @@
 Monitoring, Automation, Network Triage & Infrastructure System.
 """
 
-__version__ = "1.9.0"  # x-release-please-version
+__version__ = "1.8.0"  # x-release-please-version
