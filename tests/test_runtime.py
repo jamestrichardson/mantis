@@ -1244,6 +1244,38 @@ def test_primary_success_makes_exactly_one_route_attempt():
     assert attempt.outcome == "ok"
 
 
+def test_model_call_carries_low_risk_litellm_attribution_metadata():
+    # #16's Configuration/Metadata AC: every request to the model
+    # gateway carries safe agent/run/iteration attribution via
+    # extra_body -- never a prompt, tool output, credential, or target
+    # hostname.
+    runtime = _build_runtime([_final_message_response("hi")])
+
+    runtime.run("hello", run_id="run-abc-123")
+
+    call = runtime._client.chat.completions.calls[0]
+    assert call["extra_body"] == {
+        "metadata": {
+            "mantis_agent": "test-agent",
+            "mantis_run_id": "run-abc-123",
+            "mantis_iteration": 1,
+        }
+    }
+
+
+def test_model_call_attribution_metadata_updates_every_attempt():
+    policy = ModelRoutingPolicy(primary_alias="primary", fallback_aliases=("fallback",), max_attempts=2)
+    runtime = _build_runtime([_timeout_error(), _final_message_response("recovered")], routing_policy=policy)
+
+    runtime.run("hello", run_id="run-xyz")
+
+    calls = runtime._client.chat.completions.calls
+    assert calls[0]["extra_body"]["metadata"]["mantis_run_id"] == "run-xyz"
+    assert calls[0]["extra_body"]["metadata"]["mantis_iteration"] == 1
+    assert calls[1]["extra_body"]["metadata"]["mantis_run_id"] == "run-xyz"
+    assert calls[1]["extra_body"]["metadata"]["mantis_iteration"] == 1
+
+
 @pytest.mark.parametrize(
     "make_exc,expected_kind",
     [

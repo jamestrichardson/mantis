@@ -331,6 +331,28 @@ both `mantis eval run` and #13's qualification harness):
 the final response — `None` if none did), and `route_attempts` (the
 full bounded attempt history).
 
+### LiteLLM request attribution
+
+Every request to the model gateway (every attempt, primary or
+fallback) carries low-risk attribution metadata via the OpenAI SDK's
+`extra_body` parameter — LiteLLM's proxy reads a top-level `metadata`
+object in the request body for its own logging/attribution:
+
+```json
+{"metadata": {"mantis_agent": "incident-triage", "mantis_run_id": "<run_id>", "mantis_iteration": 3}}
+```
+
+`mantis_agent` (the agent name), `mantis_run_id` (this run's ID, shared
+with every structured log event for it), and `mantis_iteration` (which
+model-call iteration this attempt belongs to) are the only fields sent.
+**Never** a prompt, tool output, credential, target hostname, or any
+other user-derived or high-cardinality string — the same bounded-only
+discipline as every other piece of #16 observability above. This lets
+an operator correlate a request observed at the LiteLLM gateway back to
+the exact Mantis run/agent/iteration that made it, satisfying the
+gateway-attribution requirement without Mantis's own `run_id` logging
+alone (which the gateway has no visibility into).
+
 ## Eval integration
 
 `mantis.eval.runner.run_scenario` populates

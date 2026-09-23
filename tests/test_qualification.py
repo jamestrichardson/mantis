@@ -813,7 +813,9 @@ def test_cli_qualify_suite_flag_selects_the_fast_subset(tmp_path, monkeypatch):
 
     captured: dict = {}
 
-    def fake_qualify_models(model_aliases, *, scenario_names, suite_id, suite_version, base_model_config):
+    def fake_qualify_models(
+        model_aliases, *, scenario_names, suite_id, suite_version, base_model_config, routing_policies=None
+    ):
         captured["scenario_names"] = scenario_names
         captured["suite_id"] = suite_id
         captured["suite_version"] = suite_version

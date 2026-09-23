@@ -675,6 +675,23 @@ class AgentRuntime:
 
             kwargs = dict(base_kwargs)
             kwargs["model"] = alias
+            # Low-risk LiteLLM request attribution (#16's Configuration/
+            # Metadata AC): agent name, run_id, and this model call's
+            # iteration -- enough for an operator to correlate a request
+            # at the gateway back to the Mantis run/agent that made it.
+            # Never a prompt, tool output, credential, target hostname,
+            # or any other user-derived/high-cardinality string; passed
+            # via extra_body (OpenAI SDK's standard escape hatch for
+            # provider-specific request fields), which LiteLLM's proxy
+            # reads as a top-level "metadata" dict for its own
+            # logging/attribution -- see docs/model-routing.md.
+            kwargs["extra_body"] = {
+                "metadata": {
+                    "mantis_agent": self.name,
+                    "mantis_run_id": run_id,
+                    "mantis_iteration": iteration,
+                }
+            }
 
             call_start = time.perf_counter()
             try:
