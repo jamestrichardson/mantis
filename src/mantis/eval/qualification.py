@@ -51,7 +51,7 @@ from typing import Any, Callable, Sequence
 from urllib.parse import urlsplit, urlunsplit
 
 from mantis import __version__ as MANTIS_VERSION
-from mantis.config import LiteLLMConfig
+from mantis.config import LiteLLMConfig, ModelRoutingPolicy
 from mantis.eval.results import EvalResult
 from mantis.eval.runner import run_scenario
 from mantis.eval.scenarios import ScenarioNotFoundError, default_scenarios
@@ -161,7 +161,18 @@ class QualificationRecord:
     suite_id: str
     suite_version: str
     requested_alias: str
-    """The LiteLLM alias qualified for this (model, scenario) pair."""
+    """The alias requested as *primary* for this (model, scenario) pair
+    -- see ``mantis.config.ModelRoutingPolicy.primary_alias``."""
+    final_alias: str | None
+    """Which alias actually produced the final response (#16) --
+    ``None`` if no attempt ever succeeded. Equal to ``requested_alias``
+    for every run that never fell back."""
+    failed_route_attempts: tuple[str, ...]
+    """Bounded ``"<alias>:<failure_kind>"`` summary of every attempt
+    that failed before the final outcome (#16) -- empty when the
+    primary alias succeeded on the first attempt. Bounded by
+    ``mantis.config.MAX_ROUTING_ALIASES``, never a raw exception
+    message."""
     resolved_backend_model: str | None
     """The model identity string exposed by LiteLLM's OpenAI-compatible
     response (``response.model``, captured as
@@ -201,6 +212,7 @@ class QualificationRecord:
     def to_dict(self) -> dict[str, Any]:
         d = dataclasses.asdict(self)
         d["hard_failures"] = list(self.hard_failures)
+        d["failed_route_attempts"] = list(self.failed_route_attempts)
         return d
 
 
@@ -260,10 +272,17 @@ def _record_from_eval_result(
     raw_result_index: int,
 ) -> QualificationRecord:
     evaluation = result.evaluation
+    failed_route_attempts = tuple(
+        f"{attempt['requested_alias']}:{attempt['failure_kind']}"
+        for attempt in result.route_attempts
+        if attempt["outcome"] != "ok"
+    )
     return QualificationRecord(
         suite_id=suite_id,
         suite_version=suite_version,
         requested_alias=requested_alias,
+        final_alias=result.final_alias,
+        failed_route_attempts=failed_route_attempts,
         resolved_backend_model=result.backend_model,
         scenario=result.scenario,
         scenario_version=result.scenario_version,
@@ -327,6 +346,7 @@ def qualify_models(
     suite_version: str = QUALIFICATION_SUITE_VERSION,
     base_model_config: LiteLLMConfig | None = None,
     litellm_version: str | None = None,
+    routing_policies: dict[str, ModelRoutingPolicy] | None = None,
     run_scenario_fn: RunScenarioFn = run_scenario,
 ) -> QualificationRun:
     """Run ``scenario_names`` (default: the full checked-in
@@ -336,11 +356,17 @@ def qualify_models(
     ``run_scenario_fn`` purely for deterministic tests with a
     fake/fixture runner — production code never overrides it).
 
+    ``routing_policies`` (#16), when given, maps a model alias to a
+    ``mantis.config.ModelRoutingPolicy`` to qualify *that* alias's
+    primary+fallback routing behavior together, rather than only ever
+    the single-route default ``run_scenario`` otherwise constructs.
+    Aliases not present in the mapping keep the single-route default.
+
     Isolation boundary — deliberately **not** widened from
     ``run_scenario``'s own: a known model/backend failure
-    (``openai.OpenAIError``, ``mantis.runtime.RuntimeError_``) never
-    aborts the rest of the matrix, because ``run_scenario`` itself
-    already isolates those
+    (``openai.OpenAIError``, ``mantis.runtime.RuntimeError_``, which
+    includes ``ModelRoutingExhaustedError``) never aborts the rest of
+    the matrix, because ``run_scenario`` itself already isolates those
     as a per-scenario ``outcome="error"`` result and never raises for
     them. Anything else — an unexpected ``KeyError``, a bug in a
     scenario's fixture, a scoring bug — is a genuine Mantis defect, not
@@ -359,6 +385,7 @@ def qualify_models(
     generated_at = _utc_now_iso()
     mantis_commit = _detect_mantis_commit()
     safe_litellm_endpoint = _safe_qualification_endpoint(config.url)
+    policies = routing_policies or {}
 
     records: list[QualificationRecord] = []
     raw_results: list[EvalResult] = []
@@ -366,7 +393,9 @@ def qualify_models(
     for alias in model_aliases:
         for name in scenario_names:
             scenario = default_scenarios.get(name)
-            result = run_scenario_fn(scenario, alias, base_model_config=config)
+            result = run_scenario_fn(
+                scenario, alias, base_model_config=config, routing_policy=policies.get(alias)
+            )
 
             records.append(
                 _record_from_eval_result(

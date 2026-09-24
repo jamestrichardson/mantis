@@ -6,6 +6,7 @@ dependency).
 from __future__ import annotations
 
 import json
+from typing import Any
 
 import mantis.eval.cli as eval_cli
 from mantis.eval.results import EvalResult
@@ -300,6 +301,8 @@ def _fake_qualification_run(*, passed: bool | None):
         suite_id="mantis-fast-qualification-v1",
         suite_version="v1",
         requested_alias="model-a",
+        final_alias="model-a",
+        failed_route_attempts=(),
         resolved_backend_model=None,
         scenario="s1",
         scenario_version="1.0",
@@ -361,3 +364,99 @@ def test_qualify_exits_zero_when_every_record_passes(monkeypatch, tmp_path):
     )
 
     assert exit_code == 0
+
+
+# ---------------------------------------------------------------------------
+# --fallback (#16): operator-facing primary-only vs. primary+fallback
+# qualification workflow.
+# ---------------------------------------------------------------------------
+
+
+def test_qualify_rejects_a_single_model_alias_without_fallback(monkeypatch, tmp_path):
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("LITELLM_URL", "http://litellm.example.test")
+    monkeypatch.setenv("LITELLM_API_KEY", "k")
+
+    exit_code = eval_cli.main(["qualify", "--models", "model-a", "--out", str(tmp_path / "q.jsonl")])
+
+    assert exit_code == 1
+
+
+def test_qualify_allows_a_single_model_alias_when_fallback_is_given(monkeypatch, tmp_path):
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("LITELLM_URL", "http://litellm.example.test")
+    monkeypatch.setenv("LITELLM_API_KEY", "k")
+    monkeypatch.setattr(eval_cli, "qualify_models", lambda *a, **kw: _fake_qualification_run(passed=True))
+
+    exit_code = eval_cli.main(
+        ["qualify", "--models", "model-a", "--fallback", "model-b", "--out", str(tmp_path / "q.jsonl")]
+    )
+
+    assert exit_code == 0
+
+
+def test_qualify_builds_a_routing_policy_per_alias_from_fallback(monkeypatch, tmp_path):
+    from mantis.config import ModelRoutingPolicy
+
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("LITELLM_URL", "http://litellm.example.test")
+    monkeypatch.setenv("LITELLM_API_KEY", "k")
+
+    captured: dict[str, Any] = {}
+
+    def fake_qualify_models(*a, **kw):
+        captured.update(kw)
+        return _fake_qualification_run(passed=True)
+
+    monkeypatch.setattr(eval_cli, "qualify_models", fake_qualify_models)
+
+    eval_cli.main(
+        [
+            "qualify",
+            "--models",
+            "model-a,model-c",
+            "--fallback",
+            "model-b",
+            "--out",
+            str(tmp_path / "q.jsonl"),
+        ]
+    )
+
+    policies = captured["routing_policies"]
+    assert policies["model-a"] == ModelRoutingPolicy(
+        primary_alias="model-a", fallback_aliases=("model-b",), max_attempts=2
+    )
+    assert policies["model-c"] == ModelRoutingPolicy(
+        primary_alias="model-c", fallback_aliases=("model-b",), max_attempts=2
+    )
+
+
+def test_qualify_reports_no_routing_policies_without_fallback(monkeypatch, tmp_path):
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("LITELLM_URL", "http://litellm.example.test")
+    monkeypatch.setenv("LITELLM_API_KEY", "k")
+
+    captured: dict[str, Any] = {}
+
+    def fake_qualify_models(*a, **kw):
+        captured.update(kw)
+        return _fake_qualification_run(passed=True)
+
+    monkeypatch.setattr(eval_cli, "qualify_models", fake_qualify_models)
+
+    eval_cli.main(["qualify", "--models", "model-a,model-b", "--out", str(tmp_path / "q.jsonl")])
+
+    assert captured["routing_policies"] is None
+
+
+def test_qualify_rejects_a_malformed_fallback_list_cleanly(monkeypatch, tmp_path, capsys):
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("LITELLM_URL", "http://litellm.example.test")
+    monkeypatch.setenv("LITELLM_API_KEY", "k")
+
+    exit_code = eval_cli.main(
+        ["qualify", "--models", "model-a", "--fallback", "model-b,,model-c", "--out", str(tmp_path / "q.jsonl")]
+    )
+
+    assert exit_code == 1
+    assert "Configuration error" in capsys.readouterr().err

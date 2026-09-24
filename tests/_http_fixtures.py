@@ -13,11 +13,12 @@ test modules.
 
 from __future__ import annotations
 
+import json
 import socket
 import ssl
 import threading
 from http.server import BaseHTTPRequestHandler, HTTPServer
-from typing import Callable
+from typing import Any, Callable
 
 
 class HTTPTestServer:
@@ -48,6 +49,9 @@ class HTTPTestServer:
                 self._dispatch()
 
             def do_HEAD(self) -> None:  # noqa: N802
+                self._dispatch()
+
+            def do_POST(self) -> None:  # noqa: N802
                 self._dispatch()
 
             def _dispatch(self) -> None:
@@ -81,6 +85,16 @@ class HTTPTestServer:
 
     def __exit__(self, *exc_info: object) -> None:
         self.close()
+
+
+def read_json_body(handler: BaseHTTPRequestHandler) -> Any:
+    """Read and JSON-decode a POST/PUT request body using its own
+    ``Content-Length`` — the counterpart to :func:`send_simple` for a
+    route handler that needs to inspect what was actually sent, not
+    just serve a canned response."""
+    length = int(handler.headers.get("Content-Length", 0))
+    raw = handler.rfile.read(length) if length else b""
+    return json.loads(raw) if raw else None
 
 
 def send_simple(handler: BaseHTTPRequestHandler, status: int, *, headers: dict[str, str] | None = None, body: bytes = b"") -> None:

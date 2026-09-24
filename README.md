@@ -258,7 +258,9 @@ mantis run system-troubleshooter "Investigate why db-primary-02 keeps failing he
 - [docs/configuration.md](docs/configuration.md) — the `.env.*` convention and all environment variables
 - [docs/security.md](docs/security.md) — least privilege, credentials, future mutation gates
 - [docs/reliability.md](docs/reliability.md) — timeouts, retries, failure taxonomy, run/tool deadlines, run-local short circuit
+- [docs/model-routing.md](docs/model-routing.md) — deterministic server-side model-call routing/fallback: policy configuration, failure taxonomy, budgets, observability
 - [docs/development.md](docs/development.md) — contributor workflow: tests, adding integrations/tools/agents, style
 - [docs/evaluation.md](docs/evaluation.md) — model qualification/evaluation harness: running scenarios, adding a new one
+- [docs/model-qualification.md](docs/model-qualification.md) — the checked-in model-qualification report: baseline suite results, role eligibility, requalification triggers
 - [docs/observability.md](docs/observability.md) — structured JSON log event schema, Prometheus metrics catalog, LogQL/PromQL examples
 - [docs/release.md](docs/release.md) — conventional commits, SemVer policy, how release-please cuts a release

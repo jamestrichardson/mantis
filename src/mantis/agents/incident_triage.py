@@ -44,7 +44,7 @@ import sys
 # DNS, HTTP, TLS, Git, Kubernetes, Prometheus, Loki) into the shared
 # default_registry as a side effect.
 import mantis.tools  # noqa: F401
-from mantis.config import ConfigurationError, LiteLLMConfig
+from mantis.config import ConfigurationError, LiteLLMConfig, ModelRoutingPolicy
 from mantis.registry import ToolRegistry, default_registry
 from mantis.runtime import AgentRuntime, MaxIterationsExceededError
 
@@ -351,9 +351,17 @@ def build_runtime() -> AgentRuntime:
     this agent specifically when set, falling back to ``LITELLM_MODEL``
     (then the built-in default) otherwise — never a provider-specific
     model ID hardcoded here, and never a field a caller can set through
-    the API or CLI. This is a minimal precursor to #16's full model
-    routing/escalation policy, not that policy itself: no fallback,
-    retry, or escalation across models happens in this agent.
+    the API or CLI.
+
+    ``routing_policy`` (#16) is resolved the same way, via
+    ``ModelRoutingPolicy.from_env`` —
+    ``MANTIS_INCIDENT_TRIAGE_MODEL_FALLBACKS``/``LITELLM_MODEL_FALLBACKS``
+    for ordered fallback aliases, unset by default (a single route, no
+    fallback attempts, exactly as before #16). Fallback here means
+    retrying this exact same logical model call against the next
+    configured alias — never restarting the incident investigation or
+    replaying an already-executed evidence-gathering tool call. See
+    ``mantis.config.ModelRoutingPolicy`` and ``docs/model-routing.md``.
     """
     _assert_all_tools_registered_read_only(ALLOWED_TOOLS)
     return AgentRuntime(
@@ -364,6 +372,11 @@ def build_runtime() -> AgentRuntime:
         max_iterations=MAX_ITERATIONS,
         temperature=0.1,
         model_config=LiteLLMConfig.from_env(model_env=MODEL_ENV),
+        routing_policy=ModelRoutingPolicy.from_env(
+            model_env=MODEL_ENV,
+            fallback_env=f"{MODEL_ENV}_FALLBACKS",
+            max_attempts_env=f"{MODEL_ENV}_MAX_ATTEMPTS",
+        ),
     )
 
 
