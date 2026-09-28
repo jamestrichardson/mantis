@@ -22,7 +22,7 @@ jobs:
       # other workflows (anti-recursion), which would silently break the
       # downstream GHCR publish workflow's `on: release` trigger. A
       # GitHub App installation token behaves like a real actor instead.
-      - uses: actions/create-github-app-token@v2
+      - uses: actions/create-github-app-token@v3
         id: app-token
         with:
           app-id: ${{ secrets.RELEASE_PLEASE_APP_ID }}
