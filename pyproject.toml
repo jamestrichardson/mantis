@@ -19,7 +19,7 @@ dependencies = [
     "fastapi>=0.141.1",
     "uvicorn[standard]>=0.30.0",
     "dnspython>=2.8.0",
-    "cryptography>=42.0.0",
+    "cryptography>=50.0.1",
     "dulwich>=1.2.15",
 ]
 
