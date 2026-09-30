@@ -37,7 +37,7 @@ jobs:
     if: github.event_name == 'pull_request' && github.actor != 'dependabot[bot]'
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - uses: docker/setup-qemu-action@v3
         with:
@@ -126,7 +126,7 @@ jobs:
     if: github.event_name == 'push'
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - uses: docker/setup-qemu-action@v3
         with:
@@ -219,7 +219,7 @@ jobs:
     if: github.event_name == 'release' && !github.event.release.prerelease
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       # release-please tags as `mantis-v1.2.3` (package-scoped, so a future
       # monorepo split wouldn't collide); strip the prefix to get the bare
