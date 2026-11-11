@@ -37,7 +37,11 @@ import re
 from dataclasses import dataclass, field
 from ipaddress import ip_address
 from pathlib import Path
+from typing import TYPE_CHECKING, Any
 from urllib.parse import urlsplit
+
+if TYPE_CHECKING:
+    from mantis.routing import ModelCallFailureKind
 
 from dotenv import load_dotenv
 
@@ -205,6 +209,161 @@ class LiteLLMConfig:
             api_key=_require_secret("LITELLM_API_KEY"),
             model=model,
         )
+
+
+MAX_ROUTING_ALIASES = 5
+"""Bound on ``ModelRoutingPolicy``'s total configured routes (primary +
+fallbacks) — a deliberately small, generous-enough cap that prevents
+pathological configuration growth, not a tuning knob. See
+``docs/model-routing.md``."""
+
+
+@dataclass(frozen=True)
+class ModelRoutingPolicy:
+    """A stable, server-side model-call routing policy for one agent
+    (#16): one primary LiteLLM alias, zero or more ordered fallback
+    aliases, and a bounded number of attempts per *logical model call*
+    (one model step in ``AgentRuntime``'s conversation loop — never a
+    whole-run/whole-investigation restart, see ``mantis.routing`` and
+    ``docs/model-routing.md``).
+
+    This is entirely a data/validation layer — no attempt/fallback
+    *logic* lives here (that's ``AgentRuntime``, see
+    ``mantis.routing.classify_model_call_exception``). Never
+    caller-supplied through the API/CLI: ``mantis.api.schemas.RunRequest``
+    has ``extra="forbid"`` and no model/alias field at all, and
+    ``build_runtime()`` is the only place a ``ModelRoutingPolicy`` is
+    ever constructed for a real agent.
+
+    Existing single-model configuration keeps working unchanged as a
+    one-route policy — see :meth:`single`.
+    """
+
+    primary_alias: str
+    fallback_aliases: tuple[str, ...] = ()
+    max_attempts: int = 1
+    eligible_failure_kinds: frozenset[ModelCallFailureKind] | None = None
+
+    def __post_init__(self) -> None:
+        # Deferred import: mantis.routing has no dependency on
+        # mantis.config, but importing it at module scope here would
+        # still work fine -- kept as a local import purely so this
+        # module's own import graph stays exactly as shallow as before
+        # for every caller that never touches routing.
+        from mantis.routing import DEFAULT_ELIGIBLE_FAILURE_KINDS
+
+        if self.eligible_failure_kinds is None:
+            object.__setattr__(self, "eligible_failure_kinds", DEFAULT_ELIGIBLE_FAILURE_KINDS)
+
+        if not self.primary_alias or not self.primary_alias.strip():
+            raise ConfigurationError("ModelRoutingPolicy requires a non-empty primary_alias")
+        for alias in self.fallback_aliases:
+            if not alias or not alias.strip():
+                raise ConfigurationError("ModelRoutingPolicy's fallback_aliases must not contain an empty alias")
+        if self.primary_alias in self.fallback_aliases:
+            raise ConfigurationError(
+                f"ModelRoutingPolicy's primary_alias {self.primary_alias!r} must not also "
+                "appear in fallback_aliases"
+            )
+        if len(set(self.fallback_aliases)) != len(self.fallback_aliases):
+            raise ConfigurationError("ModelRoutingPolicy's fallback_aliases must not contain duplicates")
+        total_routes = 1 + len(self.fallback_aliases)
+        if total_routes > MAX_ROUTING_ALIASES:
+            raise ConfigurationError(
+                f"ModelRoutingPolicy allows at most {MAX_ROUTING_ALIASES} total routes "
+                f"(1 primary + fallbacks), got {total_routes}"
+            )
+        _check_at_least("max_attempts", self.max_attempts, 1)
+        if self.max_attempts > total_routes:
+            raise ConfigurationError(
+                f"ModelRoutingPolicy's max_attempts ({self.max_attempts}) cannot exceed "
+                f"the number of configured routes ({total_routes})"
+            )
+
+    @property
+    def aliases(self) -> tuple[str, ...]:
+        """Every configured route, primary first, in attempt order."""
+        return (self.primary_alias,) + self.fallback_aliases
+
+    @classmethod
+    def single(cls, alias: str) -> "ModelRoutingPolicy":
+        """A one-route policy wrapping a single alias — what every
+        existing single-model agent gets automatically when it doesn't
+        opt into real fallback routing. No fallback, no extra attempt;
+        behaviorally identical to Mantis before #16."""
+        return cls(primary_alias=alias, fallback_aliases=(), max_attempts=1)
+
+    @classmethod
+    def from_litellm_config(cls, config: "LiteLLMConfig", **kwargs: Any) -> "ModelRoutingPolicy":
+        """Map an existing, already-resolved ``LiteLLMConfig`` cleanly
+        into a one-route policy using its ``.model`` as the primary
+        alias — the documented bridge from "agent-specific model
+        configuration" to a routing policy (see the Configuration AC in
+        #16). Pass ``fallback_aliases=(...)``/``max_attempts=``/
+        ``eligible_failure_kinds=`` as keyword arguments to add real
+        fallback routes on top of it."""
+        return cls(primary_alias=config.model, **kwargs)
+
+    @classmethod
+    def from_env(
+        cls,
+        *,
+        model_env: str | None = None,
+        fallback_env: str | None = None,
+        max_attempts_env: str | None = None,
+    ) -> "ModelRoutingPolicy":
+        """Resolve a routing policy from the environment, mirroring
+        :meth:`LiteLLMConfig.from_env`'s precedence for the primary
+        alias exactly (``model_env`` override -> ``LITELLM_MODEL`` ->
+        :data:`DEFAULT_LITELLM_MODEL`).
+
+        Fallback aliases: a comma-separated list from ``fallback_env``
+        (if given and set) -> ``LITELLM_MODEL_FALLBACKS`` -> none.
+        Unset/absent means exactly today's single-model behavior — no
+        operator has to configure anything new to keep existing
+        deployments working.
+
+        ``max_attempts``: an integer from ``max_attempts_env`` (if given
+        and set) -> ``LITELLM_MODEL_MAX_ATTEMPTS`` -> one attempt per
+        configured route (primary + every fallback), the most permissive
+        default that still respects :data:`MAX_ROUTING_ALIASES`.
+        """
+        primary = None
+        if model_env is not None:
+            primary = os.environ.get(model_env) or None
+        if primary is None:
+            primary = os.environ.get("LITELLM_MODEL") or DEFAULT_LITELLM_MODEL
+
+        fallback_raw = None
+        if fallback_env is not None:
+            fallback_raw = os.environ.get(fallback_env) or None
+        if fallback_raw is None:
+            fallback_raw = os.environ.get("LITELLM_MODEL_FALLBACKS") or None
+        # Every comma-separated segment is preserved (stripped, but never
+        # dropped for being empty) -- a malformed value like "a,,b" or a
+        # trailing comma must fail loudly via ModelRoutingPolicy's own
+        # empty-alias validation below, not be silently normalized into
+        # a shorter, seemingly-valid list.
+        fallback_aliases = (
+            tuple(a.strip() for a in fallback_raw.split(",")) if fallback_raw else ()
+        )
+
+        max_attempts_raw = None
+        if max_attempts_env is not None:
+            max_attempts_raw = os.environ.get(max_attempts_env) or None
+        if max_attempts_raw is None:
+            max_attempts_raw = os.environ.get("LITELLM_MODEL_MAX_ATTEMPTS") or None
+        default_max_attempts = 1 + len(fallback_aliases)
+        if max_attempts_raw is None:
+            max_attempts = default_max_attempts
+        else:
+            try:
+                max_attempts = int(max_attempts_raw)
+            except ValueError as exc:
+                name = max_attempts_env or "LITELLM_MODEL_MAX_ATTEMPTS"
+                raise ConfigurationError(f"{name} must be an integer, got {max_attempts_raw!r}") from exc
+
+        return cls(primary_alias=primary, fallback_aliases=fallback_aliases, max_attempts=max_attempts)
 
 
 @dataclass(frozen=True)

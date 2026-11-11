@@ -102,15 +102,21 @@ Agents specialize primarily through:
    shape.
 2. **Allowed tools** — what it can actually observe/do.
 3. **Model configuration** — which model/settings to use. Every
-   built-in agent resolves its `model_config` via
-   `LiteLLMConfig.from_env(model_env="MANTIS_<AGENT>_MODEL")`, so an
-   optional agent-specific environment variable (e.g.
-   `MANTIS_AWX_TROUBLESHOOTER_MODEL`) can pin that agent to a different
-   LiteLLM alias than the global `LITELLM_MODEL` default — see
-   [docs/configuration.md](configuration.md#per-agent-model-overrides).
-   This is a minimal precursor to #16's full model routing/escalation
-   policy, not that policy itself, and stays entirely server-side
-   configuration — never a field a caller sets through the API or CLI.
+   built-in agent resolves both a `model_config` (via
+   `LiteLLMConfig.from_env(model_env="MANTIS_<AGENT>_MODEL")`) and a
+   `routing_policy` (via `ModelRoutingPolicy.from_env(model_env=...,
+   fallback_env=..., max_attempts_env=...)`, #16) — an optional
+   agent-specific environment variable (e.g.
+   `MANTIS_AWX_TROUBLESHOOTER_MODEL`/`MANTIS_AWX_TROUBLESHOOTER_MODEL_FALLBACKS`)
+   can pin that agent to a different LiteLLM alias, and a small ordered
+   fallback list, than the global `LITELLM_MODEL`/`LITELLM_MODEL_FALLBACKS`
+   defaults — see
+   [docs/configuration.md](configuration.md#per-agent-model-overrides)
+   and [docs/model-routing.md](model-routing.md) for the full design.
+   This stays entirely server-side configuration — never a field a
+   caller sets through the API or CLI — and fallback is bounded,
+   deterministic model-*call* routing within one logical model step,
+   never a whole-run restart.
 
 Agents should *not* specialize by embedding tool or integration logic
 directly in the agent module.

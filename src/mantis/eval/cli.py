@@ -5,6 +5,8 @@
     mantis eval list-models
     mantis eval qualify --models mantis-reasoning,mantis-fast --out qualification.jsonl
     mantis eval qualify --models alias-a,alias-b --suite fast --out qualification.jsonl
+    mantis eval qualify --models alias-a --suite fast --out primary-only.jsonl
+    mantis eval qualify --models alias-a --fallback alias-b --suite fast --out primary-plus-fallback.jsonl
 """
 
 from __future__ import annotations
@@ -17,7 +19,7 @@ from datetime import datetime, timezone
 
 # Importing mantis.eval registers all built-in scenarios as a side effect.
 import mantis.eval  # noqa: F401
-from mantis.config import ConfigurationError, LiteLLMConfig, get_metrics_enabled
+from mantis.config import ConfigurationError, LiteLLMConfig, ModelRoutingPolicy, get_metrics_enabled
 from mantis.eval.qualification import (
     FAST_QUALIFICATION_SCENARIOS,
     FAST_QUALIFICATION_SUITE_ID,
@@ -183,14 +185,40 @@ _QUALIFY_SUITES: dict[str, tuple[tuple[str, ...], str, str]] = {
 
 def _cmd_qualify(args: argparse.Namespace) -> int:
     model_aliases = [m.strip() for m in args.models.split(",") if m.strip()]
-    if len(model_aliases) < 2:
+    # Every comma-separated segment preserved (never dropped for being
+    # empty) -- same "fail loudly, don't silently normalize" contract
+    # as ModelRoutingPolicy.from_env's own fallback parsing. An empty
+    # segment (e.g. "a,,b") is rejected below by ModelRoutingPolicy's
+    # own validation, not silently filtered out here.
+    fallback_aliases = tuple(a.strip() for a in args.fallback.split(",")) if args.fallback else ()
+
+    # The normal two-alias minimum is about comparing candidates
+    # against each other; qualifying one candidate's own fallback
+    # behavior (--fallback) is a different, single-alias-legitimate
+    # workflow.
+    if len(model_aliases) < 2 and not fallback_aliases:
         print("--models must list at least two model aliases to qualify", file=sys.stderr)
+        return 1
+    if not model_aliases:
+        print("--models must list at least one model alias", file=sys.stderr)
         return 1
 
     scenario_names, suite_id, suite_version = _QUALIFY_SUITES[args.suite]
 
     try:
         base_config = LiteLLMConfig.from_env()
+        routing_policies = (
+            {
+                alias: ModelRoutingPolicy(
+                    primary_alias=alias,
+                    fallback_aliases=fallback_aliases,
+                    max_attempts=1 + len(fallback_aliases),
+                )
+                for alias in model_aliases
+            }
+            if fallback_aliases
+            else None
+        )
     except ConfigurationError as exc:
         print(f"Configuration error: {exc}", file=sys.stderr)
         return 1
@@ -201,12 +229,17 @@ def _cmd_qualify(args: argparse.Namespace) -> int:
         suite_id=suite_id,
         suite_version=suite_version,
         base_model_config=base_config,
+        routing_policies=routing_policies,
     )
 
     out_path = args.out or _default_qualification_output_path(run.suite_id)
     records_path, raw_path = write_qualification_artifacts(run, out_path)
 
     print(f"Suite: {run.suite_id} (scenarios: {len(run.scenario_names)}, models: {len(run.model_aliases)})")
+    if fallback_aliases:
+        print(f"Routing: primary + fallback {list(fallback_aliases)} (max_attempts={1 + len(fallback_aliases)})")
+    else:
+        print("Routing: primary-only (no --fallback given)")
     print()
     print(format_result_matrix(run))
     print()
@@ -223,7 +256,6 @@ def _cmd_qualify(args: argparse.Namespace) -> int:
     # that's a suite-authoring gap flagged in the printed matrix/role
     # eligibility output, not a candidate failure.
     return 0 if all(r.outcome == "ok" and r.passed is not False for r in run.records) else 1
-
 
 def _cmd_list_scenarios(_args: argparse.Namespace) -> int:
     for scenario in default_scenarios.all():
@@ -280,6 +312,18 @@ def build_parser() -> argparse.ArgumentParser:
         default="core",
         help="Which checked-in baseline to run: 'core' (mantis-core-qualification-v1, all ten scenarios, "
         "default) or 'fast' (mantis-fast-qualification-v1, the smaller checked-in subset)",
+    )
+    qualify_parser.add_argument(
+        "--fallback",
+        default=None,
+        help="Comma-separated, ordered fallback LiteLLM alias(es) (#16). When given, every "
+        "--models alias is qualified with a ModelRoutingPolicy(primary_alias=<that alias>, "
+        "fallback_aliases=<this list>) instead of the single-route default -- run the same "
+        "--models/--suite invocation once with and once without --fallback to compare "
+        "primary-only vs. primary+fallback. Relaxes --models to allow a single alias (the "
+        "normal two-alias-minimum is about comparing candidates against each other, not "
+        "relevant to qualifying one candidate's own fallback behavior). Never accepts an "
+        "arbitrary backend/provider model ID -- only LiteLLM aliases, exactly like --models.",
     )
     qualify_parser.set_defaults(func=_cmd_qualify)
 

@@ -258,8 +258,11 @@ issue:
 - **No incident automation or escalation** (tracked separately,
   #12/#25) — it produces an assessment for a human to read, it does not
   page anyone or open a ticket.
-- **No dynamic model routing** (tracked separately, #16) — model
-  selection today is a single configured `LITELLM_MODEL` alias.
+- **No adaptive/learned model routing.** Deterministic, server-side
+  fallback across a small set of configured aliases is available (#16,
+  see [docs/model-routing.md](model-routing.md)) — but there is no
+  model self-selection, confidence-based escalation, or routing decided
+  from generated prose.
 - **No new integrations or generic HTTP/shell/kubectl access** — its
   capability surface is exactly the six tools listed above, nothing
   more.

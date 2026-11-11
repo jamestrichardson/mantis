@@ -102,11 +102,27 @@ class EvalResult:
             iteration's response carried this field; never guessed.
         error_summary: A bounded, safe summary of an ``outcome=="error"``
             failure (exception class name + HTTP status code only, see
-            ``mantis.eval.runner._safe_model_call_detail``) — ``None``
+            ``mantis.routing.safe_model_call_detail``) — ``None``
             whenever ``error`` is. This is what
             ``mantis.eval.qualification.QualificationRecord`` copies
             into its own committed-safe ``error`` field; ``error``
             above is never copied there directly.
+        requested_primary_alias: The routing policy's primary alias for
+            this run (``AgentRuntime.routing_policy.primary_alias``, #16)
+            — the alias that was *asked for*, distinct from
+            ``final_alias`` below (which alias actually produced the
+            response). Equal to ``model`` for every run that used no
+            explicit routing policy (the default one-route case).
+        final_alias: The alias of the last successful attempt in
+            ``route_attempts`` (i.e. whichever route actually produced
+            the run's last model response) — ``None`` if no attempt
+            ever succeeded (e.g. every route failed).
+        route_attempts: The full, bounded model-call attempt history for
+            this run (see ``mantis.routing.ModelCallAttempt.to_dict``) —
+            every attempt across every iteration, including attempts
+            that failed and triggered a fallback. Distinct from
+            ``tool_calls``: this is model-*call* history, never inflated
+            by, and never inflating, actual tool execution counts.
     """
 
     scenario: str
@@ -135,6 +151,9 @@ class EvalResult:
     # every positional argument after it. See tests/eval/test_runner.py.
     backend_model: str | None = None
     error_summary: str | None = None
+    requested_primary_alias: str | None = None
+    final_alias: str | None = None
+    route_attempts: list[dict[str, Any]] = field(default_factory=list)
 
     def to_dict(self) -> dict[str, Any]:
         # dataclasses.asdict recurses into the nested ToolCallSummary

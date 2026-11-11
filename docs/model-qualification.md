@@ -20,6 +20,16 @@ artifact was deleted for exactly this reason; its genuine
 model-behavior findings are preserved below under "Historical
 findings," clearly labeled pre-fix.
 
+**This run predates #16.** It was captured on #13's own branch, before
+model-call routing/fallback merged, so `QualificationRecord`'s
+`final_alias`/`failed_route_attempts` fields (added by #16) don't
+appear in the committed JSONL — every record here used exactly one
+route (the requested alias itself), which is what `resolved_backend_model`
+already confirms. This is expected schema provenance, not a defect;
+nothing in Mantis reconstructs a `QualificationRecord` from the
+committed JSONL back into code, so there's no compatibility break, only
+a documentation note.
+
 **Why the core suite, not fast**: issue #13's baseline explicitly
 requires at least one multi-tool System Troubleshooter scenario
 (`system-troubleshooter-full-investigation`), which only the core

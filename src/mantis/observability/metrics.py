@@ -70,6 +70,24 @@ MODEL_TOKENS_TOTAL = Counter(
     ["agent", "model_alias", "environment"],
     registry=REGISTRY,
 )
+MODEL_CALL_FAILURES_TOTAL = Counter(
+    "mantis_model_call_failures_total",
+    "Total model completion call attempts that failed, by classified failure kind (#16)",
+    ["agent", "model_alias", "failure_kind", "environment"],
+    registry=REGISTRY,
+)
+MODEL_ROUTING_FALLBACKS_TOTAL = Counter(
+    "mantis_model_routing_fallbacks_total",
+    "Total times an eligible model-call failure triggered a fallback to the next configured route (#16)",
+    ["agent", "environment"],
+    registry=REGISTRY,
+)
+MODEL_ROUTING_EXHAUSTED_TOTAL = Counter(
+    "mantis_model_routing_exhausted_total",
+    "Total logical model calls where every configured routing attempt failed (#16)",
+    ["agent", "environment"],
+    registry=REGISTRY,
+)
 TOOL_CALLS_TOTAL = Counter(
     "mantis_tool_calls_total",
     "Total tool call attempts",

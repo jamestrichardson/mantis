@@ -255,8 +255,12 @@ which the response's `outcome`/`error` fields describe:
 `error.kind` values: `max_iterations` (the model/tool loop never
 converged — see `mantis.runtime.MaxIterationsExceededError`),
 `run_timeout` (the run's configured time budget, #15, was exceeded),
-`model_provider_error` (LiteLLM/the upstream model provider could not
-complete the request), `server_configuration_error` (a required
+`model_routing_exhausted` (#16: every configured route — primary and
+any fallback aliases — failed for one logical model call; see
+`mantis.runtime.ModelRoutingExhaustedError`), `model_provider_error`
+(LiteLLM/the upstream model provider could not complete the request —
+a single-route policy's only attempt failed, so there was no
+fallback to exhaust), `server_configuration_error` (a required
 integration is misconfigured — discovered only once a tool actually
 needed it; contrast with the *agent-unavailable* rejection below, which
 catches the common case up front), `internal_error` (anything else

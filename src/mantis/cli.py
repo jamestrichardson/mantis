@@ -128,7 +128,7 @@ def _print_usage() -> None:
     print("       mantis run <agent> <prompt>")
     print("       mantis <agent-name> <prompt>")
     print("       mantis serve")
-    print("       mantis eval <run|list-scenarios|list-models> ...")
+    print("       mantis eval <run|qualify|list-scenarios|list-models> ...")
     print("Convenience agent commands:")
     for agent_name in CONVENIENCE_AGENTS:
         print(f"  {agent_name}")
